@@ -1,5 +1,7 @@
 ..
   ::
+  {-# OPTIONS --sized-types #-}
+
   module language.sized-types where
 
 .. _sized-types:
@@ -44,7 +46,7 @@ The built-in combinators for sizes are described in :ref:`builtin_sized_types`.
 Example for coinduction: finite languages
 -----------------------------------------
 
-See `Abel 2017`_ and `Traytel 2016`_.
+See `Abel 2017`_ and `Traytel 2017`_.
 
 Decidable languages can be represented as infinite trees. Each node has as many
 children as the number of characters in the alphabet ``A``. Each path from the root
@@ -172,15 +174,15 @@ Note how the size of the word we test for membership cannot be
 larger than the depth to which the language tree is defined.
 
 If we want to use regular, non-sized lists, we need to ask for the
-language to have size ``ω``.
+language to have size ``∞``.
 
 ::
 
-      _∈_ : ∀ {A} → List A → Lang ω A → Bool
+      _∈_ : ∀ {A} → List A → Lang ∞ A → Bool
       []      ∈ a = ν a
       (x ∷ w) ∈ a = w ∈ δ a x
 
-Intuitively, ``ω`` is a ``Size`` larger than the size of any term
+Intuitively, ``∞`` is a ``Size`` larger than the size of any term
 than one could possibly define in Agda.
 
 Now, let's consider binary strings as words. First, we
@@ -228,8 +230,10 @@ References
 
 .. _`Abel 2017`:
 
-   `Equational Reasoning about Formal Languages in Coalgebraic Style, Andreas Abel <https://www.cse.chalmers.se/~abela/jlamp17.pdf>`_.
+   `Equational Reasoning about Formal Languages in Coalgebraic Style,
+   Andreas Abel <http://www.cse.chalmers.se/~abela/jlamp17.pdf>`_.
 
-.. _`Traytel 2016`:
+.. _`Traytel 2017`:
 
-   `Formal Languages, Formally and Coinductively, Dmitriy Traytel, FSCD (2016) <https://www21.in.tum.de/~traytel/papers/fscd16-coind_lang/paper.pdf>`_.
+   `Formal Languages, Formally and Coinductively, Dmitriy Traytel,
+   LMCS Vol. 13(3:28)2017, pp. 1–22 (2017) <http://doi.org/10.23638/LMCS-13(3:28)2017>`_.

@@ -1,15 +1,22 @@
 
 module Agda.TypeChecking.MetaVars.Mention where
 
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
+import qualified Data.Set as Set
+
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 import Agda.TypeChecking.Monad
 
 class MentionsMeta t where
-  mentionsMeta :: MetaId -> t -> Bool
+  mentionsMetas :: HashSet MetaId -> t -> Bool
+
+mentionsMeta :: MentionsMeta t => MetaId -> t -> Bool
+mentionsMeta = mentionsMetas . HashSet.singleton
 
 instance MentionsMeta Term where
-  mentionsMeta x v = case v of
+  mentionsMetas xs = \case
     Var _ args   -> mm args
     Lam _ b      -> mm b
     Lit{}        -> False
@@ -18,93 +25,111 @@ instance MentionsMeta Term where
     Pi a b       -> mm (a, b)
     Sort s       -> mm s
     Level l      -> mm l
+    Dummy{}      -> False
     DontCare v   -> False   -- we don't have to look inside don't cares when deciding to wake constraints
-    MetaV y args -> x == y || mm args   -- TODO: we really only have to look one level deep at meta args
-    Shared p     -> mm $ derefPtr p
+    MetaV y args -> HashSet.member y xs || mm args   -- TODO: we really only have to look one level deep at meta args
     where
-      mm v = mentionsMeta x v
+      mm :: forall t. MentionsMeta t => t -> Bool
+      mm = mentionsMetas xs
 
 instance MentionsMeta Level where
-  mentionsMeta x (Max as) = mentionsMeta x as
+  mentionsMetas xs (Max _ as) = mentionsMetas xs as
 
 instance MentionsMeta PlusLevel where
-  mentionsMeta x ClosedLevel{} = False
-  mentionsMeta x (Plus _ a) = mentionsMeta x a
+  mentionsMetas xs (Plus _ a) = mentionsMetas xs a
 
-instance MentionsMeta LevelAtom where
-  mentionsMeta x l = case l of
-    MetaLevel m vs   -> x == m || mentionsMeta x vs
-    BlockedLevel m _ -> x == m    -- if it's blocked on a different meta it doesn't matter if it mentions the meta somewhere else
-    UnreducedLevel l -> mentionsMeta x l
-    NeutralLevel _ l -> mentionsMeta x l
+instance MentionsMeta Blocker where
+  mentionsMetas xs (UnblockOnAll bs)  = mentionsMetas xs $ Set.toList bs
+  mentionsMetas xs (UnblockOnAny bs)  = mentionsMetas xs $ Set.toList bs
+  mentionsMetas xs (UnblockOnMeta x)  = HashSet.member x xs
+  mentionsMetas xs UnblockOnProblem{} = False
 
 instance MentionsMeta Type where
-    mentionsMeta x (El s t) = mentionsMeta x (s, t)
+    mentionsMetas xs (El s t) = mentionsMetas xs (s, t)
 
 instance MentionsMeta Sort where
-  mentionsMeta x s = case s of
-    Type l     -> mentionsMeta x l
-    Prop       -> False
-    Inf        -> False
+  mentionsMetas xs = \case
+    Type l     -> mentionsMetas xs l
+    Prop l     -> mentionsMetas xs l
+    Inf _ _    -> False
+    SSet l     -> mentionsMetas xs l
     SizeUniv   -> False
-    DLub s1 s2 -> mentionsMeta x (s1, s2)
+    LockUniv   -> False
+    IntervalUniv -> False
+    PiSort a s1 s2 -> mentionsMetas xs (a, s1, s2)
+    FunSort s1 s2 -> mentionsMetas xs (s1, s2)
+    UnivSort s -> mentionsMetas xs s
+    MetaS m es -> HashSet.member m xs || mentionsMetas xs es
+    DefS d es  -> mentionsMetas xs es
+    DummyS{}   -> False
 
 instance MentionsMeta t => MentionsMeta (Abs t) where
-  mentionsMeta x = mentionsMeta x . unAbs
+  mentionsMetas xs = mentionsMetas xs . unAbs
 
 instance MentionsMeta t => MentionsMeta (Arg t) where
-  mentionsMeta x a | isIrrelevant a = False
-  -- ^ we don't have to look inside irrelevant arguments when deciding to wake constraints
-  mentionsMeta x a = mentionsMeta x (unArg a)
+  mentionsMetas xs a | isIrrelevant a = False
+  -- we don't have to look inside irrelevant arguments when deciding to wake constraints
+  mentionsMetas xs a = mentionsMetas xs (unArg a)
 
 instance MentionsMeta t => MentionsMeta (Dom t) where
-  mentionsMeta x = mentionsMeta x . unDom
+  mentionsMetas xs = mentionsMetas xs . unDom
 
 instance MentionsMeta t => MentionsMeta [t] where
-  mentionsMeta x = any (mentionsMeta x)
+  mentionsMetas xs = any (mentionsMetas xs)
 
 instance MentionsMeta t => MentionsMeta (Maybe t) where
-  mentionsMeta x = maybe False (mentionsMeta x)
+  mentionsMetas xs = maybe False (mentionsMetas xs)
 
 instance (MentionsMeta a, MentionsMeta b) => MentionsMeta (a, b) where
-  mentionsMeta x (a, b) = mentionsMeta x a || mentionsMeta x b
+  mentionsMetas xs (a, b) = mentionsMetas xs a || mentionsMetas xs b
 
 instance (MentionsMeta a, MentionsMeta b, MentionsMeta c) => MentionsMeta (a, b, c) where
-  mentionsMeta x (a, b, c) = mentionsMeta x a || mentionsMeta x b || mentionsMeta x c
+  mentionsMetas xs (a, b, c) = mentionsMetas xs a || mentionsMetas xs b || mentionsMetas xs c
 
 instance MentionsMeta a => MentionsMeta (Closure a) where
-  mentionsMeta x cl = mentionsMeta x (clValue cl)
+  mentionsMetas xs cl = mentionsMetas xs (clValue cl)
 
 instance MentionsMeta Elim where
-  mentionsMeta x Proj{} = False
-  mentionsMeta x (Apply v) = mentionsMeta x v
-  mentionsMeta x (IApply y0 y1 v) = mentionsMeta x (y0,y1,v)
+  mentionsMetas xs Proj{} = False
+  mentionsMetas xs (Apply v) = mentionsMetas xs v
+  mentionsMetas xs (IApply y0 y1 v) = mentionsMetas xs (y0,y1,v)
 
 instance MentionsMeta a => MentionsMeta (Tele a) where
-  mentionsMeta x EmptyTel = False
-  mentionsMeta x (ExtendTel a b) = mentionsMeta x (a, b)
+  mentionsMetas xs EmptyTel = False
+  mentionsMetas xs (ExtendTel a b) = mentionsMetas xs (a, b)
 
 instance MentionsMeta ProblemConstraint where
-  mentionsMeta x = mentionsMeta x . theConstraint
+  mentionsMetas xs = mentionsMetas xs . theConstraint
 
 instance MentionsMeta Constraint where
-  mentionsMeta x c = case c of
+  mentionsMetas xs = \case
     ValueCmp _ t u v    -> mm (t, u, v)
     ValueCmpOnFace _ p t u v    -> mm ((p,t), u, v)
     ElimCmp _ _ t v as bs -> mm ((t, v), (as, bs))
     LevelCmp _ u v      -> mm (u, v)
-    TypeCmp _ a b       -> mm (a, b)
-    TelCmp a b _ u v    -> mm ((a, b), (u, v))
     SortCmp _ a b       -> mm (a, b)
-    Guarded{}           -> False  -- This gets woken up when the problem it's guarded by is solved
     UnBlock _           -> True   -- this might be a postponed typechecking
                                   -- problem and we don't have a handle on
                                   -- what metas it depends on
-    FindInScope{}       -> True   -- this needs to be woken up for any meta
+    FindInstance{}      -> True   -- this needs to be woken up for any meta
     IsEmpty r t         -> mm t
     CheckSizeLtSat t    -> mm t
+    CheckFunDef{}       -> True   -- not sure what metas this depends on
+    HasBiggerSort a     -> mm a
+    HasPTSRule a b      -> mm (a, b)
+    UnquoteTactic tac hole goal -> False
+    CheckMetaInst m     -> True   -- TODO
+    CheckLockedVars a b c d -> mm ((a, b), (c, d))
+    UsableAtModality mod t -> mm t
     where
-      mm v = mentionsMeta x v
+      mm :: forall t. MentionsMeta t => t -> Bool
+      mm = mentionsMetas xs
+
+instance MentionsMeta CompareAs where
+  mentionsMetas xs = \case
+    AsTermsOf a -> mentionsMetas xs a
+    AsSizes -> False
+    AsTypes -> False
 
 -- instance (Ord k, MentionsMeta e) => MentionsMeta (Map k e) where
 --   mentionsMeta = traverse mentionsMeta

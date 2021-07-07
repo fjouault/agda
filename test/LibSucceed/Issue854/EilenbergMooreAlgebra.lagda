@@ -5,6 +5,8 @@
 
 \AgdaHide{
 \begin{code}
+{-# OPTIONS --sized-types #-}
+
 module Issue854.EilenbergMooreAlgebra where
 
 open import Function
@@ -22,8 +24,8 @@ open import Category.Monad
 
 \begin{code}
 iter : ∀ {a b c} {A : Set a} {B : A → Set b} {C : Set c} →
-         (Σ[ x ∈ A ] (B x → C) → C) → W A B → C
-iter g (sup x f) = g (x , λ b → iter g (f b))
+         (Σ[ x ∈ A ] (B x → C) → C) → W (A ▷ B) → C
+iter g (sup (x , f)) = g (x , λ b → iter g (f b))
 
 module T-algebra
   (T : Set → Set)
@@ -42,8 +44,8 @@ module T-algebra
   open T-Alg public
 
   -- Generalised bind operator.
-  >>= : ∀ {X}(A : T-Alg) → T X → (X → Carrier A) → Carrier A
-  >>= A tx f = structure A (f <$> tx)
+  bind : ∀ {X}(A : T-Alg) → T X → (X → Carrier A) → Carrier A
+  bind A tx f = structure A (f <$> tx)
 
   -- Free algebra
   ⋆-alg : Set → T-Alg
@@ -60,11 +62,11 @@ module T-algebra
 
 -- Eilenberg-Moore algebras for free monads.
 
-module _ {Σ : Container _} where
+module _ {Σ : Container _ _} where
 
   open T-algebra (_⋆^C_ Σ) rawMonad public
 
-_-Alg : Container _ → Set₁
+_-Alg : Container _ _ → Set₁
 Σ -Alg = T-Alg {Σ}
 
 -- A more general product algebra.

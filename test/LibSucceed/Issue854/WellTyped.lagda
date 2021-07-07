@@ -11,10 +11,11 @@ open import Function hiding (_∋_)
 open import Data.Fin
 open import Data.Product
 open import Data.List
-open import Data.List.Any as Any
-open import Relation.Binary.List.Pointwise
+open import Data.List.Relation.Unary.Any as Any
+open import Data.List.Relation.Binary.Pointwise
+open import Data.List.Relation.Binary.Subset.Propositional
 
-open import Data.List.Any.Membership.Propositional
+open import Data.List.Membership.Propositional
 open import Issue854.Terms
 open import Issue854.Types
 open import Issue854.Context as Ctx hiding (Rel; index)
@@ -66,7 +67,7 @@ mutual
 
   -- Pointwise version of the computation judgement.
   _⊢^cs_∶_ : Ctx → List CTerm → List CType → Set
-  _⊢^cs_∶_ Γ = Rel (_⊢^c_∶_ Γ)
+  _⊢^cs_∶_ Γ = Pointwise (_⊢^c_∶_ Γ)
 
   data _⊢^c_∶_ (Γ : Ctx) : CTerm → CType → Set where
 

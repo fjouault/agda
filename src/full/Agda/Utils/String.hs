@@ -1,9 +1,11 @@
 module Agda.Utils.String where
 
+import Control.Monad.Reader
+import Control.Monad.State
+
 import Data.Char
 import qualified Data.List as List
-
-import Numeric
+import Data.String
 
 import Agda.Utils.List
 
@@ -28,7 +30,26 @@ quote s = "\"" ++ concatMap escape s ++ "\""
            | c `elem` escapeChars = ['\\', c]
            | otherwise            = [c]
 
+  escapeChars :: String
   escapeChars = "\"\\"
+
+-- | Turns the string into a Haskell string literal, avoiding escape
+-- codes.
+
+haskellStringLiteral :: String -> String
+haskellStringLiteral s = "\"" ++ concatMap escape s ++ "\""
+  where
+  escape c | c == '\n'         = "\\n"
+           | c == '"'          = "\\\""
+           | c == '\\'         = "\\\\"
+           | ok c              = [c]
+           | otherwise         = [c]
+
+  ok c = case generalCategory c of
+    UppercaseLetter -> True
+    LowercaseLetter -> True
+    TitlecaseLetter -> True
+    _               -> isSymbol c || isPunctuation c
 
 -- | Adds hyphens around the given string
 --
@@ -41,31 +62,18 @@ delimiter s = concat [ replicate 4 '\x2014'
                      , replicate (54 - length s) '\x2014'
                      ]
 
-
--- | Shows a non-negative integer using the characters ₀-₉ instead of
--- 0-9.
-
-showIndex :: (Show i, Integral i) => i -> String
-showIndex n =
-  showIntAtBase 10 (\i -> toEnum (i + fromEnum '\x2080')) n ""
-
 -- | Adds a final newline if there is not already one.
 
 addFinalNewLine :: String -> String
 addFinalNewLine "" = "\n"
-addFinalNewLine s | last s == '\n' = s
-                  | otherwise      = s ++ "\n"
+addFinalNewLine s@(c:cs)
+  | last1 c cs == '\n' = s
+  | otherwise          = s ++ "\n"
 
 -- | Indents every line the given number of steps.
 
 indent :: Integral i => i -> String -> String
 indent i = unlines . map (List.genericReplicate i ' ' ++) . lines
-
-newtype Str = Str { unStr :: String }
-  deriving Eq
-
-instance Show Str where
-  show = unStr
 
 -- | Show a number using comma to separate powers of 1,000.
 
@@ -78,8 +86,14 @@ ltrim = dropWhile isSpace
 
 -- | Remove trailing whitespace.
 rtrim :: String -> String
-rtrim = reverse . ltrim . reverse
+rtrim = List.dropWhileEnd isSpace
 
 -- | Remove leading and trailing whitesapce.
 trim :: String -> String
 trim = rtrim . ltrim
+
+instance (IsString (m a), Monad m) => IsString (ReaderT r m a) where
+  fromString = lift . fromString
+
+instance (IsString (m a), Monad m) => IsString (StateT s m a) where
+  fromString = lift . fromString

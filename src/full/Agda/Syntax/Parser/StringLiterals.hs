@@ -5,8 +5,11 @@ module Agda.Syntax.Parser.StringLiterals
     ( litString, litChar
     ) where
 
+import Data.Bifunctor
 import Data.Char
+import qualified Data.Text as T
 
+import Agda.Syntax.Common (pattern Ranged)
 import Agda.Syntax.Parser.Alex
 import Agda.Syntax.Parser.Monad
 import Agda.Syntax.Parser.Tokens
@@ -14,17 +17,14 @@ import Agda.Syntax.Parser.LookAhead
 import Agda.Syntax.Position
 import Agda.Syntax.Literal
 
-import Agda.Utils.Char   ( decDigit, hexDigit, octDigit )
-import Agda.Utils.Tuple  ( (-*-) )
-
 {--------------------------------------------------------------------------
     Exported actions
  --------------------------------------------------------------------------}
 
 -- | Lex a string literal. Assumes that a double quote has been lexed.
 litString :: LexAction Token
-litString = stringToken '"' (\i s ->
-              return $ TokLiteral $ LitString (getRange i) s)
+litString = stringToken '"' $ \ i s ->
+  return $ TokLiteral $ Ranged (getRange i) $ LitString $ T.pack s
 
 {-| Lex a character literal. Assumes that a single quote has been lexed.  A
     character literal is lexed in exactly the same way as a string literal.
@@ -33,11 +33,9 @@ litString = stringToken '"' (\i s ->
     the other hand it will only be inefficient if there is a lexical error.
 -}
 litChar :: LexAction Token
-litChar = stringToken '\'' $ \i s ->
-            do  case s of
-                    [c] -> return $ TokLiteral $ LitChar (getRange i) c
-                    _   -> lexError
-                            "character literal must contain a single character"
+litChar = stringToken '\'' $ \ i -> \case
+  [c] -> return $ TokLiteral $ Ranged (getRange i) $ LitChar c
+  _   -> lexError "character literal must contain a single character"
 
 
 {--------------------------------------------------------------------------
@@ -60,7 +58,7 @@ litError msg =
 --   character argument is the delimiter (@\"@ for strings and @\'@ for
 --   characters).
 stringToken :: Char -> (Interval -> String -> Parser tok) -> LexAction tok
-stringToken del mkTok inp inp' n =
+stringToken del mkTok = LexAction $ \ inp inp' n ->
     do  setLastPos (backupPos $ lexPos inp')
         setLexInput inp'
         -- TODO: Should setPrevToken be run here? Compare with
@@ -103,7 +101,7 @@ lexStringGap del s =
         case c of
             '\\'            -> lexString del s
             c | isSpace c   -> lexStringGap del s
-            _               -> fail "non-space in string gap"
+            _               -> lookAheadError "non-space in string gap"
 
 -- | Lex a single character.
 lexChar :: LookAhead Char
@@ -121,18 +119,18 @@ lexEscape =
             '^'     -> do c <- eatNextChar
                           if c >= '@' && c <= '_'
                             then return (chr (ord c - ord '@'))
-                            else fail "invalid control character"
+                            else lookAheadError "invalid control character"
 
-            'x'     -> readNum isHexDigit 16 hexDigit
-            'o'     -> readNum isOctDigit  8 octDigit
+            'x'     -> readNum isHexDigit 16 digitToInt
+            'o'     -> readNum isOctDigit  8 digitToInt
             x | isDigit x
-                    -> readNumAcc isDigit 10 decDigit (decDigit x)
+                    -> readNumAcc isDigit 10 digitToInt (digitToInt x)
 
             c ->
                 -- Try to match the input (starting with c) against the
                 -- silly escape codes.
-                do  esc <- match' c (map (id -*- return) sillyEscapeChars)
-                                    (fail "bad escape code")
+                do  esc <- match' c (map (second return) sillyEscapeChars)
+                                    (lookAheadError "bad escape code")
                     sync
                     return esc
 
@@ -142,7 +140,7 @@ readNum isDigit base conv =
     do  c <- eatNextChar
         if isDigit c
             then readNumAcc isDigit base conv (conv c)
-            else fail "non-digit in numeral"
+            else lookAheadError "non-digit in numeral"
 
 -- | Same as 'readNum' but with an accumulating parameter.
 readNumAcc :: (Char -> Bool) -> Int -> (Char -> Int) -> Int -> LookAhead Char
@@ -158,7 +156,7 @@ readNumAcc isDigit base conv i = scan i
                             sync
                             if i >= ord minBound && i <= ord maxBound
                                 then return (chr i)
-                                else fail "character literal out of bounds"
+                                else lookAheadError "character literal out of bounds"
 
 -- | The escape codes.
 sillyEscapeChars :: [(String, Char)]

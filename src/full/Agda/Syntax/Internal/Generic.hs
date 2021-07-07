@@ -1,16 +1,15 @@
 {-# LANGUAGE CPP          #-}
-{-# LANGUAGE TypeFamilies #-}
 
 -- | Tree traversal for internal syntax.
 
 module Agda.Syntax.Internal.Generic where
 
-import Control.Applicative
-import Data.Traversable
-import Data.Monoid
-import Data.Foldable
+#if __GLASGOW_HASKELL__ < 804
+import Data.Monoid ((<>))
+#endif
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
+import Agda.Utils.Functor
 
 -- | Generic term traversal.
 --
@@ -21,17 +20,10 @@ class TermLike a where
 
   -- | Generic traversal with post-traversal action.
   --   Ignores sorts.
-  traverseTermM :: (Monad m
-#if __GLASGOW_HASKELL__ <= 708
-    , Applicative m
-#endif
-    ) => (Term -> m Term) -> a -> m a
+  traverseTermM :: Monad m => (Term -> m Term) -> a -> m a
 
-  default traverseTermM :: (Monad m, Traversable f, TermLike b, f b ~ a
-#if __GLASGOW_HASKELL__ <= 708
-    , Applicative m
-#endif
-    ) => (Term -> m Term) -> a -> m a
+  default traverseTermM :: (Monad m, Traversable f, TermLike b, f b ~ a)
+                        => (Term -> m Term) -> a -> m a
   traverseTermM = traverse . traverseTermM
 
   -- | Generic fold, ignoring sorts.
@@ -65,14 +57,15 @@ instance TermLike QName where
 
 -- Functors
 
-instance TermLike a => TermLike (Elim' a)   where
-instance TermLike a => TermLike (Arg a)     where
-instance TermLike a => TermLike (Dom a)     where
-instance TermLike a => TermLike [a]         where
-instance TermLike a => TermLike (Maybe a)   where
-instance TermLike a => TermLike (Abs a)     where
-instance TermLike a => TermLike (Ptr a)     where
-instance TermLike a => TermLike (Blocked a) where
+instance TermLike a => TermLike (Elim' a)      where
+instance TermLike a => TermLike (Arg a)        where
+instance TermLike a => TermLike (Dom a)        where
+instance TermLike a => TermLike [a]            where
+instance TermLike a => TermLike (Maybe a)      where
+instance TermLike a => TermLike (Blocked a)    where
+instance TermLike a => TermLike (Abs a)        where
+instance TermLike a => TermLike (Tele a)       where
+instance TermLike a => TermLike (WithHiding a) where
 
 -- Tuples
 
@@ -92,7 +85,7 @@ instance (TermLike a, TermLike b, TermLike c, TermLike d) => TermLike (a, b, c, 
 
 instance TermLike Term where
 
-  traverseTermM f t = case t of
+  traverseTermM f = \case
     Var i xs    -> f =<< Var i <$> traverseTermM f xs
     Def c xs    -> f =<< Def c <$> traverseTermM f xs
     Con c ci xs -> f =<< Con c ci <$> traverseTermM f xs
@@ -100,10 +93,10 @@ instance TermLike Term where
     Pi a b      -> f =<< uncurry Pi <$> traverseTermM f (a, b)
     MetaV m xs  -> f =<< MetaV m <$> traverseTermM f xs
     Level l     -> f =<< Level <$> traverseTermM f l
-    Lit _       -> f t
-    Sort _      -> f t
+    t@Lit{}     -> f t
+    Sort s      -> f =<< Sort <$> traverseTermM f s
     DontCare mv -> f =<< DontCare <$> traverseTermM f mv
-    Shared p    -> f =<< Shared <$> traverseTermM f p
+    t@Dummy{}   -> f t
 
   foldTerm f t = f t `mappend` case t of
     Var i xs    -> foldTerm f xs
@@ -114,41 +107,59 @@ instance TermLike Term where
     MetaV m xs  -> foldTerm f xs
     Level l     -> foldTerm f l
     Lit _       -> mempty
-    Sort _      -> mempty
+    Sort s      -> foldTerm f s
     DontCare mv -> foldTerm f mv
-    Shared p    -> foldTerm f p
+    Dummy{}     -> mempty
 
 instance TermLike Level where
-  traverseTermM f (Max as) = Max <$> traverseTermM f as
-  foldTerm f      (Max as) = foldTerm f as
+  traverseTermM f (Max n as) = Max n <$> traverseTermM f as
+  foldTerm f      (Max n as) = foldTerm f as
 
 instance TermLike PlusLevel where
-  traverseTermM f l = case l of
-    ClosedLevel{} -> return l
-    Plus n l      -> Plus n <$> traverseTermM f l
-  foldTerm f ClosedLevel{} = mempty
-  foldTerm f (Plus _ l)    = foldTerm f l
-
-instance TermLike LevelAtom where
-  traverseTermM f l = case l of
-    MetaLevel m vs   -> MetaLevel m <$> traverseTermM f vs
-    NeutralLevel r v -> NeutralLevel r <$> traverseTermM f v
-    BlockedLevel m v -> BlockedLevel m <$> traverseTermM f v
-    UnreducedLevel v -> UnreducedLevel <$> traverseTermM f v
-  foldTerm f l = case l of
-    MetaLevel m vs   -> foldTerm f vs
-    NeutralLevel _ v -> foldTerm f v
-    BlockedLevel _ v -> foldTerm f v
-    UnreducedLevel v -> foldTerm f v
+  traverseTermM f (Plus n l) = Plus n <$> traverseTermM f l
+  foldTerm f (Plus _ l)      = foldTerm f l
 
 instance TermLike Type where
   traverseTermM f (El s t) = El s <$> traverseTermM f t
   foldTerm f (El s t) = foldTerm f t
 
+instance TermLike Sort where
+  traverseTermM f = \case
+    Type l     -> Type <$> traverseTermM f l
+    Prop l     -> Prop <$> traverseTermM f l
+    s@(Inf _ _)-> pure s
+    SSet l     -> SSet <$> traverseTermM f l
+    s@SizeUniv -> pure s
+    s@LockUniv -> pure s
+    s@IntervalUniv -> pure s
+    PiSort a b c -> PiSort   <$> traverseTermM f a <*> traverseTermM f b <*> traverseTermM f c
+    FunSort a b -> FunSort   <$> traverseTermM f a <*> traverseTermM f b
+    UnivSort a -> UnivSort <$> traverseTermM f a
+    MetaS x es -> MetaS x  <$> traverseTermM f es
+    DefS q es  -> DefS q   <$> traverseTermM f es
+    s@DummyS{} -> pure s
+
+  foldTerm f = \case
+    Type l     -> foldTerm f l
+    Prop l     -> foldTerm f l
+    Inf _ _    -> mempty
+    SSet l     -> foldTerm f l
+    SizeUniv   -> mempty
+    LockUniv   -> mempty
+    IntervalUniv -> mempty
+    PiSort a b c -> foldTerm f a <> foldTerm f b <> foldTerm f c
+    FunSort a b -> foldTerm f a <> foldTerm f b
+    UnivSort a -> foldTerm f a
+    MetaS _ es -> foldTerm f es
+    DefS _ es  -> foldTerm f es
+    DummyS{}   -> mempty
+
 instance TermLike EqualityView where
 
-  traverseTermM f v = case v of
+  traverseTermM f = \case
     OtherType t -> OtherType
+      <$> traverseTermM f t
+    IdiomType t -> IdiomType
       <$> traverseTermM f t
     EqualityType s eq l t a b -> EqualityType s eq
       <$> traverse (traverseTermM f) l
@@ -156,14 +167,11 @@ instance TermLike EqualityView where
       <*> traverseTermM f a
       <*> traverseTermM f b
 
-  foldTerm f v = case v of
+  foldTerm f = \case
     OtherType t -> foldTerm f t
+    IdiomType t -> foldTerm f t
     EqualityType s eq l t a b -> foldTerm f (l ++ [t, a, b])
 
 -- | Put it in a monad to make it possible to do strictly.
-copyTerm :: (TermLike a, Monad m
-#if __GLASGOW_HASKELL__ <= 708
-  , Applicative m
-#endif
-  ) => a -> m a
+copyTerm :: (TermLike a, Monad m) => a -> m a
 copyTerm = traverseTermM return

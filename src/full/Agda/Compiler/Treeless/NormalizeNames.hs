@@ -11,10 +11,7 @@
 -- concrete name.
 --
 -- This transfomation should be run as the last transformation.
-{-# LANGUAGE CPP #-}
 module Agda.Compiler.Treeless.NormalizeNames ( normalizeNames ) where
-
-import Control.Applicative
 
 import Agda.TypeChecking.Monad
 import Agda.Syntax.Treeless
@@ -22,27 +19,23 @@ import Agda.Syntax.Treeless
 normalizeNames :: TTerm -> TCM TTerm
 normalizeNames = tr
   where
-    tr t = case t of
-      TDef q -> do
-        q' <- defName <$> getConstInfo q
-        return $ TDef q'
-      TVar{}    -> done
-      TCon{}    -> done
-      TPrim{}   -> done
-      TLit{}    -> done
-      TUnit{}   -> done
-      TSort{}   -> done
-      TErased{} -> done
-      TError{}  -> done
-      TLam b                  -> TLam <$> tr b
-      TApp a bs               -> TApp <$> tr a <*> mapM tr bs
-      TLet e b                -> TLet <$> tr e <*> tr b
-      TCase sc t def alts     -> TCase sc t <$> tr def <*> mapM trAlt alts
-      where
-        done :: TCM TTerm
-        done = return t
+    tr = \case
+      TDef q              -> TDef . defName <$> getConstInfo q
+      t@TVar{}            -> return t
+      t@TCon{}            -> return t
+      t@TPrim{}           -> return t
+      t@TLit{}            -> return t
+      t@TUnit{}           -> return t
+      t@TSort{}           -> return t
+      t@TErased{}         -> return t
+      t@TError{}          -> return t
+      TLam b              -> TLam <$> tr b
+      TApp a bs           -> TApp <$> tr a <*> mapM tr bs
+      TLet e b            -> TLet <$> tr e <*> tr b
+      TCase sc t def alts -> TCase sc t <$> tr def <*> mapM trAlt alts
+      TCoerce a           -> TCoerce <$> tr a
 
-    trAlt a = case a of
+    trAlt = \case
       TAGuard g b -> TAGuard <$> tr g <*> tr b
       TACon q a b -> TACon q a <$> tr b
       TALit l b   -> TALit l <$> tr b

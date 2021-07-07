@@ -1,6 +1,5 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-{-| When lexing by hands (for instance string literals) we need to do some
+{-| When lexing by hand (for instance string literals) we need to do some
     looking ahead. The 'LookAhead' monad keeps track of the position we are
     currently looking at, and provides facilities to synchronise the look-ahead
     position with the actual position of the 'Parser' monad (see 'sync' and
@@ -11,6 +10,7 @@ module Agda.Syntax.Parser.LookAhead
       LookAhead
     , runLookAhead
       -- * Operations
+    , lookAheadError
     , getInput, setInput, liftP
     , nextChar, eatNextChar
     , sync, rollback
@@ -18,7 +18,6 @@ module Agda.Syntax.Parser.LookAhead
     )
     where
 
-import Control.Applicative
 import Control.Monad.Reader
 import Control.Monad.State
 
@@ -33,24 +32,19 @@ import Agda.Syntax.Parser.Monad
     'AlexInput', wrapped around the 'Parser' monad.
 -}
 newtype LookAhead a =
-    LookAhead { unLookAhead :: ReaderT ErrorFunction
+    LookAhead { _unLookAhead :: ReaderT ErrorFunction
                                        (StateT AlexInput Parser) a
               }
-    deriving (Functor, Applicative)
+    deriving (Functor, Applicative, Monad)
 
 newtype ErrorFunction =
     ErrorFun { throwError :: forall a. String -> LookAhead a }
 
-{--------------------------------------------------------------------------
-    Monad instances
- --------------------------------------------------------------------------}
-
-instance Monad LookAhead where
-    return  = pure
-    m >>= k = LookAhead $ unLookAhead m >>= unLookAhead . k
-    fail s  =
-        do  err <- LookAhead ask
-            throwError err s
+-- | Throw an error message according to the supplied method.
+lookAheadError :: String -> LookAhead a
+-- ASR (2021-02-07). The eta-expansion @\e -> throwError e@ is
+-- required GHC >= 9.0.1 ((see Issue #4955).
+lookAheadError s = ($ s) =<< do LookAhead $ asks (\e -> throwError e)
 
 {--------------------------------------------------------------------------
     Operations
@@ -76,7 +70,7 @@ nextChar :: LookAhead Char
 nextChar =
     do  inp <- getInput
         case alexGetChar inp of
-            Nothing         -> fail "unexpected end of file"
+            Nothing         -> lookAheadError "unexpected end of file"
             Just (c,inp')   ->
                 do  setInput inp'
                     return c

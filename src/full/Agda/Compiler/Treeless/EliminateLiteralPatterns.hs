@@ -1,25 +1,16 @@
-{-# LANGUAGE CPP #-}
 -- | Converts case matches on literals to if cascades with equality comparisons.
 module Agda.Compiler.Treeless.EliminateLiteralPatterns where
 
-import Control.Applicative
 import Data.Maybe
 
-import Agda.Syntax.Abstract.Name (QName)
 import Agda.Syntax.Treeless
 import Agda.Syntax.Literal
-import qualified Agda.Syntax.Internal as I
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Primitive
-import Agda.TypeChecking.Substitute
-
-import Agda.Compiler.Treeless.Subst
 
 import Agda.Utils.Impossible
 
-#include "undefined.h"
 
 eliminateLiteralPatterns :: TTerm -> TCM TTerm
 eliminateLiteralPatterns t = do
@@ -35,8 +26,8 @@ transform :: BuiltinKit -> TTerm -> TTerm
 transform kit = tr
   where
     tr :: TTerm -> TTerm
-    tr t = case t of
-      TCase sc t def alts | t `elem` [CTChar, CTString, CTQName, CTNat, CTInt, CTFloat] ->
+    tr = \case
+      TCase sc t def alts | caseType t `elem` [CTChar, CTString, CTQName, CTNat, CTInt, CTFloat] ->
         foldr litAlt (tr def) alts
         where
           litAlt :: TAlt -> TTerm -> TTerm
@@ -46,36 +37,39 @@ transform kit = tr
               (tr body)
               cont
           litAlt _ _ = __IMPOSSIBLE__
-      TCase sc t@(CTData dt) def alts -> TCase sc t (tr def) (map trAlt alts)
+      TCase sc t@CaseInfo{caseType = CTData _ dt} def alts ->
+        TCase sc t (tr def) (map trAlt alts)
         where
-          trAlt a = case a of
+          trAlt = \case
             TAGuard g b -> TAGuard (tr g) (tr b)
             TACon q a b -> TACon q a (tr b)
             TALit l b   -> TALit l (tr b)
       TCase _ _ _ _ -> __IMPOSSIBLE__
 
-      TVar{}    -> t
-      TDef{}    -> t
-      TCon{}    -> t
-      TPrim{}   -> t
-      TLit{}    -> t
-      TUnit{}   -> t
-      TSort{}   -> t
-      TErased{} -> t
-      TError{}  -> t
+      t@TVar{}    -> t
+      t@TDef{}    -> t
+      t@TCon{}    -> t
+      t@TPrim{}   -> t
+      t@TLit{}    -> t
+      t@TUnit{}   -> t
+      t@TSort{}   -> t
+      t@TErased{} -> t
+      t@TError{}  -> t
 
+      TCoerce a               -> TCoerce (tr a)
       TLam b                  -> TLam (tr b)
       TApp a bs               -> TApp (tr a) (map tr bs)
       TLet e b                -> TLet (tr e) (tr b)
 
-    isCaseOn (CTData dt) xs = dt `elem` catMaybes (map ($ kit) xs)
+    -- TODO:: Defined but not used
+    isCaseOn (CTData _ dt) xs = dt `elem` mapMaybe ($ kit) xs
     isCaseOn _ _ = False
 
     eqFromLit :: Literal -> TPrim
-    eqFromLit x = case x of
-      LitNat _ _     -> PEqI
-      LitFloat _ _   -> PEqF
-      LitString _ _  -> PEqS
-      LitChar _ _    -> PEqC
-      LitQName _ _   -> PEqQ
-      _              -> __IMPOSSIBLE__
+    eqFromLit = \case
+      LitNat _     -> PEqI
+      LitFloat _   -> PEqF
+      LitString _  -> PEqS
+      LitChar _    -> PEqC
+      LitQName _   -> PEqQ
+      _ -> __IMPOSSIBLE__

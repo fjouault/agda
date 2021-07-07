@@ -1,3 +1,4 @@
+{-# OPTIONS --without-K #-}
 module Common.IO where
 
 open import Agda.Builtin.IO public
@@ -27,7 +28,6 @@ postulate
   }; }; };
   }; }; }; }
 #-}
-
 
 {-# FOREIGN GHC import qualified Data.Text.IO #-}
 

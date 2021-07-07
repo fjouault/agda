@@ -8,6 +8,8 @@ compatibility layer between containers and signatures.
 
 \AgdaHide{
 \begin{code}
+{-# OPTIONS --sized-types #-}
+
 module Issue854.RunCompat where
 
 open import Level
@@ -18,16 +20,16 @@ open import Data.Sum
 open import Data.Product as Prod
 open import Data.List using (List; []; _∷_; _++_)
 open import Data.List.Any
-open import Data.Container as Cont hiding (_∈_)
+open import Data.Container as Cont hiding (refl; _∈_)
     renaming (⟦_⟧ to ⟦_⟧^C; μ to μ^C; _⇒_ to _⇒^C_)
-open import Data.Container.Combinator using (module Sum) renaming (_⊎_ to _⊎^C_)
+open import Data.Container.Combinator using () renaming (_⊎_ to _⊎^C_)
 open import Data.Container.FreeMonad
     renaming (_⋆_ to _⋆^C_; _⋆C_ to _⋆^CC_)
 open import Data.W
 open import Relation.Binary
 open import Relation.Binary.PropositionalEquality as PE hiding ([_])
 
-open import Data.List.Any.Membership.Propositional
+open import Data.List.Relation.Subset.Propositional
 open import Issue854.TypesSemantics using (Sh; Pos; ⌊_⌋^Sig; sh; ar)
 open import Issue854.Run using (_⋆^S_; embed)
 \end{code}

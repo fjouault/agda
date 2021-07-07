@@ -2,7 +2,7 @@ TOP = ../..
 
 include $(TOP)/mk/paths.mk
 
-AGDA = $(AGDA_BIN) -v0
+AGDA = $(AGDA_BIN) -v0 --no-libraries
 
 all : Issue1168.api PrettyInterface.api ScopeFromInterface.api
 
@@ -11,7 +11,7 @@ all : Issue1168.api PrettyInterface.api ScopeFromInterface.api
 
 %.api : %.agdai %.hs
 	$(eval tmpdir = $(shell mktemp -d /tmp/api-test.XXXX))
-	ghc -Wall -Werror -package Agda-$(VERSION) -o $(tmpdir)/$* $*.hs
+	$(GHC) -Wall -Werror -package Agda-$(VERSION) -o $(tmpdir)/$* $*.hs
 	$(tmpdir)/$*
 	rm -r $(tmpdir)
 

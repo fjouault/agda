@@ -4,44 +4,179 @@
 Emacs Mode
 **********
 
-.. note::
-   This is a stub.
+Agda programs are commonly edited using `Emacs
+<http://www.gnu.org/software/emacs/>`_ which is explained in this
+section.  Other editors with interactive support for Agda include Atom
+(`agda-mode on Atom <https://atom.io/packages/agda-mode>`_), Visual
+Studio Code (`agda-mode on VS Code
+<https://github.com/banacorn/agda-mode-vscode>`_), and Vim (`agda-vim
+<https://github.com/derekelkins/agda-vim>`_).
+
+To edit a module in Emacs (assuming you have :ref:`installed
+<installation>` Agda and the Emacs mode properly), open a file ending
+in ``.agda`` and load it by pressing ``C-c C-l`` (other commands are
+listed under :ref:`notation-for-key-combinations` below). This will
+apply syntax highlighting to the code and display any errors in a
+separate buffer. Agda uses certain background colors to indicate
+specific issues with the code, see :ref:`highlight` below.
+
+
+Menus
+=====
+There are two main menus in the system:
+
+* A main menu called **Agda2** which is used for global commands.
+
+* A context sensitive menu which appears if you right-click in a hole.
+
+The menus contain more commands than the ones listed above. See
+:ref:`global <emacs-global-commands>` and :ref:`context sensitive
+<emacs-context-sensitive-commands>` commands.
+
+
+Configuration
+=============
+
+If you want to you can customise the Emacs mode. Just start Emacs and
+type the following:
+
+.. code-block:: emacs
+
+  M-x load-library RET agda2-mode RET
+  M-x customize-group RET agda2 RET
+
+If you want some specific settings for the Emacs mode you can add them
+to ``agda2-mode-hook``. For instance, if you do not want to use the
+Agda input method (for writing various symbols like ∀≥ℕ→π⟦⟧) you can
+add the following to your *.emacs*:
+
+.. code-block:: emacs
+
+  (add-hook 'agda2-mode-hook
+            '(lambda ()
+              ; If you do not want to use any input method:
+              (deactivate-input-method)
+              ; (In some versions of Emacs you should use
+              ; inactivate-input-method instead of
+              ; deactivate-input-method.)
+
+Note that, on some systems, the Emacs mode changes the default font of
+the current frame in order to enable many Unicode symbols to be
+displayed. This only works if the right fonts are available, though.
+If you want to turn off this feature, then you should customise the
+``agda2-fontset-name`` variable.
+
+The colors that are used to highlight Agda syntax and errors can be
+adjusted by typing ``M-x customize-group RET agda2-highlight RET`` in
+Emacs and following the instructions.
 
 
 Keybindings
 ===========
 
-Commands working with types can be prefixed with ``C-u`` to compute
-type without further normalisation and with ``C-u C-u`` to compute
-normalised types.
+.. _notation-for-key-combinations:
+
+Notation for key combinations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The following notation is used when describing key combinations:
+
+:kbd:`C-c`
+     means hitting the ``c`` key while pressing the ``Ctrl``
+     key.
+
+:kbd:`M-x`
+     means hitting the ``x`` key while pressing the ``Meta``
+     key, which is called ``Alt`` on many systems. Alternatively one
+     can type ``Escape`` followed by ``x`` (in separate key strokes).
+
+:kbd:`RET`
+     is the ``Enter``, ``Return`` or ``⏎`` key.
+
+:kbd:`SPC`
+     is the space bar.
+
+Commands working with terms or types can be prefixed with ``C-u`` to compute without further
+normalisation, with ``C-u C-u`` to compute normal forms, and ``C-u C-u C-u`` to compute
+weak-head normal forms.
 
 .. _emacs-global-commands:
 
 Global commands
 ~~~~~~~~~~~~~~~
 
-===================  =========================================================
-``C-c C-l``          **L**\ oad file
-``C-c C-x C-c``      **C**\ ompile file
-``C-c C-x C-q``      **Q**\ uit, kill the Agda process
-``C-c C-x C-r``      Kill and **r**\ estart the Agda process
-``C-c C-x C-a``      **A**\ bort a command
-``C-c C-x C-d``      Remove goals and highlighting (**d**\ eactivate)
-``C-c C-x C-h``      Toggle display of **h**\ idden arguments
-``C-c C-=``          Show constraints
-``C-c C-s``          **S**\ olve constraints
-``C-c C-?``          Show all goals
-``C-c C-f``          Move to next goal (**f**\ orward)
-``C-c C-b``          Move to previous goal (**b**\ ackwards)
-``C-c C-d``          Infer (**d**\ educe) type
-``C-c C-o``          M\ **o**\ dule c\ **o**\ ntents
-``C-c C-z``          Search through definitions in scope
-``C-c C-n``          Compute **n**\ ormal form
-``C-u C-c C-n``      Compute normal form, ignoring ``abstract``
-``C-u C-u C-c C-n``  Compute and print normal form of ``show <expression>``
-``C-c C-x M-;``      Comment/uncomment rest of buffer
-``C-c C-x C-s``      Switch to a different Agda version
-===================  =========================================================
+:kbd:`C-c C-l`
+     **L**\ oad file. This type-checks the contents of the file, and
+     replaces each occurrence of a question mark ``?`` or a hole
+     marker ``{! !}`` by a freshly created hole.
+
+:kbd:`C-c C-x C-c`
+     **C**\ ompile file. This will compile an Agda program with a
+     ``main`` function using a given backend (the ``GHC`` backend is
+     used by default).
+
+:kbd:`C-c C-x C-q`
+     **Q**\ uit, kill the Agda process
+
+:kbd:`C-c C-x C-r`
+     Kill and **r**\ estart the Agda process
+
+:kbd:`C-c C-x C-a`
+     **A**\ bort a command
+
+:kbd:`C-c C-x C-d`
+     Remove goals and highlighting (**d**\ eactivate)
+
+:kbd:`C-c C-x C-h`
+     Toggle display of **h**\ idden arguments
+
+:kbd:`C-c C-x C-i`
+     Toggle display of **i**\ rrelevant arguments
+
+:kbd:`C-c C-=`
+     Show constraints
+
+:kbd:`C-c C-s`
+     **S**\ olve constraints
+
+:kbd:`C-c C-?`
+     Show all goals
+
+:kbd:`C-c C-f`
+     Move to next goal (**f**\ orward)
+
+:kbd:`C-c C-b`
+     Move to previous goal (**b**\ ackwards)
+
+:kbd:`C-c C-d`
+     Infer (**d**\ educe) type. The system asks for a term and infers
+     its type.  When executed inside a hole, it will instead take the
+     contents of the hole as input (if any).
+
+:kbd:`C-c C-o`
+     M\ **o**\ dule c\ **o**\ ntents
+
+:kbd:`C-c C-z`
+     :ref:`search-about`
+
+:kbd:`C-c C-n`
+     Compute **n**\ ormal form. The system asks for a term which is
+     then evaluated. When executed inside a hole, it will instead take
+     the contents of the hole as input (if any).
+
+:kbd:`C-u C-c C-n`
+     Compute normal form, ignoring ``abstract``
+
+:kbd:`C-u C-u C-c C-n`
+     Compute and print normal form of ``show <expression>``
+
+:kbd:`C-c C-x M-;`
+     Comment/uncomment rest of buffer
+
+:kbd:`C-c C-x C-s`
+     Switch to a different Agda version
+
+.. _emacs-context-sensitive-commands:
 
 Commands in context of a goal
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -49,37 +184,97 @@ Commands in context of a goal
 Commands expecting input (for example which variable to case split)
 will either use the text inside the goal or ask the user for input.
 
-===================  =========================================================
-``C-c C-SPC``        Give (fill goal)
-``C-c C-r``          **R**\ efine. Partial give: makes new holes for
-                     missing arguments
-``C-c C-a``          :ref:`auto`
-``C-c C-c``          **C**\ ase split
-``C-c C-h``          Compute type of **h**\ elper function and add
-                     type signature to kill ring (clipboard)
-``C-c C-t``          Goal **t**\ ype
-``C-c C-e``          Context (**e**\ nvironment)
-``C-c C-d``          Infer (**d**\ educe) type
-``C-c C-,``          Goal type and context
-``C-c C-.``          Goal type, context and inferred type
-``C-c C-;``          Goal type, context and checked term
-``C-c C-o``          M\ **o**\ dule c\ **o**\ ntents
-``C-c C-n``          Compute **n**\ ormal form
-``C-u C-c C-n``      Compute normal form, ignoring ``abstract``
-``C-u C-u C-c C-n``  Compute and print normal form of ``show <expression>``
-===================  =========================================================
+:kbd:`C-c C-SPC`
+     Give (fill goal)
+
+:kbd:`C-c C-r`
+     **R**\ efine. Checks whether the return type of the expression
+     ``e`` in the hole matches the expected type. If so, the hole is
+     replaced by ``e { }1 ... { }n``, where a sufficient number of new
+     holes have been inserted. If the hole is empty, then the refine
+     command instead inserts a lambda or constructor (if there is a
+     unique type-correct choice).
+
+:kbd:`C-c C-m`
+     Elaborate and Give (fill goal with normalized expression).
+     Takes the same ``C-u`` prefixes as ``C-c C-n``.
+
+:kbd:`C-c C-a`
+     :ref:`auto`
+
+:kbd:`C-c C-c`
+     **C**\ ase split. If the cursor is positioned in a hole which
+     denotes the right hand side of a definition, then this command
+     automatically performs pattern matching on variables of your
+     choice. When given several variables (separated by spaces) it
+     will case split on the first and then continue by case splitting
+     on the remaining variables in each newly created clause. When
+     given no variables, it will introduce a new variable if the
+     target type is a function type, or introduce a new copattern
+     match if the target type is a record type (see
+     :ref:`copatterns`). When given the special symbol ``.``, it will
+     expand the ellipsis ``...`` in the clause (see
+     :ref:`with-abstraction`).
+
+:kbd:`C-c C-h`
+     Compute type of **h**\ elper function and add type
+     signature to kill ring (clipboard)
+
+:kbd:`C-c C-t`
+     Goal **t**\ ype
+
+:kbd:`C-c C-e`
+     Context (**e**\ nvironment)
+
+:kbd:`C-c C-d`
+     Infer (**d**\ educe) type
+
+:kbd:`C-c C-,`
+     Goal type and context. Shows the goal type, i.e. the type
+     expected in the current hole, along with the types of locally
+     defined identifiers.
+
+:kbd:`C-c C-.`
+     Goal type, context and inferred type
+
+:kbd:`C-c C-;`
+     Goal type, context and checked term
+
+:kbd:`C-c C-o`
+     M\ **o**\ dule c\ **o**\ ntents
+
+:kbd:`C-c C-n`
+     Compute **n**\ ormal form
+
+:kbd:`C-u C-c C-n`
+     Compute normal form, ignoring ``abstract``
+
+:kbd:`C-u C-u C-c C-n`
+     Compute and print normal form of ``show <expression>``
+
+:kbd:`C-c C-w`
+     Why in scope, given a defined name returns how it was brought into scope and its definition
 
 Other commands
 ~~~~~~~~~~~~~~
 
-====================  =================================================
-``TAB``               Indent current line, cycles between points
-``S-TAB``             Indent current line, cycles in opposite direction
- ``M-.``              Go to definition of identifier under point
- Middle mouse button  Go to definition of identifier clicked on
- ``M-*``              Go back (Emacs < 25.1)
- ``M-,``              Go back (Emacs ≥ 25.1)
-====================  =================================================
+:kbd:`TAB`
+     Indent current line, cycles between points
+
+:kbd:`S-TAB`
+     Indent current line, cycles in opposite direction
+
+:kbd:`M-.`
+     Go to definition of identifier under point
+
+:guilabel:`Middle mouse button`
+     Go to definition of identifier clicked on
+
+:kbd:`M-*`
+     Go back (Emacs < 25.1)
+
+:kbd:`M-,`
+     Go back (Emacs ≥ 25.1)
 
 .. _unicode-input:
 
@@ -110,7 +305,7 @@ insert the character "NOT A SUBSET OF" (``⊄``).
 typing the name of a character, then you need to start all over
 again. If you find this terribly annoying, then you can use `Abbrev
 mode
-<http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Abbreviation>`_
+<https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Main.Abbreviation>`_
 instead. However, note that Abbrev mode cannot be used in the
 minibuffer, which is used to give input to many Agda and Emacs
 commands.)
@@ -171,8 +366,12 @@ corresponding TeX command:
   ``\nin`` will input ``∌``.
 - **Subscript** and **superscript**: you can input subscript or
   superscript forms by prepending the character with ``\_`` (subscript)
-  or ``\^`` (superscript). Note that not all characters have a
-  subscript or superscript counterpart in Unicode.
+  or ``\^`` (superscript). Eg. ``g\_1`` will input ``g₁``. Note that not
+  all characters have a subscript or superscript counterpart in Unicode.
+
+Note: to introduce multiple characters involving greek letters, subscripts
+or superscripts, you need to prepend ``\G``, ``\_`` or ``\^`` respectively
+before each character.
 
 Some characters which were used in this documentation or which are
 commonly used in the standard library (sorted by hexadecimal code):
@@ -180,20 +379,20 @@ commonly used in the standard library (sorted by hexadecimal code):
 ========  =========  =================  ===========
 Hex code  Character  Short key-binding  TeX command
 ========  =========  =================  ===========
-00ac      ``¬``                         ``\neg``
-00d7      ``×``      ``\x``             ``\times``
-02e2      ``ˢ``      ``\^s``
-03bb      ``λ``      ``\Gl``            ``\lambda``
-041f      ``П``
+00AC      ``¬``                         ``\neg``
+00D7      ``×``      ``\x``             ``\times``
+02E2      ``ˢ``      ``\^s``
+03BB      ``λ``      ``\Gl``            ``\lambda``
+041F      ``П``
 0432      ``в``
 0435      ``е``
 0438      ``и``
-043c      ``м``
+043C      ``м``
 0440      ``р``
 0442      ``т``
-1d62      ``ᵢ``      ``\_i``
+1D62      ``ᵢ``      ``\_i``
 2032      ``′``      ``\'1``            ``\prime``
-207f      ``ⁿ``      ``\^n``
+207F      ``ⁿ``      ``\^n``
 2081      ``₁``      ``\_1``
 2082      ``₂``      ``\_2``
 2083      ``₃``      ``\_3``
@@ -204,11 +403,11 @@ Hex code  Character  Short key-binding  TeX command
 ========  =========  =================  ===========
 
 
-========  ================  =================  ===========
-Hex code  Character         Short key-binding  TeX command
-========  ================  =================  ===========
-2113      ``ℓ`` (PDF TODO)                     ``\ell``
-========  ================  =================  ===========
+========  =========  =================  ===========
+Hex code  Character  Short key-binding  TeX command
+========  =========  =================  ===========
+2113      ``ℓ``                         ``\ell``
+========  =========  =================  ===========
 
 
 ========  =========  =================  ===========
@@ -217,48 +416,75 @@ Hex code  Character  Short key-binding  TeX command
 2115      ``ℕ``      ``\bN``            ``\Bbb{N}``
 2191      ``↑``      ``\u``             ``\uparrow``
 2192      ``→``      ``\r-``            ``\to``
-21a6      ``↦``      ``\r-|``           ``\mapsto``
+21A6      ``↦``      ``\r-|``           ``\mapsto``
 2200      ``∀``      ``\all``           ``\forall``
 2208      ``∈``                         ``\in``
-220b      ``∋``                         ``\ni``
-220c      ``∌``      ``\nin``
+220B      ``∋``                         ``\ni``
+220C      ``∌``      ``\nin``
 2218      ``∘``      ``\o``             ``\circ``
 2237      ``∷``      ``\::``
-223c      ``∼``      ``\~``             ``\sim``
+223C      ``∼``      ``\~``             ``\sim``
 2248      ``≈``      ``\~~``            ``\approx``
 2261      ``≡``      ``\==``            ``\equiv``
 2264      ``≤``      ``\<=``            ``\le``
 2284      ``⊄``      ``\subn``
-228e      ``⊎``      ``\u+``            ``\uplus``
+228E      ``⊎``      ``\u+``            ``\uplus``
 2294      ``⊔``      ``\lub``
-22a2      ``⊢``      ``\|-``            ``\vdash``
-22a4      ``⊤``                         ``\top``
-22a5      ``⊥``                         ``\bot``
-266d      ``♭``       ``\b``
-266f      ``♯``       ``\#``
-27e8      ``⟨``       ``\<``
-27e9      ``⟩``       ``\>``
+22A2      ``⊢``      ``\|-``            ``\vdash``
+22A4      ``⊤``                         ``\top``
+22A5      ``⊥``                         ``\bot``
+266D      ``♭``       ``\b``
+266F      ``♯``       ``\#``
+27E8      ``⟨``       ``\<``
+27E9      ``⟩``       ``\>``
 ========  =========  =================  ===========
-
-
-========  ================  =================  ===========
-Hex code  Character         Short key-binding  TeX command
-========  ================  =================  ===========
-2983      ``⦃`` (PDF TODO)   ``\{{``
-2984      ``⦄`` (PDF TODO)   ``\}}``
-========  ================  =================  ===========
 
 
 ========  =========  =================  ===========
 Hex code  Character  Short key-binding  TeX command
 ========  =========  =================  ===========
-2c7c      ``ⱼ``       ``\_j``
+2983      ``⦃``      ``\{{``
+2984      ``⦄``      ``\}}``
+2985      ``⦅``      ``\((``
+2986      ``⦆``      ``\))``
+========  =========  =================  ===========
+
+
+========  =========  =================  ===========
+Hex code  Character  Short key-binding  TeX command
+========  =========  =================  ===========
+2C7C      ``ⱼ``       ``\_j``
 ========  =========  =================  ===========
 
 .. _highlight:
 
-Highlight
-=========
+Background highlighting
+=======================
 
-Clauses which do not hold definitionally (see :ref:`case-trees`) are
-highlighted in white smoke.
+Agda uses various background colors to indicate specific errors or
+warnings in your code. Specifically, the following colors are used:
+
+- A *yellow* background indicates unsolved metavariables (see
+  :ref:`metavariables`) or unsolved constraints.
+
+- A *light salmon* (pink-orange) background indicates an issue with termination or
+  productivity checking (see :ref:`termination-checking`).
+
+- A *wheat* (light yellow) background indicates an issue with coverage
+  checking (see :ref:`coverage-checking`).
+
+- A *peru* (brown) background indicates an issue with positivity checking (see
+  :ref:`positivity-checking`).
+
+- An *orange* background indicates a type signature with a missing definition.
+
+- A *light coral* (darker pink) background indicates a fatal warning
+
+- A *grey* background indicates unreachable or dead code, and for
+  shadowed variable names in telescopes.
+
+- A *white smoke* (light grey) background indicates a clauses that
+  does not hold definitionally (see :ref:`case-trees`).
+
+- A *pink* background indicates an issue with confluence checking of
+  rewrite rules (see :ref:`confluence-check`).

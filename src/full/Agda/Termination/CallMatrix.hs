@@ -1,6 +1,5 @@
--- {-# LANGUAGE CPP #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ImplicitParams             #-}
+{-# LANGUAGE CPP                        #-}
 
 module Agda.Termination.CallMatrix where
 
@@ -11,9 +10,9 @@ module Agda.Termination.CallMatrix where
 --   , tests
 --   ) where
 
+#if __GLASGOW_HASKELL__ < 804
 import Data.Semigroup
-import Data.Foldable (Foldable)
-import Data.Traversable (Traversable)
+#endif
 
 import Agda.Termination.CutOff
 import Agda.Termination.Order as Order
@@ -22,10 +21,10 @@ import Agda.Termination.Semiring (HasZero(..))
 
 import Agda.Utils.Favorites (Favorites)
 import qualified Agda.Utils.Favorites as Fav
-import Agda.Utils.Monad
+
 import Agda.Utils.Null
 import Agda.Utils.PartialOrd
-import Agda.Utils.Pretty hiding ((<>))
+import Agda.Utils.Pretty
 import Agda.Utils.Singleton
 
 ------------------------------------------------------------------------
@@ -209,4 +208,4 @@ instance Pretty cinfo => Pretty (CallMatrixAug cinfo) where
 
 instance Pretty cinfo => Pretty (CMSet cinfo) where
   pretty = vcat . punctuate newLine . map pretty . toList
-    where newLine = text "\n"
+    where newLine = "\n"

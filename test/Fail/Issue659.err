@@ -1,4 +1,4 @@
-Issue659.agda:32,11-15
-(((ℓ : Level) → R ℓ) → {a : Level} {A : Set a} → A → A) !=<
-(P _k_28 _A_30) because this would result in an invalid use of Setω
-when checking that the expression M.id has type P _k_28 _A_30
+Issue659.agda:32,7-10
+Agda.Primitive.Setω != (Set _a_29)
+when checking that the solution (ℓ : Level) → R ℓ of metavariable
+_A_30 has the expected type Set _a_29

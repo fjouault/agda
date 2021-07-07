@@ -1,7 +1,8 @@
 -- | Functions that can be used to communicate with an Agda process.
 
 module RunAgda
-  ( runAgda
+  ( getAgda
+  , runAgda
   , runAgda'
   , AgdaCommands(..)
   , command
@@ -18,10 +19,7 @@ import Text.Show
 -- | The first arguments given to the Agda process.
 
 firstArguments :: [String]
-firstArguments =
-  [ "--interaction"
-  , "--no-libraries"
-  ]
+firstArguments = ["--interaction"]
 
 -- | The prompt used by the Agda process. It is assumed that the
 -- process places prompts at the start of a line.
@@ -37,27 +35,27 @@ prompt = "Agda2> "
 -- dependency on the Agda library.
 
 command
-  :: String         -- ^ The name of the command (minus @Cmd_@).
-  -> FilePath       -- ^ The file to operate on.
-  -> Maybe String   -- ^ Non-default highlighting arguments.
-  -> Maybe [String] -- ^ Optional arguments to the command (other than
-                    --   the file name).
+  :: String       -- ^ The name of the command (minus @Cmd_@).
+  -> FilePath     -- ^ The file to operate on.
+  -> Maybe String -- ^ Non-default highlighting arguments.
+  -> Maybe String -- ^ Optional arguments to the command (including
+                  --   the file name, if required).
   -> String
 command cmd f mHigh mArgs =
   "IOTCM " ++ show f ++ " " ++ high ++ " " ++
-    "(Cmd_" ++ cmd ++ " " ++ show f ++ args ++ ")"
+    "(Cmd_" ++ cmd ++ " " ++ args ++ ")"
   where
   high = case mHigh of
     Nothing -> "None Indirect"
     Just h  -> h
   args = case mArgs of
     Nothing   -> ""
-    Just args -> " " ++ showList args ""
+    Just args -> " " ++ args
 
 -- | Constructs a (certain kind of) "load" command from a file name.
 
 loadCommand :: FilePath -> String
-loadCommand f = command "load" f Nothing (Just [])
+loadCommand f = command "load" f Nothing (Just $ show f ++ "[]")
 
 -- | Reads at most the given number of characters from the given
 -- handle. Stops reading if a newline character is encountered, and in
@@ -82,7 +80,7 @@ readUntilPrompt' h = do
   if s == prompt then return [] else do
     line <- if nl then return s
                   else fmap (s ++) (hGetLine h)
-    liftM (line :) $ readUntilPrompt' h
+    fmap (line :) $ readUntilPrompt' h
 
 -- | Echoes lines read from the first handle on the second handle
 -- until a prompt is encountered. The prompt is not echoed.
@@ -115,6 +113,15 @@ data AgdaCommands = AgdaCommands
     -- given arguments.
   }
 
+-- | Takes the name of the Agda executable from the first argument
+-- on the command line.
+getAgda :: IO FilePath
+getAgda = do
+  args <- getArgs
+  case args of
+    agda : _ -> return agda
+    []       -> error "getAgda: No command-line arguments."
+
 -- | Starts Agda, invokes the continuation, and finally shuts down Agda.
 --
 -- The name of the Agda executable is assumed to be the first argument
@@ -125,10 +132,8 @@ runAgda
   -> (AgdaCommands -> IO a)  -- ^ Continuation.
   -> IO a
 runAgda extraArgs cont = do
-  args <- getArgs
-  case args of
-    agda : _ -> runAgda' agda extraArgs cont
-    []       -> error "runAgda: No command-line arguments."
+  agda <- getAgda
+  runAgda' agda extraArgs cont
 
 -- | Starts Agda, invokes the continuation, and finally shuts down Agda.
 

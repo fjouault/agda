@@ -5,6 +5,8 @@
 
 \AgdaHide{
 \begin{code}
+{-# OPTIONS --sized-types #-}
+
 module Issue854.TypesSemantics where
 
 import Level
@@ -22,7 +24,7 @@ open import Data.Container.FreeMonad as FM
 open import Category.Monad
 open import Relation.Binary.PropositionalEquality
 
-open import Data.List.Any.Membership.Propositional
+open import Data.List.Membership.Propositional
 open import Issue854.Types
 open import Issue854.Context
 open import Issue854.EilenbergMooreAlgebra
@@ -39,7 +41,7 @@ mutual
   ⟦ U ⊕ V  ⟧^VType = ⟦ U ⟧^VType ⊎ ⟦ V ⟧^VType
   ⟦ μ Δ    ⟧^VType = μ^C ⌊ Δ ⌋^Sig
 
-  ⌊_⌋^Sig : Sig → Container _
+  ⌊_⌋^Sig : Sig → Container _ _
   ⌊ Σ ⌋^Sig = Sh Σ ◃ Pos Σ
 
   Sh : Sig → Set
@@ -51,7 +53,7 @@ mutual
   Pos ((_ , A) ∷ Σ)  (inj₁ p) = ⟦ A ⟧^VType
   Pos ((_ , A) ∷ Σ)  (inj₂ s) = Pos Σ s
 
-  ∣_∣^Sig : CType → Container _
+  ∣_∣^Sig : CType → Container _ _
   ∣ Σ ⋆ V  ∣^Sig = ⌊ Σ ⌋^Sig
   ∣ V ⇒ C  ∣^Sig = ∣ C ∣^Sig
   ∣ ⊤′     ∣^Sig = ⌊ [] ⌋^Sig

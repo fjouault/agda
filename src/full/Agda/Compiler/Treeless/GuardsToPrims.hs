@@ -1,30 +1,19 @@
 -- | Translates guard alternatives to if-then-else cascades.
 --
 -- The builtin translation must be run before this transformation.
-{-# LANGUAGE CPP #-}
 module Agda.Compiler.Treeless.GuardsToPrims ( convertGuards ) where
 
 import qualified Data.List as List
 
-
-import Agda.Syntax.Abstract.Name (QName)
 import Agda.Syntax.Treeless
-import Agda.Syntax.Literal
-
-import Agda.TypeChecking.Substitute
-
-import Agda.Compiler.Treeless.Subst
 
 import Agda.Utils.Impossible
-
-#include "undefined.h"
-
 
 
 convertGuards :: TTerm -> TTerm
 convertGuards = tr
   where
-    tr t = case t of
+    tr = \case
       TCase sc t def alts ->
         if null otherAlts
           then
@@ -43,16 +32,17 @@ convertGuards = tr
           trAlt (TAGuard{}) = __IMPOSSIBLE__
           trAlt a = a { aBody = tr (aBody a) }
 
-      TVar{}    -> t
-      TDef{}    -> t
-      TCon{}    -> t
-      TPrim{}   -> t
-      TLit{}    -> t
-      TUnit{}   -> t
-      TSort{}   -> t
-      TErased{} -> t
-      TError{}  -> t
+      t@TVar{}    -> t
+      t@TDef{}    -> t
+      t@TCon{}    -> t
+      t@TPrim{}   -> t
+      t@TLit{}    -> t
+      t@TUnit{}   -> t
+      t@TSort{}   -> t
+      t@TErased{} -> t
+      t@TError{}  -> t
 
+      TCoerce a               -> TCoerce (tr a)
       TLam b                  -> TLam (tr b)
       TApp a bs               -> TApp (tr a) (map tr bs)
       TLet e b                -> TLet (tr e) (tr b)

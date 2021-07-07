@@ -1,37 +1,39 @@
-{-# LANGUAGE CPP #-}
 module Agda.Compiler.MAlonzo.Pragmas where
 
-import Control.Applicative
 import Control.Monad
 import Data.Maybe
 import Data.Char
 import qualified Data.List as List
-import Data.Traversable (traverse)
-import Data.Map (Map)
 import qualified Data.Map as Map
+import Text.ParserCombinators.ReadP
 
 import Agda.Syntax.Position
 import Agda.Syntax.Abstract.Name
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Primitive
 
-import Agda.Utils.Lens
-import Agda.Utils.Parser.ReadP
 import Agda.Utils.Pretty hiding (char)
 import Agda.Utils.String ( ltrim )
 import Agda.Utils.Three
 
 import Agda.Compiler.Common
+import Agda.Compiler.MAlonzo.Misc
 
 import Agda.Utils.Impossible
-#include "undefined.h"
 
+type HaskellCode = String
+type HaskellType = String
+
+-- | GHC backend translation pragmas.
 data HaskellPragma
-      = HsDefn Range HaskellCode
-      | HsType Range HaskellType
-      | HsData Range HaskellType [HaskellCode]
-      | HsExport Range HaskellCode
+  = HsDefn Range HaskellCode
+      --  ^ @COMPILE GHC x = <code>@
+  | HsType Range HaskellType
+      --  ^ @COMPILE GHC X = type <type>@
+  | HsData Range HaskellType [HaskellCode]
+      -- ^ @COMPILE GHC X = data D (c₁ | ... | cₙ)
+  | HsExport Range HaskellCode
+      -- ^ @COMPILE GHC x as f@
   deriving (Show, Eq)
 
 instance HasRange HaskellPragma where
@@ -40,6 +42,16 @@ instance HasRange HaskellPragma where
   getRange (HsData   r _ _) = r
   getRange (HsExport r _)   = r
 
+instance Pretty HaskellPragma where
+  pretty = \case
+    HsDefn   _r hsCode        -> equals <+> text hsCode
+    HsType   _r hsType        -> equals <+> text hsType
+    HsData   _r hsType hsCons -> hsep $
+      [ equals, "data", text hsType
+      , parens $ hsep $ map text $ List.intersperse "|" hsCons
+      ]
+    HsExport _r hsCode        -> "as" <+> text hsCode
+
 -- Syntax for Haskell pragmas:
 --  HsDefn CODE       "= CODE"
 --  HsType TYPE       "= type TYPE"
@@ -47,12 +59,12 @@ instance HasRange HaskellPragma where
 --  HsExport NAME     "as NAME"
 parsePragma :: CompilerPragma -> Either String HaskellPragma
 parsePragma (CompilerPragma r s) =
-  case parse pragmaP s of
+  case [ p | (p, "") <- readP_to_S pragmaP s ] of
     []  -> Left $ "Failed to parse GHC pragma '" ++ s ++ "'"
     [p] -> Right p
     ps  -> Left $ "Ambiguous parse of pragma '" ++ s ++ "':\n" ++ unlines (map show ps)  -- shouldn't happen
   where
-    pragmaP :: ReadP Char HaskellPragma
+    pragmaP :: ReadP HaskellPragma
     pragmaP = choice [ exportP, typeP, dataP, defnP ]
 
     whitespace = many1 (satisfy isSpace)
@@ -63,8 +75,8 @@ parsePragma (CompilerPragma r s) =
     barP = skipSpaces *> char '|'
 
     -- quite liberal
-    isIdent c = isAlphaNum c || elem c "_.':[]"
-    isOp c    = not $ isSpace c || elem c "()"
+    isIdent c = isAlphaNum c || elem c ("_.':[]" :: String)
+    isOp c    = not $ isSpace c || elem c ("()" :: String)
     hsIdent = fst <$> gather (choice
                 [ string "()"
                 , many1 (satisfy isIdent)
@@ -84,7 +96,7 @@ parsePragma (CompilerPragma r s) =
                                                     paren (sepBy (skipSpaces *> hsIdent) barP) <* skipSpaces
     defnP   = HsDefn   r <$ wordsP ["="]         <* whitespace <*  notTypeOrData <*> hsCode
 
-parseHaskellPragma :: CompilerPragma -> TCM HaskellPragma
+parseHaskellPragma :: (MonadTCError m, MonadTrace m) => CompilerPragma -> m HaskellPragma
 parseHaskellPragma p = setCurrentRange p $
   case parsePragma p of
     Left err -> genericError err
@@ -96,7 +108,7 @@ getHaskellPragma q = do
   def <- getConstInfo q
   setCurrentRange pragma $ pragma <$ sanityCheckPragma def pragma
 
-sanityCheckPragma :: Definition -> Maybe HaskellPragma -> TCM ()
+sanityCheckPragma :: (HasBuiltins m, MonadTCError m, MonadReduce m) => Definition -> Maybe HaskellPragma -> m ()
 sanityCheckPragma _ Nothing = return ()
 sanityCheckPragma def (Just HsDefn{}) =
   case theDef def of
@@ -110,7 +122,7 @@ sanityCheckPragma def (Just HsDefn{}) =
       recOrDataErr which =
         typeError $ GenericDocError $
           sep [ text $ "Bad COMPILE GHC pragma for " ++ which ++ " type. Use"
-              , text "{-# COMPILE GHC <Name> = data <HsData> (<HsCon1> | .. | <HsConN>) #-}" ]
+              , "{-# COMPILE GHC <Name> = data <HsData> (<HsCon1> | .. | <HsConN>) #-}" ]
 sanityCheckPragma def (Just HsData{}) =
   case theDef def of
     Datatype{} -> return ()
@@ -137,17 +149,24 @@ sanityCheckPragma def (Just HsExport{}) =
 
 -- TODO: cache this to avoid parsing the pragma for every constructor
 --       occurrence!
-getHaskellConstructor :: QName -> TCM (Maybe HaskellCode)
+getHaskellConstructor :: QName -> HsCompileM (Maybe HaskellCode)
 getHaskellConstructor c = do
-  c     <- canonicalName c
-  cDef  <- theDef <$> getConstInfo c
-  true  <- getBuiltinName builtinTrue
-  false <- getBuiltinName builtinFalse
+  c    <- canonicalName c
+  cDef <- theDef <$> getConstInfo c
+  env  <- askGHCEnv
+  let is c p = Just c == p env
   case cDef of
-    _ | Just c == true  -> return $ Just "True"
-      | Just c == false -> return $ Just "False"
+    _ | c `is` ghcEnvTrue    -> return $ Just "True"
+      | c `is` ghcEnvFalse   -> return $ Just "False"
+      | c `is` ghcEnvNil     -> return $ Just "[]"
+      | c `is` ghcEnvCons    -> return $ Just "(:)"
+      | c `is` ghcEnvNothing -> return $ Just "Nothing"
+      | c `is` ghcEnvJust    -> return $ Just "Just"
+      | c `is` ghcEnvSharp   -> return $ Just "MAlonzo.RTE.Sharp"
+      | c `is` ghcEnvIZero   -> return $ Just "False"
+      | c `is` ghcEnvIOne    -> return $ Just "True"
     Constructor{conData = d} -> do
-      mp <- getHaskellPragma d
+      mp <- liftTCM $ getHaskellPragma d
       case mp of
         Just (HsData _ _ hsCons) -> do
           cons <- defConstructors . theDef <$> getConstInfo d
@@ -157,9 +176,9 @@ getHaskellConstructor c = do
 
 -- | Get content of @FOREIGN GHC@ pragmas, sorted by 'KindOfForeignCode':
 --   file header pragmas, import statements, rest.
-foreignHaskell :: TCM ([String], [String], [String])
+foreignHaskell :: Interface -> ([String], [String], [String])
 foreignHaskell = partitionByKindOfForeignCode classifyForeign
-    . map getCode . fromMaybe [] . Map.lookup ghcBackendName . iForeignCode <$> curIF
+    . map getCode . fromMaybe [] . Map.lookup ghcBackendName . iForeignCode
   where getCode (ForeignCode _ code) = code
 
 -- | Classify @FOREIGN@ Haskell code.
@@ -174,8 +193,8 @@ data KindOfForeignCode
 -- | Classify a @FOREIGN GHC@ declaration.
 classifyForeign :: String -> KindOfForeignCode
 classifyForeign s0 = case ltrim s0 of
-  s | List.isPrefixOf "import " s -> ForeignImport
-  s | List.isPrefixOf "{-#" s -> classifyPragma $ drop 3 s
+  s | "import " `List.isPrefixOf` s -> ForeignImport
+  s | "{-#" `List.isPrefixOf` s -> classifyPragma $ drop 3 s
   _ -> ForeignOther
 
 -- | Classify a Haskell pragma into whether it is a file header pragma or not.

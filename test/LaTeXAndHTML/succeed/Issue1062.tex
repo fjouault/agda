@@ -7,29 +7,37 @@
 \begin{code}%
 \>[0]\<%
 \\
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
 \AgdaKeyword{OPTIONS}\AgdaSpace{}%
-\AgdaOption{{-}{-}copatterns}\AgdaSpace{}%
-\AgdaOption{{-}{-}sized{-}types}\AgdaSpace{}%
-\AgdaSymbol{\#{-}\}}\<%
+\AgdaPragma{--copatterns}\AgdaSpace{}%
+\AgdaPragma{--sized-types}\AgdaSpace{}%
+\AgdaSymbol{\#-\}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
-\AgdaKeyword{BUILTIN} SIZE    \AgdaPostulate{Size}%
-\>[27]\AgdaSymbol{\#{-}\}}\<%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{BUILTIN}\AgdaSpace{}%
+\AgdaKeyword{SIZE}%
+\>[20]\AgdaPostulate{Size}%
+\>[27]\AgdaSymbol{\#-\}}\<%
 \\
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
-\AgdaKeyword{BUILTIN} SIZELT  \AgdaOperator{\AgdaPostulate{Size<\_}}\AgdaSpace{}%
-\AgdaSymbol{\#{-}\}}\<%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{BUILTIN}\AgdaSpace{}%
+\AgdaKeyword{SIZELT}%
+\>[20]\AgdaOperator{\AgdaPostulate{Size<\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaSymbol{\#-\}}\<%
 \\
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
-\AgdaKeyword{BUILTIN} SIZESUC \AgdaOperator{\AgdaPostulate{↑\_}}%
-\>[27]\AgdaSymbol{\#{-}\}}\<%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{BUILTIN}\AgdaSpace{}%
+\AgdaKeyword{SIZESUC}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{↑\AgdaUnderscore{}}}%
+\>[27]\AgdaSymbol{\#-\}}\<%
 \\
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
-\AgdaKeyword{BUILTIN} SIZEINF \AgdaPostulate{∞}%
-\>[27]\AgdaSymbol{\#{-}\}}\<%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{BUILTIN}\AgdaSpace{}%
+\AgdaKeyword{SIZEINF}\AgdaSpace{}%
+\AgdaPostulate{∞}%
+\>[27]\AgdaSymbol{\#-\}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -37,9 +45,9 @@
 \AgdaDatatype{List}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
@@ -49,7 +57,7 @@
 \AgdaBound{A}\<%
 \\
 %
-\>[2]\AgdaOperator{\AgdaInductiveConstructor{\_∷\_}}\AgdaSpace{}%
+\>[2]\AgdaOperator{\AgdaInductiveConstructor{\AgdaUnderscore{}∷\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{x}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
@@ -58,25 +66,25 @@
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaDatatype{List}\AgdaSpace{}%
 \AgdaBound{A}\AgdaSymbol{)}\AgdaSpace{}%
-\AgdaSymbol{{-}>}\AgdaSpace{}%
+\AgdaSymbol{->}\AgdaSpace{}%
 \AgdaDatatype{List}\AgdaSpace{}%
 \AgdaBound{A}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
 \>[0]\AgdaKeyword{record}\AgdaSpace{}%
-\AgdaOperator{\AgdaRecord{\_×\_}}\AgdaSpace{}%
+\AgdaOperator{\AgdaRecord{\AgdaUnderscore{}×\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{A}\AgdaSpace{}%
 \AgdaBound{B}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
 \>[2]\AgdaKeyword{constructor}\AgdaSpace{}%
-\AgdaOperator{\AgdaInductiveConstructor{\_,\_}}\<%
+\AgdaOperator{\AgdaInductiveConstructor{\AgdaUnderscore{},\AgdaUnderscore{}}}\<%
 \\
 %
 \>[2]\AgdaKeyword{field}\<%
@@ -92,11 +100,11 @@
 \AgdaBound{B}\<%
 \\
 \>[0]\AgdaKeyword{open}\AgdaSpace{}%
-\AgdaOperator{\AgdaModule{\_×\_}}\<%
+\AgdaOperator{\AgdaModule{\AgdaUnderscore{}×\AgdaUnderscore{}}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaComment{{-}{-} Sized streams via head/tail.}\<%
+\>[0]\AgdaComment{--\ Sized\ streams\ via\ head/tail.}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -107,15 +115,15 @@
 \AgdaPostulate{Size}\AgdaSymbol{\}}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
 \>[2]\AgdaKeyword{coinductive}\AgdaSymbol{;}\AgdaSpace{}%
 \AgdaKeyword{constructor}\AgdaSpace{}%
-\AgdaOperator{\AgdaCoinductiveConstructor{\_∷\_}}\<%
+\AgdaOperator{\AgdaCoinductiveConstructor{\AgdaUnderscore{}∷\AgdaUnderscore{}}}\<%
 \\
 %
 \>[2]\AgdaKeyword{field}\<%
@@ -144,7 +152,7 @@
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaOperator{\AgdaFunction{\_∷ˢ\_}}\AgdaSpace{}%
+\>[0]\AgdaOperator{\AgdaFunction{\AgdaUnderscore{}∷ˢ\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaSymbol{∀}\AgdaSpace{}%
 \AgdaSymbol{\{}\AgdaBound{i}\AgdaSpace{}%
@@ -177,15 +185,15 @@
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaComment{{-}{-} Streams and lists.}\<%
+\>[0]\AgdaComment{--\ Streams\ and\ lists.}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaComment{{-}{-} Prepending a list to a stream.}\<%
+\>[0]\AgdaComment{--\ Prepending\ a\ list\ to\ a\ stream.}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaOperator{\AgdaFunction{\_++ˢ\_}}\AgdaSpace{}%
+\>[0]\AgdaOperator{\AgdaFunction{\AgdaUnderscore{}++ˢ\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaSymbol{∀}\AgdaSpace{}%
 \AgdaSymbol{\{}\AgdaBound{i}\AgdaSpace{}%
@@ -222,7 +230,7 @@
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
-\>[0]\AgdaComment{{-}{-} Unfold which produces several outputs at one step}\<%
+\>[0]\AgdaComment{--\ Unfold\ which\ produces\ several\ outputs\ at\ one\ step}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -230,14 +238,14 @@
 \AgdaRecord{List1}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
 \>[2]\AgdaKeyword{constructor}\AgdaSpace{}%
-\AgdaOperator{\AgdaInductiveConstructor{\_∷\_}}\<%
+\AgdaOperator{\AgdaInductiveConstructor{\AgdaUnderscore{}∷\AgdaUnderscore{}}}\<%
 \\
 %
 \>[2]\AgdaKeyword{field}\<%
@@ -264,7 +272,7 @@
 \>[0]\AgdaKeyword{record}\AgdaSpace{}%
 \AgdaRecord{⊤}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\AgdaSpace{}%
 \AgdaKeyword{constructor}\AgdaSpace{}%
 \AgdaInductiveConstructor{trivial}\<%
@@ -275,8 +283,9 @@
 \AgdaOperator{\AgdaInductiveConstructor{∷}}\AgdaSpace{}%
 \AgdaInductiveConstructor{[]}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaKeyword{using}\AgdaSpace{}%
-\AgdaSymbol{(}head\AgdaSymbol{;} tail\AgdaSymbol{)}\AgdaSpace{}%
-\AgdaComment{{-}{-} problem: imports not colored}\<%
+\AgdaSymbol{(}\AgdaField{head}\AgdaSymbol{;}\AgdaSpace{}%
+\AgdaField{tail}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaComment{--\ problem:\ imports\ not\ colored}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -287,10 +296,10 @@
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaPostulate{Size}\AgdaSpace{}%
 \AgdaSymbol{→}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{\}}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{\}}\AgdaSpace{}%
 \AgdaSymbol{\{}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{\}}\<%
+\AgdaPrimitive{Set}\AgdaSymbol{\}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -349,7 +358,7 @@
 \AgdaBound{s}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{=}%
 \>[26]\AgdaKeyword{let}%
-\>[31]\AgdaSymbol{((\_}\AgdaSpace{}%
+\>[31]\AgdaSymbol{((\AgdaUnderscore{}}\AgdaSpace{}%
 \AgdaOperator{\AgdaInductiveConstructor{∷}}\AgdaSpace{}%
 \AgdaBound{l}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaOperator{\AgdaInductiveConstructor{,}}\AgdaSpace{}%

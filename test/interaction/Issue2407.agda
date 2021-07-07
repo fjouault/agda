@@ -2,6 +2,8 @@
 -- Jesper, 2017-01-24: if we allow a variable to be instantiated with a value
 -- of a supertype, the resulting dot pattern won't be type-correct.
 
+{-# OPTIONS --sized-types #-}
+
 open import Common.Size
 
 data D (i : Size) : (j : Size< ↑ i) → Set where
@@ -15,4 +17,4 @@ split : ∀ i (j : Size< ↑ i) → D i j → Set
 split i j x = {!x!}  -- split on x
 
 -- Expected: splitting on x succeeds with
---   split i .k (c j₁ k x x₁) = {!!}
+--   split i .k (c j k x x₁) = {!!}

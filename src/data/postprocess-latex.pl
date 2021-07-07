@@ -10,13 +10,13 @@ my $commands   = qr"(InductiveConstructor|CoinductiveConstructor\
 
 while (<>) {
 
-  s|(\\Agda$commands){(.*?)}
+  s|(\\Agda$commands)\{(.*?)\}
 
    | my $cmd = $1;
      my $arg = $3;
      my $tag = "$tag_prefix-$3" =~ s/\\_/$underscore/gr;
 
-     $_ = "\n%<*$tag>\n$cmd\{$arg\}\n%</$tag>\n";
+     $_ = "%\n%<*$tag>\n$cmd\{$arg\}%\n%</$tag>\n";
    |gxe;
 
   print;

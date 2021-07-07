@@ -1,5 +1,5 @@
-{-# LANGUAGE CPP                   #-}
-{-# LANGUAGE UndecidableInstances  #-}  -- Due to limitations of funct.dep.
+{-# LANGUAGE CPP  #-}
+{-# LANGUAGE UndecidableInstances  #-} -- Due MonadReader/MonadState fundep
 
 -- | @ListT@ done right,
 --   see https://www.haskell.org/haskellwiki/ListT_done_right_alternative
@@ -10,18 +10,30 @@
 
 module Agda.Utils.ListT where
 
-import Control.Applicative
+import Control.Applicative ( Alternative((<|>), empty) )
 import Control.Monad
+import Control.Monad.Fail as Fail
 import Control.Monad.Reader
 import Control.Monad.State
 
-import Data.Semigroup
+#if !(MIN_VERSION_base(4,11,0))
+import Data.Semigroup (Semigroup(..))
+#endif
 
 import Agda.Utils.Maybe
+import Agda.Utils.Monad
 
 -- | Lazy monadic computation of a list of results.
 newtype ListT m a = ListT { runListT :: m (Maybe (a, ListT m a)) }
   deriving (Functor)
+
+-- | Boilerplate function to lift 'MonadReader' through the 'ListT' transformer.
+mapListT :: (m (Maybe (a, ListT m a)) -> n (Maybe (b, ListT n b))) -> ListT m a -> ListT n b
+mapListT f = ListT . f . runListT
+
+-- | Inverse to 'mapListT'.
+unmapListT :: (ListT m a -> ListT n b) -> m (Maybe (a, ListT m a)) -> n (Maybe (b, ListT n b))
+unmapListT f = runListT . f . ListT
 
 -- * List operations
 
@@ -46,10 +58,21 @@ foldListT :: Monad m => (a -> m b -> m b) -> m b -> ListT m a -> m b
 foldListT cons nil = loop where
   loop l = caseListT l nil $ \ a l' -> cons a $ loop l'
 
+-- | Lazy monadic disjunction of lazy monadic list, effects left-to-right
+anyListT :: Monad m => ListT m a -> (a -> m Bool) -> m Bool
+anyListT xs f = foldListT (or2M . f) (return False) xs
+
+-- | Lazy monadic conjunction of lazy monadic list, effects left-to-right
+allListT :: Monad m => ListT m a -> (a -> m Bool) -> m Bool
+allListT xs f = foldListT (and2M . f) (return True) xs
+
+-- | Force all values in the lazy list, effects left-to-right
+sequenceListT :: Monad m => ListT m a -> m [a]
+sequenceListT = foldListT ((<$>) . (:)) $ pure []
+
 -- | The join operation of the @ListT m@ monad.
 concatListT :: Monad m => ListT m (ListT m a) -> ListT m a
-concatListT = ListT . foldListT append (return Nothing)
-  where append l = runListT . mappend l . ListT
+concatListT = ListT . foldListT (unmapListT . mappend) (return Nothing)
 
 -- * Monadic list operations.
 
@@ -59,7 +82,7 @@ runMListT ml = ListT $ runListT =<< ml
 
 -- | Monadic cons.
 consMListT :: Monad m => m a -> ListT m a -> ListT m a
-consMListT ma l = ListT $ (Just . (,l)) `liftM` ma
+consMListT ma l = ListT $ (Just . (,l)) <$> ma
 -- consMListT ma l = runMListT $ liftM (`consListT` l) ma
 
 -- simplification:
@@ -77,22 +100,14 @@ sgMListT ::  Monad m => m a -> ListT m a
 sgMListT ma = consMListT ma nilListT
 
 -- | Extending a monadic function to 'ListT'.
-mapMListT :: ( Monad m
-#if __GLASGOW_HASKELL__ <= 708
-             , Functor m
-#endif
-             ) => (a -> m b) -> ListT m a -> ListT m b
+mapMListT :: Monad m => (a -> m b) -> ListT m a -> ListT m b
 mapMListT f (ListT ml) = ListT $ do
   caseMaybeM ml (return Nothing) $ \ (a, as) -> do
     b  <- f a
     return $ Just (b , mapMListT f as)
 
 -- | Alternative implementation using 'foldListT'.
-mapMListT_alt :: ( Monad m
-#if __GLASGOW_HASKELL__ <= 708
-                 , Functor m
-#endif
-                 ) => (a -> m b) -> ListT m a -> ListT m b
+mapMListT_alt :: Monad m => (a -> m b) -> ListT m a -> ListT m b
 mapMListT_alt f = runMListT . foldListT cons (return nilListT)
   where cons a ml = consMListT (f a) <$> ml
 
@@ -104,11 +119,13 @@ liftListT lift xs = runMListT $ caseMaybeM (lift $ runListT xs) (return nilListT
 -- Instances
 
 instance Monad m => Semigroup (ListT m a) where
-  l1 <> l2 = ListT $ foldListT cons (runListT l2) l1
-    where cons a = runListT . consListT a . ListT
+  l1 <> l2 = ListT $ foldListT (unmapListT . consListT) (runListT l2) l1
+
 instance Monad m => Monoid (ListT m a) where
   mempty        = nilListT
+#if !(MIN_VERSION_base(4,11,0))
   mappend = (<>)
+#endif
 
 instance (Functor m, Applicative m, Monad m) => Alternative (ListT m) where
   empty = mempty
@@ -140,8 +157,11 @@ instance (Applicative m, MonadIO m) => MonadIO (ListT m) where
 
 instance (Applicative m, MonadReader r m) => MonadReader r (ListT m) where
   ask     = lift ask
-  local f = ListT . local f . runListT
+  local   = mapListT . local
 
 instance (Applicative m, MonadState s m) => MonadState s (ListT m) where
   get = lift get
   put = lift . put
+
+instance Monad m => MonadFail (ListT m) where
+  fail _ = empty

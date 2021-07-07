@@ -1,31 +1,23 @@
-{-# LANGUAGE CPP                #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE DeriveDataTypeable #-}
-#endif
-
 -- | An empty type with some useful instances.
 module Agda.Utils.Empty where
 
+import Control.DeepSeq
 import Control.Exception (evaluate)
 
-import Data.Functor ((<$))
 import Data.Data (Data)
-
-#if __GLASGOW_HASKELL__ <= 708
-import Data.Typeable ( Typeable )
-#endif
 
 import Agda.Utils.Impossible
 
-#include "undefined.h"
 
 data Empty
-#if __GLASGOW_HASKELL__ <= 708
-  deriving Typeable
-#endif
+
 deriving instance Data Empty
+
+-- | Values of type 'Empty' are not forced, because 'Empty' is used as
+-- a constructor argument in 'Agda.Syntax.Internal.Substitution''.
+
+instance NFData Empty where
+  rnf _ = ()
 
 instance Eq Empty where
   _ == _ = True

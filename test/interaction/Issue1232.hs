@@ -3,13 +3,16 @@
 import System.Directory
 
 import RunAgda
+import Agda.Version
 
 file       = "Issue1232.agda"
 firstCode  = "import Issue1232.List"
 secondCode = firstCode ++ "\n"
 
 main :: IO ()
-main = runAgda ["--caching"] $ \(AgdaCommands { .. }) -> do
+main = runAgda [ "--no-libraries"
+               , "--caching"
+               ] $ \(AgdaCommands { .. }) -> do
 
   -- Check the library.
   callAgda ["Issue1232/All.agda", "--ignore-interfaces"]
@@ -30,7 +33,11 @@ main = runAgda ["--caching"] $ \(AgdaCommands { .. }) -> do
   loadAndEcho file
 
   -- Clean up.
+  --
+  -- Clean up can fail if there are various versions of the Agda
+  -- library available for GHC.
+
   writeUTF8File file "\n"
-  removeFile $ file ++ "i"
+  removeFile $ concat [ "_build/", version, "/agda/", file, "i" ]
 
   return ()

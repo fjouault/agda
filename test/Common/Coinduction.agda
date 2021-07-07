@@ -1,3 +1,4 @@
+{-# OPTIONS --without-K --guardedness #-}
 module Common.Coinduction where
 
 open import Agda.Builtin.Coinduction public

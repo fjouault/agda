@@ -1,15 +1,9 @@
--- {-# LANGUAGE CPP #-}
 
 ------------------------------------------------------------------------
 -- | Handling of the INFINITY, SHARP and FLAT builtins.
 ------------------------------------------------------------------------
 
 module Agda.TypeChecking.Rules.Builtin.Coinduction where
-
-import Control.Applicative
-
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Common
@@ -20,7 +14,6 @@ import Agda.Syntax.Scope.Base
 import Agda.TypeChecking.CompiledClause
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.Primitive
 import Agda.TypeChecking.Reduce
@@ -28,8 +21,6 @@ import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Rules.Builtin
 import Agda.TypeChecking.Rules.Term
-
-import Agda.Utils.Permutation
 
 -- | The type of @∞@.
 
@@ -74,7 +65,7 @@ bindBuiltinSharp x =
     sharpType <- typeOfSharp
     TelV fieldTel _ <- telView sharpType
     sharpE    <- instantiateFull =<< checkExpr (A.Def sharp) sharpType
-    Def inf _ <- ignoreSharing <$> primInf
+    Def inf _ <- primInf
     infDefn   <- getConstInfo inf
     addConstant (defName infDefn) $
       infDefn { defPolarity       = [] -- not monotone
@@ -83,27 +74,29 @@ bindBuiltinSharp x =
                   { recPars           = 2
                   , recInduction      = Just CoInductive
                   , recClause         = Nothing
-                  , recConHead        = ConHead sharp CoInductive []  -- flat is added later
+                  , recConHead        = ConHead sharp (IsRecord CopatternMatching) CoInductive []  -- flat is added later
                   , recNamedCon       = True
                   , recFields         = []  -- flat is added later
                   , recTel            = fieldTel
-                  , recEtaEquality'   = Inferred False
+                  , recEtaEquality'   = Inferred $ NoEta CopatternMatching
+                  , recPatternMatching= CopatternMatching
                   , recMutual         = Just []
                   , recAbstr          = ConcreteDef
-                  , recComp           = Nothing
+                  , recComp           = emptyCompKit
                   }
               }
     addConstant sharp $
       sharpDefn { theDef = Constructor
                     { conPars   = 2
                     , conArity  = 1
-                    , conSrcCon = ConHead sharp CoInductive [] -- flat is added as field later
+                    , conSrcCon = ConHead sharp (IsRecord CopatternMatching) CoInductive [] -- flat is added as field later
                     , conData   = defName infDefn
                     , conAbstr  = ConcreteDef
                     , conInd    = CoInductive
-                    , conComp   = Nothing
+                    , conComp   = emptyCompKit
+                    , conProj   = Nothing
                     , conForced = []
-                    , conErased = []
+                    , conErased = Nothing
                     }
                 }
     return sharpE
@@ -119,10 +112,10 @@ bindBuiltinFlat :: ResolvedName -> TCM ()
 bindBuiltinFlat x =
   bindPostulatedName builtinFlat x $ \ flat flatDefn -> do
     flatE       <- instantiateFull =<< checkExpr (A.Def flat) =<< typeOfFlat
-    Def sharp _ <- ignoreSharing <$> primSharp
+    Def sharp _ <- primSharp
     kit         <- requireLevels
-    Def inf _   <- ignoreSharing <$> primInf
-    let sharpCon = ConHead sharp CoInductive [flat]
+    Def inf _   <- primInf
+    let sharpCon = ConHead sharp (IsRecord CopatternMatching) CoInductive [defaultArg flat]
         level    = El (mkType 0) $ Def (typeName kit) []
         tel     :: Telescope
         tel      = ExtendTel (domH $ level)                  $ Abs "a" $
@@ -130,7 +123,8 @@ bindBuiltinFlat x =
                    ExtendTel (domN $ El (varSort 1) $ var 0) $ Abs "x" $
                    EmptyTel
         infA     = El (varSort 2) $ Def inf [ Apply $ defaultArg $ var 1 ]
-        cpi      = ConPatternInfo Nothing False $ Just $ defaultArg infA
+        cpi      = noConPatternInfo { conPType = Just $ defaultArg infA
+                                    , conPLazy = True }
     let clause   = Clause
           { clauseLHSRange  = noRange
           , clauseFullRange = noRange
@@ -140,14 +134,12 @@ bindBuiltinFlat x =
           , clauseBody      = Just $ var 0
           , clauseType      = Just $ defaultArg $ El (varSort 2) $ var 1
           , clauseCatchall  = False
+          , clauseExact       = Just True
+          , clauseRecursive   = Just False
           , clauseUnreachable = Just False
+          , clauseEllipsis  = NoEllipsis
           }
-        cc = Case (defaultArg 0) $ Branches False
-                               (Map.singleton sharp
-                                 $ WithArity 1 $ Done [defaultArg "x"] $ var 0)
-                               Map.empty
-                               Nothing
-                               (Just False)
+        cc = Case (defaultArg 0) $ conCase sharp False $ WithArity 1 $ Done [defaultArg "x"] $ var 0
         projection = Projection
           { projProper   = Just inf
           , projOrig     = flat
@@ -158,13 +150,13 @@ bindBuiltinFlat x =
     addConstant flat $
       flatDefn { defPolarity       = []
                , defArgOccurrences = [StrictPos]  -- changing that to [Mixed] destroys monotonicity of 'Rec' in test/succeed/GuardednessPreservingTypeConstructors
+               , defCopatternLHS = hasProjectionPatterns cc
                , theDef = emptyFunction
                    { funClauses      = [clause]
                    , funCompiled     = Just $ cc
                    , funProjection   = Just projection
                    , funMutual       = Just []
                    , funTerminates   = Just True
-                   , funCopatternLHS = isCopatternLHS [clause]
                    }
                 }
 
@@ -172,7 +164,7 @@ bindBuiltinFlat x =
     modifySignature $ updateDefinition sharp $ updateTheDef $ \ def ->
       def { conSrcCon = sharpCon }
     modifySignature $ updateDefinition inf $ updateTheDef $ \ def ->
-      def { recConHead = sharpCon, recFields = [defaultArg flat] }
+      def { recConHead = sharpCon, recFields = [defaultDom flat] }
     return flatE
 
 -- The coinductive primitives.

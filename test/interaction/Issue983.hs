@@ -3,6 +3,7 @@
 import System.Directory
 
 import RunAgda
+import Agda.Version
 
 top     = "Issue983"
 topFile = top ++ ".agda"
@@ -11,7 +12,7 @@ libFile = lib ++ ".agda"
 badFile = top ++ "-Bad.agda"
 
 main :: IO ()
-main = runAgda [] $ \(AgdaCommands { .. }) -> do
+main = runAgda ["--no-libraries"] $ \(AgdaCommands { .. }) -> do
 
   -- Discard the first prompt.
   echoUntilPrompt
@@ -34,10 +35,15 @@ main = runAgda [] $ \(AgdaCommands { .. }) -> do
   -- Load the highlighting info for bad. This looks in the
   -- moduleToSource map for lib, and this should not cause an internal
   -- error.
-  send $ command "load_highlighting_info" badFile Nothing Nothing
+  send $ command "load_highlighting_info" badFile
+           (Just "NonInteractive Indirect")
+           (Just $ show badFile)
   echoUntilPrompt
 
   -- Clean up.
-  mapM_ removeFile [libFile, libFile ++ "i", badFile]
+  --
+  -- Clean up can fail if there are various versions of the Agda
+  -- library available for GHC.
+  mapM_ removeFile [libFile, concat [ "_build/", version, "/agda/", libFile, "i" ], badFile]
 
   return ()

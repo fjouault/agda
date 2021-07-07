@@ -1,3 +1,4 @@
+{-# OPTIONS --guardedness #-}
 
 module Common.MAlonzo where
 
@@ -9,7 +10,7 @@ open import Common.Coinduction
 postulate
   putStrLn : ∞ String → IO Unit
 
-{-# COMPILE GHC putStrLn = Data.Text.IO.putStrLn #-}
+{-# COMPILE GHC putStrLn = Data.Text.IO.putStrLn . MAlonzo.RTE.flat #-}
 
 main = putStrLn (♯ "This is a dummy main routine.")
 

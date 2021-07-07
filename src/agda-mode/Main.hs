@@ -4,7 +4,6 @@
 
 module Main (main) where
 
-import Control.Applicative
 import Control.Exception
 import Control.Monad
 import Data.Char
@@ -128,8 +127,7 @@ alreadyInstalled :: Files -> IO Bool
 alreadyInstalled files = do
   exists <- doesFileExist (dotEmacs files)
   if not exists then return False else
-    withFile (dotEmacs files) ReadMode $ \h ->
-      evaluate . (identifier files `isInfixOf`) =<< hGetContents h
+    withFile (dotEmacs files) ReadMode $ (evaluate . (identifier files `isInfixOf`)) <=< hGetContents
       -- Uses evaluate to ensure that the file is not closed
       -- prematurely.
 
@@ -166,8 +164,9 @@ askEmacs query = do
           (removeFile . fst) $ \(file, h) -> do
     hClose h
     exit <- rawSystem "emacs"
-                      [ "--no-desktop", "--no-window-system", "--no-splash"
+                      [ "--no-desktop", "-nw", "--no-splash"
                           -- Andreas, 2014-01-11: ^ try a leaner startup of emacs
+                          -- Andreas, 2018-09-08: -nw instead of --no-window-system as some emacses do not support the long version
                       , "--eval"
                       , "(with-temp-file " ++ escape file ++ " "
                                            ++ query ++ ")"

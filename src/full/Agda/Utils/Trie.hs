@@ -1,11 +1,3 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE DeriveDataTypeable #-}
-#endif
-
 -- | Strict tries (based on "Data.Map.Strict" and "Agda.Utils.Maybe.Strict").
 
 module Agda.Utils.Trie
@@ -15,27 +7,23 @@ module Agda.Utils.Trie
   , toList, toAscList, toListOrderedBy
   , lookup, member, lookupPath, lookupTrie
   , mapSubTries, filter
+  , valueAt
   ) where
 
 import Prelude hiding (null, lookup, filter)
-import qualified Prelude
 
-import Control.Monad
+import Control.DeepSeq
+
 import Data.Function
-import Data.Functor
-import Data.Foldable (Foldable)
 import qualified Data.Maybe as Lazy
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Monoid
-import qualified Data.List as List
 
-#if __GLASGOW_HASKELL__ <= 708
-import Data.Typeable ( Typeable )
-#endif
+import qualified Data.List as List
 
 import qualified Agda.Utils.Maybe.Strict as Strict
 import Agda.Utils.Null
+import Agda.Utils.Lens
 
 -- | Finite map from @[k]@ to @v@.
 --
@@ -45,10 +33,10 @@ data Trie k v = Trie !(Strict.Maybe v) !(Map k (Trie k v))
            , Eq
            , Functor
            , Foldable
-#if __GLASGOW_HASKELL__ <= 708
-           , Typeable
-#endif
            )
+
+instance (NFData k, NFData v) => NFData (Trie k v) where
+  rnf (Trie a b) = rnf a `seq` rnf b
 
 -- | Empty trie.
 instance Null (Trie k v) where
@@ -87,7 +75,7 @@ unionWith f (Trie v ss) (Trie w ts) =
 --
 --   @insert = insertWith (\ new old -> new)@
 insert :: (Ord k) => [k] -> v -> Trie k v -> Trie k v
-insert k v t = union (singleton k v) t
+insert k v t = (singleton k v) `union` t
 
 -- | Insert with function merging new value with old value.
 insertWith :: (Ord k) => (v -> v -> v) -> [k] -> v -> Trie k v -> Trie k v
@@ -173,3 +161,8 @@ filter p (Trie mv ts) = Trie mv' (Map.filter (not . null) $ filter p <$> ts)
         Strict.Just v | p v -> mv
         _                   -> Strict.Nothing
 
+-- | Key lens.
+valueAt :: Ord k => [k] -> Lens' (Maybe v) (Trie k v)
+valueAt path f t = f (lookup path t) <&> \ case
+  Nothing -> delete path t
+  Just v  -> insert path v t

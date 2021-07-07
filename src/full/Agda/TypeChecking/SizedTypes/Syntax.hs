@@ -1,20 +1,15 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE NoMonomorphismRestriction  #-}
-{-# LANGUAGE UndecidableInstances       #-}
 
 -- | Syntax of size expressions and constraints.
 
 module Agda.TypeChecking.SizedTypes.Syntax where
 
-import Prelude hiding (null)
+import Prelude hiding ( null )
 
-import Data.Maybe
-import Data.Foldable (Foldable)
+
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Traversable (Traversable)
 
 import Agda.TypeChecking.SizedTypes.Utils
 
@@ -28,7 +23,7 @@ import Agda.Utils.Pretty
 newtype Offset = O Int
   deriving (Eq, Ord, Num, Enum)
 
--- This Show instance is ok because of the Enum constraint.
+-- This Show instance is ok because of the Num constraint.
 instance Show Offset where
   show (O n) = show n
 
@@ -136,7 +131,7 @@ newtype Solution rigid flex = Solution { theSolution :: Map flex (SizeExpr' rigi
 
 instance (Pretty r, Pretty f) => Pretty (Solution r f) where
   pretty (Solution sol) = prettyList $ for (Map.toList sol) $ \ (x, e) ->
-    pretty x <+> text ":=" <+> pretty e
+    pretty x <+> ":=" <+> pretty e
 
 emptySolution :: Solution r f
 emptySolution = Solution Map.empty
@@ -242,22 +237,22 @@ compareOffset n Lt m = n <  m
 
 instance (Pretty r, Pretty f) => Pretty (SizeExpr' r f) where
   pretty (Const n)   = pretty n
-  pretty (Infty)     = text "∞"
+  pretty (Infty)     = "∞"
   pretty (Rigid i 0) = pretty i
   pretty (Rigid i n) = pretty i <> text ("+" ++ show n)
   pretty (Flex  x 0) = pretty x
   pretty (Flex  x n) = pretty x <> text ("+" ++ show n)
 
 instance Pretty Polarity where
-  pretty Least    = text "-"
-  pretty Greatest = text "+"
+  pretty Least    = "-"
+  pretty Greatest = "+"
 
 instance Pretty flex => Pretty (PolarityAssignment flex) where
   pretty (PolarityAssignment pol flex) = pretty pol <> pretty flex
 
 instance Pretty Cmp where
-  pretty Le = text "≤"
-  pretty Lt = text "<"
+  pretty Le = "≤"
+  pretty Lt = "<"
 
 instance (Pretty r, Pretty f) => Pretty (Constraint' r f) where
   pretty (Constraint a cmp b) = pretty a <+> pretty cmp <+> pretty b
@@ -296,29 +291,38 @@ instance TruncateOffset (SizeExpr' r f) where
 -- * Computing variable sets
 
 -- | The rigid variables contained in a pice of syntax.
-class Rigids r a where
-  rigids :: a -> Set r
+class Ord (RigidOf a) => Rigids a where
+  type RigidOf a
+  rigids :: a -> Set (RigidOf a)
 
-instance (Ord r, Rigids r a) => Rigids r [a] where
+instance Rigids a => Rigids [a] where
+  type RigidOf [a] = RigidOf a
   rigids as = Set.unions (map rigids as)
 
-instance Rigids r (SizeExpr' r f) where
+instance Ord r => Rigids (SizeExpr' r f) where
+  type RigidOf (SizeExpr' r f) = r
   rigids (Rigid x _) = Set.singleton x
+
   rigids _           = Set.empty
 
-instance Ord r => Rigids r (Constraint' r f) where
+instance Ord r => Rigids (Constraint' r f) where
+  type RigidOf (Constraint' r f) = r
   rigids (Constraint l _ r) = Set.union (rigids l) (rigids r)
 
 -- | The flexibe variables contained in a pice of syntax.
-class Flexs flex a | a -> flex where
-  flexs :: a -> Set flex
+class Ord (FlexOf a) => Flexs a where
+  type FlexOf a
+  flexs :: a -> Set (FlexOf a)
 
-instance (Ord flex, Flexs flex a) => Flexs flex [a] where
+instance Flexs a => Flexs [a] where
+  type FlexOf [a] = FlexOf a
   flexs as = Set.unions (map flexs as)
 
-instance Flexs flex (SizeExpr' rigid flex) where
+instance Ord flex => Flexs (SizeExpr' rigid flex) where
+  type FlexOf (SizeExpr' rigid flex) = flex
   flexs (Flex x _) = Set.singleton x
   flexs _          = Set.empty
 
-instance (Ord flex) => Flexs flex (Constraint' rigid flex) where
+instance Ord flex => Flexs (Constraint' rigid flex) where
+  type FlexOf (Constraint' rigid flex) = flex
   flexs (Constraint l _ r) = Set.union (flexs l) (flexs r)

@@ -1,59 +1,53 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
 module Agda.TypeChecking.With where
 
-import Control.Arrow ((&&&), (***), first, second)
-import Control.Applicative hiding (empty)
 import Control.Monad
 import Control.Monad.Writer (WriterT, runWriterT, tell)
 
 import Data.Either
 import qualified Data.List as List
 import Data.Maybe
-import Data.Monoid
-import Data.Traversable (traverse)
+import Data.Foldable ( foldrM )
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Internal.Pattern
 import qualified Agda.Syntax.Abstract as A
+import Agda.Syntax.Abstract.Pattern as A
 import Agda.Syntax.Abstract.Views
 import Agda.Syntax.Info
 import Agda.Syntax.Position
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Datatypes
 import Agda.TypeChecking.EtaContract
 import Agda.TypeChecking.Free
 import Agda.TypeChecking.Patterns.Abstract
 import Agda.TypeChecking.Pretty
+import Agda.TypeChecking.Primitive ( getRefl )
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
-import Agda.TypeChecking.ReconstructParameters
-import Agda.TypeChecking.Rules.Term
+import Agda.TypeChecking.Telescope.Path
 
 import Agda.TypeChecking.Abstract
 import Agda.TypeChecking.Rules.LHS.Implicit
-import Agda.TypeChecking.Rules.LHS (isFlexiblePattern)
+import Agda.TypeChecking.Rules.LHS.Problem (ProblemEq(..))
 
 import Agda.Utils.Functor
 import Agda.Utils.List
+import qualified Agda.Utils.List1 as List1
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.NonemptyList
 import Agda.Utils.Null (empty)
 import Agda.Utils.Permutation
 import Agda.Utils.Pretty (prettyShow)
 import qualified Agda.Utils.Pretty as P
 import Agda.Utils.Size
 
-#include "undefined.h"
 import Agda.Utils.Impossible
-
 
 -- | Split pattern variables according to with-expressions.
 
@@ -63,39 +57,32 @@ import Agda.Utils.Impossible
 --
 --   [@Δ ⊢ t@]     type of rhs.
 --
---   [@Δ ⊢ as@]    types of with arguments.
---
---   [@Δ ⊢ vs@]    with arguments.
---
+--   [@Δ ⊢ vs : as@]    with arguments and their types
 --
 --   Output:
 --
---   [@Δ₁@]        part of context needed for with arguments and their types.
+--   [@Δ₁@]              part of context needed for with arguments and their types.
 --
---   [@Δ₂@]        part of context not needed for with arguments and their types.
+--   [@Δ₂@]              part of context not needed for with arguments and their types.
 --
---   [@π@]         permutation from Δ to Δ₁Δ₂ as returned by 'splitTelescope'.
+--   [@π@]               permutation from Δ to Δ₁Δ₂ as returned by 'splitTelescope'.
 --
---   [@Δ₁Δ₂ ⊢ t'@] type of rhs under @π@
+--   [@Δ₁Δ₂ ⊢ t'@]       type of rhs under @π@
 --
---   [@Δ₁ ⊢ as'@]  types of with-arguments depending only on @Δ₁@.
---
---   [@Δ₁ ⊢ vs'@]  with-arguments under @π@.
+--   [@Δ₁ ⊢ vs' : as'@]  with-arguments and their types depending only on @Δ₁@.
 
 splitTelForWith
   -- Input:
-  :: Telescope      -- ^ __@Δ@__        context of types and with-arguments.
-  -> Type           -- ^ __@Δ ⊢ t@__    type of rhs.
-  -> [EqualityView] -- ^ __@Δ ⊢ as@__   types of with arguments.
-  -> [Term]         -- ^ __@Δ ⊢ vs@__   with arguments.
+  :: Telescope                         -- ^ __@Δ@__             context of types and with-arguments.
+  -> Type                              -- ^ __@Δ ⊢ t@__         type of rhs.
+  -> [Arg (Term, EqualityView)]        -- ^ __@Δ ⊢ vs : as@__   with arguments and their types.
   -- Output:
-  -> ( Telescope    -- @Δ₁@       part of context needed for with arguments and their types.
-     , Telescope    -- @Δ₂@       part of context not needed for with arguments and their types.
-     , Permutation  -- @π@        permutation from Δ to Δ₁Δ₂ as returned by 'splitTelescope'.
-     , Type         -- @Δ₁Δ₂ ⊢ t'@ type of rhs under @π@
-     , [EqualityView] -- @Δ₁ ⊢ as'@ types of with- and rewrite-arguments depending only on @Δ₁@.
-     , [Term]       -- @Δ₁ ⊢ vs'@ with- and rewrite-arguments under @π@.
-     )              -- ^ (__@Δ₁@__,__@Δ₂@__,__@π@__,__@t'@__,__@as'@__,__@vs'@__) where
+  -> ( Telescope                         -- @Δ₁@             part of context needed for with arguments and their types.
+     , Telescope                         -- @Δ₂@             part of context not needed for with arguments and their types.
+     , Permutation                       -- @π@              permutation from Δ to Δ₁Δ₂ as returned by 'splitTelescope'.
+     , Type                              -- @Δ₁Δ₂ ⊢ t'@      type of rhs under @π@
+     , [Arg (Term, EqualityView)]        -- @Δ₁ ⊢ vs' : as'@ with- and rewrite-arguments and types under @π@.
+     )              -- ^ (__@Δ₁@__,__@Δ₂@__,__@π@__,__@t'@__,__@vtys'@__) where
 --
 --   [@Δ₁@]        part of context needed for with arguments and their types.
 --
@@ -105,39 +92,27 @@ splitTelForWith
 --
 --   [@Δ₁Δ₂ ⊢ t'@] type of rhs under @π@
 --
---   [@Δ₁ ⊢ as'@]  types with with-arguments depending only on @Δ₁@.
---
---   [@Δ₁ ⊢ vs'@]  with-arguments under @π@.
+--   [@Δ₁ ⊢ vtys'@]  with-arguments and their types under @π@.
 
-splitTelForWith delta t as vs = let
-    -- Andreas, 2016-01-27, unfixing issue 1692
-    -- Due to public protests, we do not rewrite in the types of rewrite
-    -- expressions.
-    -- Otherwise, we cannot rewrite twice after another with the same equation
-    -- as it turns into a reflexive equation in the first rewrite.
-    -- Thus we include the fvs of the rewrite terms in Δ₁.
-    rewriteTerms = map snd $ filter (isEqualityType . fst) $ zip as vs
-
+splitTelForWith delta t vtys = let
     -- Split the telescope into the part needed to type the with arguments
     -- and all the other stuff.
-    fv = allFreeVars (as, vs)
+    fv = allFreeVars vtys
     SplitTel delta1 delta2 perm = splitTelescope fv delta
 
     -- Δ₁Δ₂ ⊢ π : Δ
-    pi = renaming __IMPOSSIBLE__ (reverseP perm)
+    pi = renaming impossible (reverseP perm)
     -- Δ₁ ⊢ ρ : Δ₁Δ₂  (We know that as does not depend on Δ₂.)
-    rho = strengthenS __IMPOSSIBLE__ $ size delta2
+    rho = strengthenS impossible $ size delta2
     -- Δ₁ ⊢ ρ ∘ π : Δ
     rhopi = composeS rho pi
 
     -- We need Δ₁Δ₂ ⊢ t'
     t' = applySubst pi t
-    -- and Δ₁ ⊢ as'
-    as' = applySubst rhopi as
-    -- and Δ₁ ⊢ vs' : as'
-    vs' = applySubst rhopi vs
+    -- and Δ₁ ⊢ vtys'
+    vtys' = applySubst rhopi vtys
 
-  in (delta1, delta2, perm, t', as', vs')
+  in (delta1, delta2, perm, t', vtys')
 
 
 -- | Abstract with-expressions @vs@ to generate type for with-helper function.
@@ -145,18 +120,18 @@ splitTelForWith delta t as vs = let
 -- Each @EqualityType@, coming from a @rewrite@, will turn into 2 abstractions.
 
 withFunctionType
-  :: Telescope      -- ^ @Δ₁@                       context for types of with types.
-  -> [Term]         -- ^ @Δ₁,Δ₂ ⊢ vs : raise Δ₂ as@  with and rewrite-expressions.
-  -> [EqualityView] -- ^ @Δ₁ ⊢ as@                  types of with and rewrite-expressions.
-  -> Telescope      -- ^ @Δ₁ ⊢ Δ₂@                  context extension to type with-expressions.
-  -> Type           -- ^ @Δ₁,Δ₂ ⊢ b@                type of rhs.
+  :: Telescope                          -- ^ @Δ₁@                        context for types of with types.
+  -> [Arg (Term, EqualityView)]         -- ^ @Δ₁,Δ₂ ⊢ vs : raise Δ₂ as@  with and rewrite-expressions and their type.
+  -> Telescope                          -- ^ @Δ₁ ⊢ Δ₂@                   context extension to type with-expressions.
+  -> Type                               -- ^ @Δ₁,Δ₂ ⊢ b@                 type of rhs.
+  -> [(Int,(Term,Term))]                -- ^ @Δ₁,Δ₂ ⊢ [(i,(u0,u1))] : b  boundary.
   -> TCM (Type, Nat)
     -- ^ @Δ₁ → wtel → Δ₂′ → b′@ such that
     --     @[vs/wtel]wtel = as@ and
     --     @[vs/wtel]Δ₂′ = Δ₂@ and
     --     @[vs/wtel]b′ = b@.
     -- Plus the final number of with-arguments.
-withFunctionType delta1 vs as delta2 b = addContext delta1 $ do
+withFunctionType delta1 vtys delta2 b bndry = addContext delta1 $ do
 
   reportSLn "tc.with.abstract" 20 $ "preparing for with-abstraction"
 
@@ -164,37 +139,53 @@ withFunctionType delta1 vs as delta2 b = addContext delta1 $ do
   -- of the pattern variables not mentioned in @vs : as@.
   let dbg n s x = reportSDoc "tc.with.abstract" n $ nest 2 $ text (s ++ " =") <+> prettyTCM x
 
-  let d2b = telePi_ delta2 b
+  d2b <- telePiPath_ delta2 b bndry
   dbg 30 "Δ₂ → B" d2b
   d2b  <- normalise d2b
   dbg 30 "normal Δ₂ → B" d2b
   d2b  <- etaContract d2b
   dbg 30 "eta-contracted Δ₂ → B" d2b
 
-  vs <- etaContract =<< normalise vs
-  as <- etaContract =<< normalise as  -- do we need this?
+  vtys <- etaContract =<< normalise vtys
 
-  let piAbstractVs []         b = return b
-      piAbstractVs (va : vas) b = piAbstract va =<< piAbstractVs vas b
   -- wd2db = wtel → [vs : as] (Δ₂ → B)
-  wd2b <- piAbstractVs (zip vs as) d2b
+  wd2b <- foldrM piAbstract d2b vtys
   dbg 30 "wΓ → Δ₂ → B" wd2b
 
-  return (telePi_ delta1 wd2b, countWithArgs as)
+  let nwithargs = countWithArgs (map (snd . unArg) vtys)
+
+  TelV wtel _ <- telViewUpTo nwithargs wd2b
+
+  -- select the boundary for "Δ₁" abstracting over "wΓ.Δ₂"
+  let bndry' = [(i - sd2,(lams u0, lams u1)) | (i,(u0,u1)) <- bndry, i >= sd2]
+        where sd2 = size delta2
+              lams u = teleNoAbs wtel (abstract delta2 u)
+
+  d1wd2b <- telePiPath_ delta1 wd2b bndry'
+
+  dbg 30 "Δ₁ → wΓ → Δ₂ → B" d1wd2b
+
+  return (d1wd2b, nwithargs)
 
 countWithArgs :: [EqualityView] -> Nat
 countWithArgs = sum . map countArgs
   where
     countArgs OtherType{}    = 1
+    countArgs IdiomType{}    = 2
     countArgs EqualityType{} = 2
 
 -- | From a list of @with@ and @rewrite@ expressions and their types,
 --   compute the list of final @with@ expressions (after expanding the @rewrite@s).
-withArguments :: [Term] -> [EqualityView] -> [Term]
-withArguments vs as = concat $ for (zip vs as) $ \case
-  (v, OtherType a) -> [v]
-  (prf, eqt@(EqualityType s _eq _pars _t v _v')) -> [unArg v, prf]
-
+withArguments :: [Arg (Term, EqualityView)] ->
+                 TCM [Arg Term]
+withArguments vtys = do
+  tss <- forM vtys $ \ (Arg info ts) -> fmap (map (Arg info)) $ case ts of
+    (v, OtherType a) -> pure [v]
+    (prf, eqt@(EqualityType s _eq _pars _t v _v')) -> pure [unArg v, prf]
+    (v, IdiomType t) -> do
+       mkRefl <- getRefl
+       pure [v, mkRefl (defaultArg v)]
+  pure (concat tss)
 
 -- | Compute the clauses for the with-function given the original patterns.
 buildWithFunction
@@ -214,78 +205,83 @@ buildWithFunction
 buildWithFunction cxtNames f aux t delta qs npars withSub perm n1 n cs = mapM buildWithClause cs
   where
     -- Nested with-functions will iterate this function once for each parent clause.
-    buildWithClause (A.Clause (A.SpineLHS i _ ps wps) inheritedDots inhStrippedDots rhs wh catchall) = do
-      let (wps0, wps1) = splitAt n wps
-          ps0          = map defaultNamedArg wps0
-      reportSDoc "tc.with" 50 $ text "inheritedDots:" <+> vcat [ prettyTCM x <+> text "=" <+> prettyTCM v <+> text ":" <+> prettyTCM a
-                                                               | A.NamedDot x v a <- inheritedDots ]
-      rhs <- buildRHS rhs
-      (namedDots, strippedDots, ps') <- stripWithClausePatterns cxtNames f aux t delta qs npars perm ps
-      reportSDoc "tc.with" 50 $ hang (text "strippedDots:") 2 $
-                                  vcat [ prettyTCM e <+> text "==" <+> prettyTCM v <+> (text ":" <+> prettyTCM t)
-                                       | A.StrippedDot e v t <- strippedDots ]
+    buildWithClause (A.Clause (A.SpineLHS i _ allPs) inheritedPats rhs wh catchall) = do
+      let (ps, wps)    = splitOffTrailingWithPatterns allPs
+          (wps0, wps1) = splitAt n wps
+          ps0          = map (updateNamedArg fromWithP) wps0
+            where
+            fromWithP (A.WithP _ p) = p
+            fromWithP _ = __IMPOSSIBLE__
+      reportSDoc "tc.with" 50 $ "inheritedPats:" <+> vcat
+        [ prettyA p <+> "=" <+> prettyTCM v <+> ":" <+> prettyTCM a
+        | A.ProblemEq p v a <- inheritedPats
+        ]
+      (strippedPats, ps') <- stripWithClausePatterns cxtNames f aux t delta qs npars perm ps
+      reportSDoc "tc.with" 50 $ hang "strippedPats:" 2 $
+                                  vcat [ prettyA p <+> "==" <+> prettyTCM v <+> (":" <+> prettyTCM t)
+                                       | A.ProblemEq p v t <- strippedPats ]
+      rhs <- buildRHS strippedPats rhs
       let (ps1, ps2) = splitAt n1 ps'
-      let result = A.Clause (A.SpineLHS i aux (ps1 ++ ps0 ++ ps2) wps1) (inheritedDots ++ namedDots)
-                                                                        (inhStrippedDots ++ strippedDots) rhs wh catchall
+      let result = A.Clause (A.SpineLHS i aux $ ps1 ++ ps0 ++ ps2 ++ wps1)
+                     (inheritedPats ++ strippedPats)
+                     rhs wh catchall
       reportSDoc "tc.with" 20 $ vcat
-        [ text "buildWithClause returns" <+> prettyA result
+        [ "buildWithClause returns" <+> prettyA result
         ]
       return result
 
-    buildRHS rhs@A.RHS{}                 = return rhs
-    buildRHS rhs@A.AbsurdRHS             = return rhs
-    buildRHS (A.WithRHS q es cs)         = A.WithRHS q es <$>
+    buildRHS _ rhs@A.RHS{}                 = return rhs
+    buildRHS _ rhs@A.AbsurdRHS             = return rhs
+    buildRHS _ (A.WithRHS q es cs)         = A.WithRHS q es <$>
       mapM ((A.spineToLhs . permuteNamedDots) <.> buildWithClause . A.lhsToSpine) cs
-    buildRHS (A.RewriteRHS qes rhs wh) = flip (A.RewriteRHS qes) wh <$> buildRHS rhs
+    buildRHS strippedPats1 (A.RewriteRHS qes strippedPats2 rhs wh) =
+      flip (A.RewriteRHS qes (applySubst withSub $ strippedPats1 ++ strippedPats2)) wh <$> buildRHS [] rhs
 
-    -- The named dot patterns computed by buildWithClause lives in the context
+    -- The stripped patterns computed by buildWithClause lives in the context
     -- of the top with-clause (of the current call to buildWithFunction). When
-    -- we recurse we expect inherited named dot patterns to live in the context
+    -- we recurse we expect inherited patterns to live in the context
     -- of the innermost parent clause. Note that this makes them live in the
     -- context of the with-function arguments before any pattern matching. We
     -- need to update again once the with-clause patterns have been checked.
-    -- This happens in Rules.Def.checkClause before calling checkRHS. The same
-    -- goes for stripped dots.
+    -- This happens in Rules.Def.checkClause before calling checkRHS.
     permuteNamedDots :: A.SpineClause -> A.SpineClause
-    permuteNamedDots (A.Clause lhs dots sdots rhs wh catchall) =
-      A.Clause lhs (applySubst withSub dots) (applySubst withSub sdots) rhs wh catchall
+    permuteNamedDots (A.Clause lhs strippedPats rhs wh catchall) =
+      A.Clause lhs (applySubst withSub strippedPats) rhs wh catchall
+
+
+-- The arguments of @stripWithClausePatterns@ are documented
+-- at its type signature.
+-- The following is duplicate information, but may help reading the examples below.
+--
+-- [@Δ@]   context bound by lhs of original function.
+-- [@f@]   name of @with@-function.
+-- [@t@]   type of the original function.
+-- [@qs@]  internal patterns for original function.
+-- [@np@]  number of module parameters in @qs@
+-- [@π@]   permutation taking @vars(qs)@ to @support(Δ)@.
+-- [@ps@]  patterns in with clause (eliminating type @t@).
+-- [@ps'@] patterns for with function (presumably of type @Δ@).
 
 {-| @stripWithClausePatterns cxtNames parent f t Δ qs np π ps = ps'@
-
-[@Δ@]   context bound by lhs of original function.
-
-[@f@]   name of @with@-function.
-
-[@t@]   type of the original function.
-
-[@qs@]  internal patterns for original function.
-
-[@np@]  number of module parameters in @qs@
-
-[@π@]   permutation taking @vars(qs)@ to @support(Δ)@.
-
-[@ps@]  patterns in with clause (eliminating type @t@).
-
-[@ps'@] patterns for with function (presumably of type @Δ@).
 
 Example:
 
 @
-record Stream (A : Set) : Set where
-  coinductive
-  constructor delay
-  field       force : A × Stream A
+  record Stream (A : Set) : Set where
+    coinductive
+    constructor delay
+    field       force : A × Stream A
 
-record SEq (s t : Stream A) : Set where
-  coinductive
-  field
-    ~force : let a , as = force s
-                 b , bs = force t
-             in  a ≡ b × SEq as bs
+  record SEq (s t : Stream A) : Set where
+    coinductive
+    field
+      ~force : let a , as = force s
+                   b , bs = force t
+               in  a ≡ b × SEq as bs
 
-test : (s : Nat × Stream Nat) (t : Stream Nat) → SEq (delay s) t → SEq t (delay s)
-~force (test (a     , as) t p) with force t
-~force (test (suc n , as) t p) | b , bs = {!!}
+  test : (s : Nat × Stream Nat) (t : Stream Nat) → SEq (delay s) t → SEq t (delay s)
+  ~force (test (a     , as) t p) with force t
+  ~force (test (suc n , as) t p) | b , bs = ?
 @
 
 With function:
@@ -307,27 +303,27 @@ Resulting with-function clause is:
   f t (b , bs) (suc n) as t p
 @
 
-Note: stripWithClausePatterns factors @ps@ through @qs@, thus
+Note: stripWithClausePatterns factors __@ps@__ through __@qs@__, thus
 
 @
   ps = qs[ps']
 @
 
 where @[..]@ is to be understood as substitution.
-The projection patterns have vanished from @ps'@ (as they are already in @qs@).
+The projection patterns have vanished from __@ps'@__ (as they are already in __@qs@__).
 -}
 
 stripWithClausePatterns
-  :: [Name]                   -- ^ Names of the module parameters of the parent function
-  -> QName                    -- ^ Name of the parent function.
-  -> QName                    -- ^ Name of with-function.
+  :: [Name]                   -- ^ __@cxtNames@__ names of the module parameters of the parent function
+  -> QName                    -- ^ __@parent@__ name of the parent function.
+  -> QName                    -- ^ __@f@__   name of with-function.
   -> Type                     -- ^ __@t@__   top-level type of the original function.
   -> Telescope                -- ^ __@Δ@__   context of patterns of parent function.
   -> [NamedArg DeBruijnPattern] -- ^ __@qs@__  internal patterns for original function.
-  -> Nat                      -- ^ __@npars@__ number of module parameters is @qs@.
+  -> Nat                      -- ^ __@npars@__ number of module parameters in @qs@.
   -> Permutation              -- ^ __@π@__   permutation taking @vars(qs)@ to @support(Δ)@.
   -> [NamedArg A.Pattern]     -- ^ __@ps@__  patterns in with clause (eliminating type @t@).
-  -> TCM ([A.NamedDotPattern], [A.StrippedDotPattern], [NamedArg A.Pattern]) -- ^ __@ps'@__ patterns for with function (presumably of type @Δ@).
+  -> TCM ([A.ProblemEq], [NamedArg A.Pattern]) -- ^ __@ps'@__ patterns for with function (presumably of type @Δ@).
 stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
   -- Andreas, 2014-03-05 expand away pattern synoyms (issue 1074)
   ps <- expandPatternSynonyms ps
@@ -335,64 +331,57 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
   -- instantiations from qs, so we make sure
   -- that t is the top-level type of the parent function and add patterns for
   -- the module parameters to ps before stripping.
-  let paramPat i _ = A.VarP $ A.BindName (cxtNames !! i)
+  let paramPat i _ = A.VarP $ A.mkBindName $ indexWithDefault __IMPOSSIBLE__ cxtNames i
       ps' = zipWith (fmap . fmap . paramPat) [0..] (take npars qs) ++ ps
   psi <- insertImplicitPatternsT ExpandLast ps' t
   reportSDoc "tc.with.strip" 10 $ vcat
-    [ text "stripping patterns"
-    , nest 2 $ text "t   = " <+> prettyTCM t
-    , nest 2 $ text "ps  = " <+> fsep (punctuate comma $ map prettyA ps)
-    , nest 2 $ text "ps' = " <+> fsep (punctuate comma $ map prettyA ps')
-    , nest 2 $ text "psi = " <+> fsep (punctuate comma $ map prettyA psi)
-    , nest 2 $ text "qs  = " <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs)
-    , nest 2 $ text "perm= " <+> text (show perm)
+    [ "stripping patterns"
+    , nest 2 $ "t   = " <+> prettyTCM t
+    , nest 2 $ "ps  = " <+> fsep (punctuate comma $ map prettyA ps)
+    , nest 2 $ "ps' = " <+> fsep (punctuate comma $ map prettyA ps')
+    , nest 2 $ "psi = " <+> fsep (punctuate comma $ map prettyA psi)
+    , nest 2 $ "qs  = " <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs)
+    , nest 2 $ "perm= " <+> text (show perm)
     ]
 
   -- Andreas, 2015-11-09 Issue 1710: self starts with parent-function, not with-function!
-  (ps', out) <- runWriterT $ strip (Def parent []) t psi qs
-  let (strippedDots, namedDots) = partitionEithers out
+  (ps', strippedPats) <- runWriterT $ strip (Def parent []) t psi qs
   reportSDoc "tc.with.strip" 50 $ nest 2 $
-    text "namedDots:" <+> vcat [ prettyTCM x <+> text "=" <+> prettyTCM v <+> text ":" <+> prettyTCM a | A.NamedDot x v a <- namedDots ]
+    "strippedPats:" <+> vcat [ prettyA p <+> "=" <+> prettyTCM v <+> ":" <+> prettyTCM a | A.ProblemEq p v a <- strippedPats ]
   let psp = permute perm ps'
   reportSDoc "tc.with.strip" 10 $ vcat
-    [ nest 2 $ text "ps' = " <+> fsep (punctuate comma $ map prettyA ps')
-    , nest 2 $ text "psp = " <+> fsep (punctuate comma $ map prettyA $ psp)
+    [ nest 2 $ "ps' = " <+> fsep (punctuate comma $ map prettyA ps')
+    , nest 2 $ "psp = " <+> fsep (punctuate comma $ map prettyA $ psp)
     ]
-  -- Andreas, 2014-03-05 Issue 142:
-  -- In some cases, permute throws away some dot patterns of ps'
-  -- which are then never checked.
-  if True then return (namedDots, strippedDots, psp) else do
-    -- Andreas, 2014-03-05 Disabled the fix for issue 142, the following is dead code:
-    forM_ (permute (droppedP perm) ps') $ \ p -> setCurrentRange p $ do
-      reportSDoc "tc.with.strip" 10 $ text "warning: dropped pattern " <+> prettyA p
-      reportSDoc "tc.with.strip" 60 $ text $ show p
-      case namedArg p of
-        A.DotP info o e -> case unScope e of
-          A.Underscore{} -> return ()
-          e | o == UserWritten -> typeError $ GenericError $
-            "This inaccessible pattern is never checked, so only _ allowed here"
-          _ -> return ()
-        _ -> return ()
-    return (namedDots, strippedDots, psp)
+  return (strippedPats, psp)
   where
 
+    -- We need to get the correct hiding from the lhs context. The unifier may have moved bindings
+    -- sites around so we can't trust the hiding of the parent pattern variables. We should preserve
+    -- the origin though.
+    varArgInfo = \ x -> let n = dbPatVarIndex x in
+                        if n < length infos then infos !! n else __IMPOSSIBLE__
+      where infos = reverse $ map getArgInfo $ telToList delta
+
+    setVarArgInfo x p = setOrigin (getOrigin p) $ setArgInfo (varArgInfo x) p
+
     strip
-      :: Term                         -- ^ Self.
-      -> Type                         -- ^ The type to be eliminated.
-      -> [NamedArg A.Pattern]       -- ^ With-clause patterns.
-      -> [NamedArg DeBruijnPattern] -- ^ Parent-clause patterns with de Bruijn indices relative to Δ.
-      -> WriterT [Either A.StrippedDotPattern A.NamedDotPattern] TCM [NamedArg A.Pattern]
-            -- ^ With-clause patterns decomposed by parent-clause patterns.
-            --   Also outputs named dot patterns from the parent clause that
-            --   we need to add let-bindings for.
+      :: Term                         -- Self.
+      -> Type                         -- The type to be eliminated.
+      -> [NamedArg A.Pattern]         -- With-clause patterns.
+      -> [NamedArg DeBruijnPattern]   -- Parent-clause patterns with de Bruijn indices relative to Δ.
+      -> WriterT [ProblemEq] TCM [NamedArg A.Pattern]
+            -- With-clause patterns decomposed by parent-clause patterns.
+            -- Also outputs named dot patterns from the parent clause that
+            -- we need to add let-bindings for.
 
     -- Case: out of with-clause patterns.
     strip self t [] qs@(_ : _) = do
       reportSDoc "tc.with.strip" 15 $ vcat
-        [ text "strip (out of A.Patterns)"
-        , nest 2 $ text "qs  =" <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs)
-        , nest 2 $ text "self=" <+> prettyTCM self
-        , nest 2 $ text "t   =" <+> prettyTCM t
+        [ "strip (out of A.Patterns)"
+        , nest 2 $ "qs  =" <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs)
+        , nest 2 $ "self=" <+> prettyTCM self
+        , nest 2 $ "t   =" <+> prettyTCM t
         ]
       -- Andreas, 2015-06-11, issue 1551:
       -- As the type t develops, we need to insert more implicit patterns,
@@ -407,7 +396,7 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
     -- are implicit patterns (we inserted too many).
     strip _ _ ps      []      = do
       let implicit (A.WildP{})     = True
-          implicit (A.ConP ci _ _) = patOrigin ci == ConOSystem
+          implicit (A.ConP ci _ _) = conPatOrigin ci == ConOSystem
           implicit _               = False
       unless (all (implicit . namedArg) ps) $
         typeError $ GenericError $ "Too many arguments given in with-clause"
@@ -419,35 +408,28 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
       | A.AsP _ x p <- namedArg p0 = do
         (a, _) <- mustBePi t
         let v = patternToTerm (namedArg q)
-        tell [Right $ A.NamedDot (A.unBind x) v (unDom a)]
+        tell [ProblemEq (A.VarP x) v a]
         strip self t (fmap (p <$) p0 : ps) qs
     strip self t ps0@(p0 : ps) qs0@(q : qs) = do
-      p <- liftTCM $ expandLitPattern p0
+      p <- liftTCM $ (traverse . traverse) expandLitPattern p0
       reportSDoc "tc.with.strip" 15 $ vcat
-        [ text "strip"
-        , nest 2 $ text "ps0 =" <+> fsep (punctuate comma $ map prettyA ps0)
-        , nest 2 $ text "exp =" <+> prettyA p
-        , nest 2 $ text "qs0 =" <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs0)
-        , nest 2 $ text "self=" <+> prettyTCM self
-        , nest 2 $ text "t   =" <+> prettyTCM t
+        [ "strip"
+        , nest 2 $ "ps0 =" <+> fsep (punctuate comma $ map prettyA ps0)
+        , nest 2 $ "exp =" <+> prettyA p
+        , nest 2 $ "qs0 =" <+> fsep (punctuate comma $ map (prettyTCM . namedArg) qs0)
+        , nest 2 $ "self=" <+> prettyTCM self
+        , nest 2 $ "t   =" <+> prettyTCM t
         ]
-      let failDotPat :: Monoid w => WriterT w TCM a
-          failDotPat = do
-            d <- liftTCM $ prettyA p
-            typeError $ GenericError $
-                "Inaccessible (dotted) patterns from the parent clause must " ++
-                "also be inaccessible in the with clause, when checking the " ++
-                "pattern " ++ show d ++ ","
       case namedArg q of
-        ProjP o d -> case A.maybePostfixProjP p of
+        ProjP o d -> case A.isProjP p of
           Just (o', AmbQ ds) -> do
+            -- We assume here that neither @o@ nor @o'@ can be @ProjSystem@.
+            if o /= o' then liftTCM $ mismatchOrigin o o' else do
             -- Andreas, 2016-12-28, issue #2360:
             -- We disambiguate the projection in the with clause
             -- to the projection in the parent clause.
             d  <- liftTCM $ getOriginalProjection d
-            found <- anyM ds ((d ==) <.> (liftTCM . getOriginalProjection))
-            -- We assume here that neither @o@ nor @o'@ can be @ProjSystem@.
-            if o /= o' then liftTCM $ mismatchOrigin o o' else do
+            found <- anyM ds $ \ d' -> liftTCM $ (Just d ==) . fmap projOrig <$> isProjection d'
             if not found then mismatch else do
               (self1, t1, ps) <- liftTCM $ do
                 t <- reduce t
@@ -460,48 +442,34 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
               strip self1 t1 ps qs
           Nothing -> mismatch
 
-        VarP x  -> (p :) <$> recurse (var (dbPatVarIndex x))
+        -- We can safely strip dots from variables. The unifier will put them back when required.
+        VarP _ x | A.DotP _ u <- namedArg p
+                 , A.Var y <- unScope u -> do
+          (setVarArgInfo x (setNamedArg p $ A.VarP $ A.mkBindName y) :) <$>
+            recurse (var (dbPatVarIndex x))
 
-        AbsurdP p -> __IMPOSSIBLE__
+        VarP _ x  ->
+          (setVarArgInfo x p :) <$> recurse (var (dbPatVarIndex x))
 
-        DotP o v  -> case namedArg p of
-          A.DotP r o e  -> do
-            (a, _) <- mustBePi t
-            tell [Left $ A.StrippedDot e v (unDom a)]
-            ok p
-          A.WildP _     -> ok p
-          -- Ulf, 2016-05-30: dot patterns are no longer mandatory so a parent
-          -- dot pattern can appear as a variable in the child clause. Indeed
-          -- this happens if you use a variable in the parent and '...' in the
-          -- child. In this case we need to remember the the binding, so we can
-          -- insert a let for it.
-          A.VarP x -> do
-            (a, _) <- mustBePi t
-            tell [Right $ A.NamedDot (A.unBind x) v (unDom a)]
-            ok p
-          -- Andreas, 2013-03-21 in case the implicit A.pattern has already been eta-expanded
-          -- we just fold it back.  This fixes issues 665 and 824.
-          A.ConP ci _ _ | patOrigin ci == ConOSystem -> okFlex p
-          -- Andreas, 2015-07-07 issue 1606: Same for flexible record patterns.
-          -- Agda might have replaced a record of dot patterns (A.ConP) by a dot pattern (I.DotP).
-          p'@A.ConP{} -> ifM (liftTCM $ isFlexiblePattern p') (okFlex p) {-else-} failDotPat
+        IApplyP _ _ _ x  ->
+          (setVarArgInfo x p :) <$> recurse (var (dbPatVarIndex x))
 
-          p@(A.PatternSynP pi' c' [ps']) -> do
-             reportSDoc "impossible" 10 $
-               text "stripWithClausePatterns: encountered pattern synonym " <+> prettyA p
-             __IMPOSSIBLE__
+        DefP{}  -> typeError $ GenericError $ "with clauses not supported in the presence of hcomp patterns" -- TODO this should actually be impossible
 
-          _ -> failDotPat
-          where
-            okFlex = ok . makeImplicitP
-            ok p   = (p :) <$> recurse v
+        DotP i v  -> do
+          (a, _) <- mustBePi t
+          tell [ProblemEq (namedArg p) v a]
+          case v of
+            Var x [] | PatOVar{} <- patOrigin i
+               -> (p :) <$> recurse (var x)
+            _  -> (makeWildP p :) <$> recurse v
 
         q'@(ConP c ci qs') -> do
          reportSDoc "tc.with.strip" 60 $
-           text "parent pattern is constructor " <+> prettyTCM c
+           "parent pattern is constructor " <+> prettyTCM c
          (a, b) <- mustBePi t
          -- The type of the current pattern is a datatype.
-         Def d es <- liftTCM $ ignoreSharing <$> normalise (unEl $ unDom a)
+         Def d es <- liftTCM $ reduce (unEl $ unDom a)
          let us = fromMaybe __IMPOSSIBLE__ $ allApplyElims es
          -- Get the original constructor and field names.
          c <- either __IMPOSSIBLE__ (`withRangeOf` c) <$> do liftTCM $ getConForm $ conName c
@@ -511,9 +479,19 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
           -- Andreas, 2015-07-07 Issue 1606.
           -- Agda sometimes changes a record of dot patterns into a dot pattern,
           -- so the user should be allowed to do likewise.
-          A.DotP{} -> ifNotM (liftTCM $ isFlexiblePattern q') mismatch $ {-else-} do
-            maybe __IMPOSSIBLE__ (\ p -> strip self t (p : ps) qs0) =<< do
-              liftTCM $ expandImplicitPattern' (unDom a) $ makeImplicitP p
+          -- Jesper, 2017-11-16. This is now also allowed for data constructors.
+          A.DotP r e -> do
+            tell [ProblemEq (A.DotP r e) (patternToTerm q') a]
+            ps' <-
+              case appView e of
+                -- If dot-pattern is an application of the constructor, try to preserve the
+                -- arguments.
+                Application (A.Con (A.AmbQ cs')) es -> do
+                  cs' <- liftTCM $ List1.rights <$> mapM getConForm cs'
+                  unless (c `elem` cs') mismatch
+                  return $ (map . fmap . fmap) (A.DotP r) es
+                _  -> return $ map (unnamed (A.WildP empty) <$) qs'
+            stripConP d us b c ConOCon qs' ps'
 
           -- Andreas, 2016-12-29, issue #2363.
           -- Allow _ to stand for the corresponding parent pattern.
@@ -523,22 +501,33 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
             let ps' = map (unnamed (A.WildP empty) <$) qs'
             stripConP d us b c ConOCon qs' ps'
 
+          -- Jesper, 2018-05-13, issue #2998.
+          -- We also allow turning a constructor pattern into a variable.
+          -- In general this is not type-safe since the types of some variables
+          -- in the constructor pattern may have changed, so we have to
+          -- re-check these solutions when checking the with clause (see LHS.hs)
+          A.VarP x -> do
+            tell [ProblemEq (A.VarP x) (patternToTerm q') a]
+            let ps' = map (unnamed (A.WildP empty) <$) qs'
+            stripConP d us b c ConOCon qs' ps'
+
           A.ConP _ (A.AmbQ cs') ps' -> do
             -- Check whether the with-clause constructor can be (possibly trivially)
             -- disambiguated to be equal to the parent-clause constructor.
             -- Andreas, 2017-08-13, herein, ignore abstract constructors.
-            cs' <- liftTCM $ do snd . partitionEithers <$> mapM getConForm (toList cs')
-            unless (elem c cs') mismatch
+            cs' <- liftTCM $ List1.rights <$> mapM getConForm cs'
+            unless (c `elem` cs') mismatch
             -- Strip the subpatterns ps' and then continue.
             stripConP d us b c ConOCon qs' ps'
 
           A.RecP _ fs -> caseMaybeM (liftTCM $ isRecord d) mismatch $ \ def -> do
-            ps' <- liftTCM $ insertMissingFields d (const $ A.WildP empty) fs (recordFieldNames def)
+            ps' <- liftTCM $ insertMissingFieldsFail d (const $ A.WildP empty) fs
+                                                 (map argFromDom $ recordFieldNames def)
             stripConP d us b c ConORec qs' ps'
 
           p@(A.PatternSynP pi' c' ps') -> do
              reportSDoc "impossible" 10 $
-               text "stripWithClausePatterns: encountered pattern synonym " <+> prettyA p
+               "stripWithClausePatterns: encountered pattern synonym " <+> prettyA p
              __IMPOSSIBLE__
 
           p -> do
@@ -546,31 +535,36 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
              text $ "with clause pattern is  " ++ show p
            mismatch
 
-        LitP lit -> case namedArg p of
-          A.LitP lit' | lit == lit' -> recurse $ Lit lit
-          A.WildP{}                 -> recurse $ Lit lit
+        LitP _ lit -> case namedArg p of
+          A.LitP _ lit' | lit == lit' -> recurse $ Lit lit
+          A.WildP{}                   -> recurse $ Lit lit
 
           p@(A.PatternSynP pi' c' [ps']) -> do
              reportSDoc "impossible" 10 $
-               text "stripWithClausePatterns: encountered pattern synonym " <+> prettyA p
+               "stripWithClausePatterns: encountered pattern synonym " <+> prettyA p
              __IMPOSSIBLE__
 
           _ -> mismatch
       where
         recurse v = do
-          caseMaybeM (liftTCM $ isPath t) (return ()) $ \ _ ->
-            typeError $ GenericError $
-              "With-clauses currently not supported under Path abstraction."
+          -- caseMaybeM (liftTCM $ isPath t) (return ()) $ \ _ ->
+          --   typeError $ GenericError $
+          --     "With-clauses currently not supported under Path abstraction."
 
-          t' <- piApply1 t v
-          strip (self `apply1` v) t' ps qs
+          let piOrPathApplyM t v = do
+                (TelV tel t', bs) <- telViewUpToPathBoundaryP 1 t
+                unless (size tel == 1) $ __IMPOSSIBLE__
+                return (teleElims tel bs, subst 0 v t')
+          (e, t') <- piOrPathApplyM t v
+          strip (self `applyE` e) t' ps qs
 
+        mismatch :: forall m a. (MonadAddContext m, MonadTCError m) => m a
         mismatch = addContext delta $ typeError $
           WithClausePatternMismatch (namedArg p0) q
         mismatchOrigin o o' = addContext delta . typeError . GenericDocError =<< fsep
-          [ text "With clause pattern"
+          [ "With clause pattern"
           , prettyA p0
-          , text "is not an instance of its parent pattern"
+          , "is not an instance of its parent pattern"
           , P.fsep <$> prettyTCMPatterns [q]
           , text $ "since the parent pattern is " ++ prettyProjOrigin o ++
                    " and the with clause pattern is " ++ prettyProjOrigin o'
@@ -579,53 +573,47 @@ stripWithClausePatterns cxtNames parent f t delta qs npars perm ps = do
         prettyProjOrigin ProjPostfix = "a postfix projection"
         prettyProjOrigin ProjSystem  = __IMPOSSIBLE__
 
-        -- | Make an ImplicitP, keeping arg. info.
-        makeImplicitP :: NamedArg A.Pattern -> NamedArg A.Pattern
-        makeImplicitP = updateNamedArg $ const $ A.WildP patNoRange
+        -- Make a WildP, keeping arg. info.
+        makeWildP :: NamedArg A.Pattern -> NamedArg A.Pattern
+        makeWildP = updateNamedArg $ const $ A.WildP patNoRange
 
         -- case I.ConP / A.ConP
         stripConP
-          :: QName
-             -- ^ Data type name of this constructor pattern.
-          -> [Arg Term]
-             -- ^ Data type arguments of this constructor pattern.
-          -> Abs Type
-             -- ^ Type the remaining patterns eliminate.
-          -> ConHead
-             -- ^ Constructor of this pattern.
-          -> ConInfo
-             -- ^ Constructor info of this pattern (constructor/record).
-          -> [NamedArg DeBruijnPattern]
-             -- ^ Argument patterns (parent clause).
-          -> [NamedArg A.Pattern]
-             -- ^ Argument patterns (with clause).
-          -> WriterT [Either A.StrippedDotPattern A.NamedDotPattern] TCM [NamedArg A.Pattern]
-             -- ^ Stripped patterns.
+          :: QName       -- Data type name of this constructor pattern.
+          -> [Arg Term]  -- Data type arguments of this constructor pattern.
+          -> Abs Type    -- Type the remaining patterns eliminate.
+          -> ConHead     -- Constructor of this pattern.
+          -> ConInfo     -- Constructor info of this pattern (constructor/record).
+          -> [NamedArg DeBruijnPattern]  -- Argument patterns (parent clause).
+          -> [NamedArg A.Pattern]        -- Argument patterns (with clause).
+          -> WriterT [ProblemEq] TCM [NamedArg A.Pattern]  -- Stripped patterns.
         stripConP d us b c ci qs' ps' = do
 
           -- Get the type and number of parameters of the constructor.
           Defn {defType = ct, theDef = Constructor{conPars = np}}  <- getConInfo c
           -- Compute the argument telescope for the constructor
           let ct' = ct `piApply` take np us
-          TelV tel' _ <- liftTCM $ telView ct'
+          TelV tel' _ <- liftTCM $ telViewPath ct'
+          -- (TelV tel' _, _boundary) <- liftTCM $ telViewPathBoundaryP ct'
 
           reportSDoc "tc.with.strip" 20 $
-            vcat [ text "ct  = " <+> prettyTCM ct
-                 , text "ct' = " <+> prettyTCM ct'
-                 , text "np  = " <+> text (show np)
-                 , text "us  = " <+> prettyList (map prettyTCM us)
-                 , text "us' = " <+> prettyList (map prettyTCM $ take np us)
+            vcat [ "ct  = " <+> prettyTCM ct
+                 , "ct' = " <+> prettyTCM ct'
+                 , "np  = " <+> text (show np)
+                 , "us  = " <+> prettyList (map prettyTCM us)
+                 , "us' = " <+> prettyList (map prettyTCM $ take np us)
                  ]
 
+          -- TODO Andrea: preserve IApplyP patterns in v, see _boundary?
           -- Compute the new type
-          let v  = Con c ci [ Arg info (var i) | (i, Arg info _) <- zip (downFrom $ size qs') qs' ]
+          let v  = Con c ci [ Apply $ Arg info (var i) | (i, Arg info _) <- zip (downFrom $ size qs') qs' ]
               t' = tel' `abstract` absApp (raise (size tel') b) v
               self' = tel' `abstract` apply1 (raise (size tel') self) v  -- Issue 1546
 
           reportSDoc "tc.with.strip" 15 $ sep
-            [ text "inserting implicit"
+            [ "inserting implicit"
             , nest 2 $ prettyList $ map prettyA (ps' ++ ps)
-            , nest 2 $ text ":" <+> prettyTCM t'
+            , nest 2 $ ":" <+> prettyTCM t'
             ]
 
           -- Insert implicit patterns (just for the constructor arguments)
@@ -699,32 +687,32 @@ withDisplayForm f aux delta1 delta2 n qs perm@(Perm m _) lhsPerm = do
 
   -- Build the lhs of the display form and finish.
   -- @var 0@ is the pattern variable (hole).
-  let display = Display arity (replicate arity $ Apply $ defaultArg $ var 0) dt
+  let display = Display arity [Apply $ defaultArg $ var i | i <- downFrom arity] dt
 
   -- Debug printing.
   let addFullCtx = addContext delta1
                  . flip (foldr addContext) (for [1..n] $ \ i -> "w" ++ show i)
                  . addContext delta2
   reportSDoc "tc.with.display" 20 $ vcat
-    [ text "withDisplayForm"
+    [ "withDisplayForm"
     , nest 2 $ vcat
-      [ text "f      =" <+> text (prettyShow f)
-      , text "aux    =" <+> text (prettyShow aux)
-      , text "delta1 =" <+> prettyTCM delta1
-      , text "delta2 =" <+> do addContext delta1 $ prettyTCM delta2
-      , text "n      =" <+> text (show n)
-      , text "perm   =" <+> text (show perm)
-      , text "top    =" <+> do addFullCtx $ prettyTCM topArgs
-      , text "qs     =" <+> prettyList (map pretty qs)
-      , text "qsToTm =" <+> prettyTCM tqs0 -- ctx would be permuted form of delta1 ++ delta2
-      , text "ys     =" <+> text (show ys)
-      , text "rho    =" <+> text (prettyShow rho)
-      , text "qs[rho]=" <+> do addFullCtx $ prettyTCM tqs
-      , text "dt     =" <+> do addFullCtx $ prettyTCM dt
+      [ "f      =" <+> text (prettyShow f)
+      , "aux    =" <+> text (prettyShow aux)
+      , "delta1 =" <+> prettyTCM delta1
+      , "delta2 =" <+> do addContext delta1 $ prettyTCM delta2
+      , "n      =" <+> text (show n)
+      , "perm   =" <+> text (show perm)
+      , "top    =" <+> do addFullCtx $ prettyTCM topArgs
+      , "qs     =" <+> prettyList (map pretty qs)
+      , "qsToTm =" <+> prettyTCM tqs0 -- ctx would be permuted form of delta1 ++ delta2
+      , "ys     =" <+> text (show ys)
+      , "rho    =" <+> text (prettyShow rho)
+      , "qs[rho]=" <+> do addFullCtx $ prettyTCM tqs
+      , "dt     =" <+> do addFullCtx $ prettyTCM dt
       ]
     ]
   reportSDoc "tc.with.display" 70 $ nest 2 $ vcat
-      [ text "raw    =" <+> text (show display)
+      [ "raw    =" <+> text (show display)
       ]
 
   return display
@@ -734,19 +722,7 @@ withDisplayForm f aux delta1 delta2 n qs perm@(Perm m _) lhsPerm = do
     -- Andreas, 2015-10-28: Yes, but properly! (Issue 1407)
     sub top ys wild = parallelS $ map term [0 .. m + top - 1]
       where
-        term i = maybe wild var $ List.findIndex (Just i ==) ys
-    -- -- OLD
-    -- sub top rho wild = parallelS $ map term [0 .. m - 1] ++ topTerms
-    --   where
-    --     -- Ulf, 2014-02-19: We need to rename the module parameters as well! (issue1035)
-    --     newVars  = length qs
-    --     topTerms = [ var (i + newVars) | i <- [0..top - 1] ]
-    --     -- thinking required.. but ignored
-    --     -- dropping the reverse seems to work better
-    --     -- Andreas, 2010-09-09: I DISAGREE.
-    --     -- Ulf, 2011-09-02: Thinking done. Neither was correct.
-    --     -- We had the wrong permutation and we used it incorrectly. Should work now.
-    --     term i = maybe wild var $ findIndex (Just i ==) rho
+        term i = maybe wild var $ List.elemIndex (Just i) ys
 
 -- Andreas, 2014-12-05 refactored using numberPatVars
 -- Andreas, 2013-02-28 modeled after Coverage/Match/buildMPatterns
@@ -762,10 +738,28 @@ patsToElims = map $ toElim . fmap namedThing
     toTerms = map $ fmap $ toTerm . namedThing
 
     toTerm :: DeBruijnPattern -> DisplayTerm
-    toTerm p = case p of
-      ProjP _ d   -> DDef d [] -- WRONG. TODO: convert spine to non-spine ... DDef d . defaultArg
-      VarP x      -> DTerm  $ var $ dbPatVarIndex x
-      DotP o t    -> DDot   $ t
-      AbsurdP p   -> toTerm p
-      ConP c cpi ps -> DCon c (fromConPatternInfo cpi) $ toTerms ps
-      LitP l      -> DTerm  $ Lit l
+    toTerm p = case patOrigin $ fromMaybe __IMPOSSIBLE__ $ patternInfo p of
+      PatOSystem -> toDisplayPattern p
+      PatOSplit  -> toDisplayPattern p
+      PatOVar{}  -> toVarOrDot p
+      PatODot    -> DDot $ patternToTerm p
+      PatOWild   -> toVarOrDot p
+      PatOCon    -> toDisplayPattern p
+      PatORec    -> toDisplayPattern p
+      PatOLit    -> toDisplayPattern p
+      PatOAbsurd -> toDisplayPattern p -- see test/Succeed/Issue2849.agda
+
+    toDisplayPattern :: DeBruijnPattern -> DisplayTerm
+    toDisplayPattern = \case
+      IApplyP _ _ _ x -> DTerm $ var $ dbPatVarIndex x -- TODO, should be an Elim' DisplayTerm ?
+      ProjP _ d  -> __IMPOSSIBLE__
+      VarP i x -> DTerm  $ var $ dbPatVarIndex x
+      DotP i t -> DDot   $ t
+      p@(ConP c cpi ps) -> DCon c (fromConPatternInfo cpi) $ toTerms ps
+      LitP i l -> DTerm  $ Lit l
+      DefP _ q ps -> DDef q $ map Apply $ toTerms ps
+
+    toVarOrDot :: DeBruijnPattern -> DisplayTerm
+    toVarOrDot p = case patternToTerm p of
+      Var i [] -> DTerm $ var i
+      t        -> DDot t

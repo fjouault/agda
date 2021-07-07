@@ -1,15 +1,14 @@
--- ASR (2016-02-15). In the Makefile in test/compiler founded in the
--- 2.4.2.3 tag, this test used the options `+RTS -H1G -M1.5G -RTS`.
+{-# OPTIONS --rewriting --guardedness --sized-types #-}
 
 module AllStdLib where
 
 -- Ensure that the entire standard library is compiled.
 import README
 
-open import Data.Unit.Base
+open import Data.Unit.Polymorphic using (⊤)
 open import Data.String
-open import IO hiding (_>>_)
-import IO.Primitive as Prim
+open import IO using (putStrLn; run)
+open import IO.Primitive using (IO; _>>=_)
 
 import DivMod
 import HelloWorld
@@ -20,15 +19,16 @@ import Vec
 import dimensions
 
 infixr 1 _>>_
-_>>_ : ∀ {A B : Set} → Prim.IO A → Prim.IO B → Prim.IO B
-m >> m₁ = m Prim.>>= λ _ → m₁
+_>>_ : ∀ {A B : Set} → IO A → IO B → IO B
+m >> m₁ = m >>= λ _ → m₁
 
-main : Prim.IO ⊤
-main = run (putStrLn "Hello World!") >>
-       DivMod.main >>
-       HelloWorld.main >>
-       HelloWorldPrim.main >>
-       ShowNat.main >>
-       TrustMe.main >>
-       Vec.main >>
-       dimensions.main
+main : IO ⊤
+main = do
+  run (putStrLn "Hello World!")
+  DivMod.main
+  HelloWorld.main
+  HelloWorldPrim.main
+  ShowNat.main
+  TrustMe.main
+  Vec.main
+  dimensions.main

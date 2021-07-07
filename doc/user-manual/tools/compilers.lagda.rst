@@ -14,6 +14,8 @@ Compilers
 
 See also :ref:`foreign-function-interface`.
 
+.. _compiler-backends:
+
 Backends
 --------
 
@@ -32,7 +34,20 @@ The backend can be invoked from the command line using the flag
 
 .. code-block:: bash
 
-  agda --compile [--compile-dir=<DIR>] [--ghc-flag=<FLAG>] <FILE>.agda
+  agda --compile [--compile-dir=<DIR>] [--ghc-flag=<FLAG>]
+    [--ghc-strict-data] [--ghc-strict] <FILE>.agda
+
+When the flag ``--ghc-strict-data`` is used inductive data and record
+constructors are compiled to constructors with strict arguments. (This
+does not apply to certain builtin types—lists, the maybe type, and
+some types related to reflection—and might not apply to types with
+``COMPILE GHC … = data …`` pragmas.)
+
+When the flag ``--ghc-strict`` is used the GHC backend generates
+mostly strict code. Note that functions might not be strict in unused
+arguments, and that function definitions coming from ``COMPILE GHC``
+pragmas are not affected. This flag implies ``--ghc-strict-data``, and
+the exceptions of that flag applies to this flag as well.
 
 Pragmas
 ^^^^^^^
@@ -47,31 +62,18 @@ and uses the :ref:`foreign-function-interface`:
 
   module HelloWorld where
 
+  open import Agda.Builtin.IO
+  open import Agda.Builtin.Unit
+  open import Agda.Builtin.String
+
+  postulate
+    putStrLn : String → IO ⊤
+
   {-# FOREIGN GHC import qualified Data.Text.IO as Text #-}
+  {-# COMPILE GHC putStrLn = Text.putStrLn #-}
 
-  data Unit : Set where
-    unit : Unit
-
-  {-# COMPILE GHC Unit = data () (()) #-}
-
-  postulate
-    String : Set
-
-  {-# BUILTIN STRING String #-}
-
-  postulate
-    IO : Set → Set
-
-  {-# BUILTIN IO IO #-}
-  {-# COMPILE GHC IO = type IO #-}
-
-  postulate
-    putStr : String → IO Unit
-
-  {-# COMPILE GHC putStr = Text.putStr #-}
-
-  main : IO Unit
-  main = putStr "Hello, World!"
+  main : IO ⊤
+  main = putStrLn "Hello, World!"
 
 After compiling the example
 
@@ -81,12 +83,9 @@ After compiling the example
 
 you can run the HelloWorld program which prints ``Hello, World!``.
 
-Required libraries for the :ref:`built-ins`
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-- ``primFloatEquality`` requires the `ieee754
-  <http://hackage.haskell.org/package/ieee754>`_ library.
-
+.. warning:: Frequent error when compiling: ``Float`` requires the
+  `ieee754 <http://hackage.haskell.org/package/ieee754>`_ haskell library.
+  Usually ``cabal install ieee754`` in the command line does the trick.
 
 .. _javascript-backend:
 
@@ -103,7 +102,13 @@ The backend can be invoked from the command line using the flag
 
 .. code-block:: bash
 
-  agda --js [--compile-dir=<DIR>] <FILE>.agda
+  agda --js [--js-optimize] [--js-minify] [--compile-dir=<DIR>] <FILE>.agda
+
+The ``--js-optimize`` flag makes the generated JavaScript code
+typically faster and less readable.
+
+The ``--js-minify`` flag makes the generated JavaScript code
+smaller and less readable.
 
 
 Optimizations
@@ -154,4 +159,3 @@ predicate used for well-founded recursion::
 The erasure means that equality proofs will (mostly) be erased, and never
 looked at, and functions defined by well-founded recursion will ignore the
 accessibility proof.
-

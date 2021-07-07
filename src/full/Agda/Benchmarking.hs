@@ -1,25 +1,20 @@
-{-# LANGUAGE CPP                       #-}
-{-# LANGUAGE IncoherentInstances       #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE OverlappingInstances #-}
-#endif
-
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 -- | Agda-specific benchmarking structure.
 
 module Agda.Benchmarking where
 
+import Control.DeepSeq
 import qualified Control.Exception as E
 
 import Data.IORef
 
+import GHC.Generics (Generic)
+
 import System.IO.Unsafe
 
 import Agda.Syntax.Concrete.Name (TopLevelModuleName)
-import Agda.Syntax.Concrete.Pretty
+import Agda.Syntax.Concrete.Pretty () --instance only
 import Agda.Syntax.Abstract.Name
 import Agda.Utils.Benchmark (MonadBench(..))
 import qualified Agda.Utils.Benchmark as B
@@ -68,6 +63,8 @@ data Phase
     -- ^ Subphase for 'Termination'.
   | ModuleName
     -- ^ Subphase for 'Import'.
+  | Compaction
+    -- ^ Subphase for 'Deserialization': compacting interfaces.
   | BuildInterface
     -- ^ Subphase for 'Serialization'.
   | Sort
@@ -90,18 +87,24 @@ data Phase
     -- ^ Subphase for 'Typing': checking the RHS
   | TypeSig
     -- ^ Subphase for 'Typing': checking a type signature
+  | Generalize
+    -- ^ Subphase for 'Typing': generalizing over `variable`s
+  | InstanceSearch
+    -- ^ Subphase for 'Typing': solving instance goals
   | UnifyIndices
     -- ^ Subphase for 'CheckLHS': unification of the indices
   | InverseScopeLookup
     -- ^ Pretty printing names.
   | TopModule TopLevelModuleName
   | Definition QName
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Generic)
 
 instance Pretty Phase where
   pretty (TopModule m)  = pretty m
   pretty (Definition q) = pretty q
   pretty a = text (show a)
+
+instance NFData Phase
 
 type Benchmark = B.Benchmark Phase
 type Account   = B.Account Phase
@@ -128,7 +131,8 @@ isInternalAccount _                  = True
 benchmarks :: IORef Benchmark
 benchmarks = unsafePerformIO $ newIORef empty
 
-instance MonadBench Phase IO where
+instance MonadBench IO where
+  type BenchPhase IO = Phase
   getBenchmark = readIORef benchmarks
   putBenchmark = writeIORef benchmarks
   finally = E.finally

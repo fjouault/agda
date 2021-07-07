@@ -1,34 +1,35 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-orphans       #-}
 
 module Agda.Compiler.Treeless.Subst where
 
-import Control.Applicative
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.Semigroup (Semigroup, Monoid, (<>), mempty, mappend, All(..), Any(..))
 import Data.Maybe
+import Data.Semigroup ( Semigroup, (<>), All(..), Any(..) )
 
 import Agda.Syntax.Treeless
-import Agda.Syntax.Internal (Substitution'(..))
 import Agda.TypeChecking.Substitute
+
+import Agda.Utils.Impossible
 
 instance DeBruijn TTerm where
   deBruijnVar = TVar
   deBruijnView (TVar i) = Just i
   deBruijnView _ = Nothing
 
-instance Subst TTerm TTerm where
-  applySubst IdS t = t
-  applySubst rho t = case t of
-      TDef{}    -> t
-      TLit{}    -> t
-      TCon{}    -> t
-      TPrim{}   -> t
-      TUnit{}   -> t
-      TSort{}   -> t
-      TErased{} -> t
-      TError{}  -> t
+instance Subst TTerm where
+  type SubstArg TTerm = TTerm
+
+  applySubst IdS = id
+  applySubst rho = \case
+      t@TDef{}    -> t
+      t@TLit{}    -> t
+      t@TCon{}    -> t
+      t@TPrim{}   -> t
+      t@TUnit{}   -> t
+      t@TSort{}   -> t
+      t@TErased{} -> t
+      t@TError{}  -> t
       TVar i         -> lookupS rho i
       TApp f ts      -> tApp (applySubst rho f) (applySubst rho ts)
       TLam b         -> TLam (applySubst (liftS 1 rho) b)
@@ -38,11 +39,13 @@ instance Subst TTerm TTerm where
           TVar j  -> TCase j t (applySubst rho d) (applySubst rho bs)
           e       -> TLet e $ TCase 0 t (applySubst rho' d) (applySubst rho' bs)
             where rho' = wkS 1 rho
+      TCoerce e -> TCoerce (applySubst rho e)
     where
       tApp (TPrim PSeq) [TErased, b] = b
       tApp f ts = TApp f ts
 
-instance Subst TTerm TAlt where
+instance Subst TAlt where
+  type SubstArg TAlt = TTerm
   applySubst rho (TACon c i b) = TACon c i (applySubst (liftS i rho) b)
   applySubst rho (TALit l b)   = TALit l (applySubst rho b)
   applySubst rho (TAGuard g b) = TAGuard (applySubst rho g) (applySubst rho b)
@@ -71,6 +74,11 @@ instance Semigroup Occurs where
 instance Monoid Occurs where
   mempty  = Occurs 0 mempty mempty
   mappend = (<>)
+
+
+-- Andreas, 2019-07-10: this free variable computation should be rewritten
+-- in the style of TypeChecking.Free.Lazy.
+-- https://github.com/agda/agda/commit/03eb3945114a4ccdb449f22d69db8d6eaa4699b8#commitcomment-34249120
 
 class HasFree a where
   freeVars :: a -> Map Int Occurs
@@ -102,7 +110,7 @@ instance HasFree a => HasFree (InSeq a) where
   freeVars (InSeq x) = inSeq <$> freeVars x
 
 instance HasFree TTerm where
-  freeVars t = case t of
+  freeVars = \case
     TDef{}    -> Map.empty
     TLit{}    -> Map.empty
     TCon{}    -> Map.empty
@@ -117,9 +125,17 @@ instance HasFree TTerm where
     TLam b         -> underLambda <$> freeVars (Binder 1 b)
     TLet e b       -> freeVars (e, Binder 1 b)
     TCase i _ d bs -> freeVars (i, (d, bs))
+    TCoerce t      -> freeVars t
 
 instance HasFree TAlt where
-  freeVars a = case a of
+  freeVars = \case
     TACon _ i b -> freeVars (Binder i b)
     TALit _ b   -> freeVars b
     TAGuard g b -> freeVars (g, b)
+
+-- | Strenghtening.
+tryStrengthen :: (HasFree a, Subst a) => Int -> a -> Maybe a
+tryStrengthen n t =
+  case Map.minViewWithKey (freeVars t) of
+    Just ((i, _), _) | i < n -> Nothing
+    _ -> Just $ applySubst (strengthenS impossible n) t

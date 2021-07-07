@@ -1,26 +1,26 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE DoAndIfThenElse   #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 module Fail.Tests where
 
-import Test.Tasty
-import Test.Tasty.Silver
-import Test.Tasty.Silver.Advanced (readFileMaybe, goldenTest1, GDiff (..), GShow (..))
-import System.IO.Temp
-import System.FilePath
+import qualified Data.ByteString as BS
+import Data.Monoid ((<>))
 import qualified Data.Text as T
 import Data.Text.Encoding
-import System.Exit
-import System.Directory
-import qualified Data.ByteString as BS
 
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ((<$>))
-#endif
+import System.Directory
+import System.Exit
+import System.FilePath
+import System.IO.Temp
+import System.PosixCompat.Files (touchFile)
+
+import Test.Tasty
+import Test.Tasty.Silver
+import Test.Tasty.Silver.Advanced
+  (readFileMaybe, goldenTest1, goldenTestIO1, GDiff (..), GShow (..))
 
 import Utils
 
+import Agda.Utils.Functor ((<&>), for)
 
 testDir :: FilePath
 testDir = "test" </> "Fail"
@@ -28,30 +28,106 @@ testDir = "test" </> "Fail"
 tests :: IO TestTree
 tests = do
   inpFiles <- getAgdaFilesInDir NonRec testDir
-  return $ testGroup "Fail" $
-    [ testGroup "customised" [ issue2649, nestedProjectRoots ]]
-    ++ map mkFailTest inpFiles
+  return $ testGroup "Fail" $ concat $
+    -- A list written with ':' to quickly switch lines
+    map mkFailTest inpFiles :
+    -- The some of the customized tests fail with agda-quicker
+    -- (because they refer to the name of the Agda executable),
+    -- so put them last.
+    customizedTests :
+    []
+  where
+  customizedTests =
+    [ testGroup "customised" $
+        issue5101 :
+        issue4671 :
+        issue2649 :
+        nestedProjectRoots :
+        []
+    ]
 
-data AgdaResult
-  = AgdaResult T.Text -- the cleaned stdout
-  | AgdaUnexpectedSuccess ProgramResult
+data TestResult
+  = TestResult T.Text -- the cleaned stdout
+  | TestUnexpectedSuccess ProgramResult
 
-mkFailTest :: FilePath -- inp file
-    -> TestTree
-mkFailTest inp =
-  goldenTest1 testName readGolden (printAgdaResult <$> doRun) resDiff resShow updGolden
---  goldenVsAction testName goldenFile doRun printAgdaResult
-  where testName   = asTestName testDir inp
-        goldenFile = dropAgdaExtension inp <.> ".err"
-        flagFile   = dropAgdaExtension inp <.> ".flags"
+mkFailTest
+  :: FilePath -- ^ Input file (Agda file).
+  -> TestTree
+mkFailTest agdaFile =
+  goldenTestIO1 testName readGolden (printTestResult <$> doRun) resDiff (pure . resShow) $ Just updGolden
+  where
+  testName   = asTestName testDir agdaFile
+  goldenFile = dropAgdaExtension agdaFile <.> ".err"
+  flagFile   = dropAgdaExtension agdaFile <.> ".flags"
 
-        readGolden = readTextFileMaybe goldenFile
-        updGolden  = writeTextFile goldenFile
+  readGolden = readTextFileMaybe goldenFile
+  updGolden  = writeTextFile goldenFile
 
-        doRun = do
-          flags <- maybe [] (T.unpack . decodeUtf8) <$> readFileMaybe flagFile
-          let agdaArgs = ["-v0", "-i" ++ testDir, "-itest/" , inp, "--ignore-interfaces", "--no-default-libraries"] ++ words flags
-          readAgdaProcessWithExitCode agdaArgs T.empty >>= expectFail
+  doRun = do
+    let agdaArgs = [ "-v0", "-vwarning:1", "-i" ++ testDir, "-itest/", agdaFile
+                   , "--ignore-interfaces", "--no-libraries"
+                   , "--double-check"
+                   ]
+    runAgdaWithOptions testName agdaArgs (Just flagFile) Nothing
+      <&> expectFail
+
+  -- | Treats newlines or consecutive whitespaces as one single whitespace.
+  --
+  -- Philipp20150923: On travis lines are wrapped at different positions sometimes.
+  -- It's not really clear to me why this happens, but just ignoring line breaks
+  -- for comparing the results should be fine.
+  resDiff :: T.Text -> T.Text -> IO GDiff
+  resDiff t1 t2
+    | stripConsecutiveWhiteSpace t1 == stripConsecutiveWhiteSpace t2 = return Equal
+    | otherwise = do
+        -- Andreas, 2020-06-09, issue #4736
+        -- If the output has changed, the test case is "interesting"
+        -- regardless of whether the golden value is updated or not.
+        -- Thus, we touch the agdaFile to have it sorted up in the next
+        -- test run.
+        -- -- putStrLn $ "TOUCHING " ++ agdaFile
+        touchFile agdaFile
+        return $ DiffText Nothing t1 t2
+
+
+issue4671 :: TestTree
+issue4671 =
+  goldenTest1 "Issue4671" (readTextFileMaybe =<< goldenFile)
+    doRun resDiff resShow (\ res -> goldenFile >>= (`writeTextFile` res))
+  where
+    dir = testDir </> "customised"
+    goldenFileSens    = dir </> "Issue4671.err.case-sensitive"
+    goldenFileInsens  = dir </> "Issue4671.err.case-insensitive"
+    goldenFileInsens' = dir </> "Issue4671.err.cAsE-inSensitive" -- case variant, to test file system
+    goldenFile = do
+      -- Query case-variant to detect case-sensitivity of the FS.
+      -- Note: since we expect the .err file to exists, we cannot
+      -- use this test to interactively create a non-existing golden value.
+      doesFileExist goldenFileInsens' <&> \case
+        True  -> goldenFileInsens
+        False -> goldenFileSens
+    doRun = do
+      let agdaArgs file = [ "-v0", "--no-libraries", "-i" ++ dir, dir </> file ]
+      runAgdaWithOptions "Issue4671" (agdaArgs "Issue4671.agda") Nothing Nothing
+        <&> printTestResult . expectFail
+
+-- The only customization here is that these do not have input .agda files,
+-- because the front-end interactors do not accept them.
+-- This runs the same as a normal test, but won't be auto-discovered because
+-- currently test discovery searches only for the .agda source.
+issue5101 :: TestTree
+issue5101 = testGroup "Issue5101" $
+  for suffixes $ \s -> do
+    let testName = "OnlyScopeChecking" ++ s
+    let goldenFile = dir </> testName <.> "err"
+    let flagsFile = dir </> testName <.> "flags"
+    let agdaArgs = ["-v0", "--no-libraries", "-i" ++ dir]
+    let doRun = runAgdaWithOptions testName agdaArgs (Just flagsFile) Nothing <&> printTestResult . expectFail
+    goldenTest1 testName (readTextFileMaybe goldenFile)
+      doRun resDiff resShow (writeTextFile goldenFile)
+  where
+  dir = testDir
+  suffixes = ["Repl", "Emacs", "JSON", "Vim"]
 
 issue2649 :: TestTree
 issue2649 = goldenTest1 "Issue2649" (readTextFileMaybe goldenFile)
@@ -60,16 +136,11 @@ issue2649 = goldenTest1 "Issue2649" (readTextFileMaybe goldenFile)
     dir = testDir </> "customised"
     goldenFile = dir </> "Issue2649.err"
     doRun = do
-      _  <- readAgdaProcessWithExitCode
-              ["--no-default-libraries", "-i" ++ dir, dir </> "Issue2649-1.agda"]
-              T.empty
-      _  <- readAgdaProcessWithExitCode
-              ["--no-default-libraries", "-i" ++ dir, dir </> "Issue2649-2.agda"]
-              T.empty
-      fmap printAgdaResult . expectFail =<< do
-            readAgdaProcessWithExitCode
-              ["--no-default-libraries", "-i" ++ dir, dir </> "Issue2649.agda"]
-              T.empty
+      let agdaArgs file = ["--no-libraries", "-i" ++ dir, dir </> file ]
+      _  <- runAgdaWithOptions "Issue2649-1" (agdaArgs "Issue2649-1.agda") Nothing Nothing
+      _  <- runAgdaWithOptions "Issue2649-2" (agdaArgs "Issue2649-2.agda") Nothing Nothing
+      runAgdaWithOptions "Issue2649"   (agdaArgs "Issue2649.agda")   Nothing Nothing
+        <&> printTestResult . expectFail
 
 nestedProjectRoots :: TestTree
 nestedProjectRoots = goldenTest1 "NestedProjectRoots" (readTextFileMaybe goldenFile)
@@ -78,26 +149,34 @@ nestedProjectRoots = goldenTest1 "NestedProjectRoots" (readTextFileMaybe goldenF
     dir = testDir </> "customised"
     goldenFile = dir </> "NestedProjectRoots.err"
     doRun = do
-      r1 <- readAgdaProcessWithExitCode
-              ["--ignore-interfaces", "--no-default-libraries", "-i" ++ dir, "-i" ++ dir </> "Imports", dir </> "NestedProjectRoots.agda"]
-              T.empty >>= fmap printAgdaResult . expectFail
-      r2 <- readAgdaProcessWithExitCode
-              ["--no-default-libraries", "-i" ++ dir </> "Imports", dir </> "Imports" </> "A.agda"]
-              T.empty >>= expectOk
-      r3 <- readAgdaProcessWithExitCode
-              ["--no-default-libraries", "-i" ++ dir, "-i" ++ dir </> "Imports", dir </> "NestedProjectRoots.agda"]
-              T.empty >>= fmap printAgdaResult . expectFail
+      let agdaArgs file = ["--no-libraries", "-i" ++ dir </> "Imports", dir </> file]
+      let run extra = do
+            runAgdaWithOptions "NestedProjectRoots"
+              (extra ++ [ "-i" ++ dir ] ++ agdaArgs "NestedProjectRoots.agda")
+              Nothing Nothing
+              <&> printTestResult . expectFail
+      -- Run without interfaces; should fail.
+      r1 <- run [ "--ignore-interfaces" ]
+      -- Create interface file
+      r2 <- runAgdaWithOptions "Imports.A"
+              ("-v 0" : agdaArgs ("Imports" </> "A.agda")) Nothing Nothing
+              <&> expectOk
+      -- Run again with interface; should still fail.
+      r3 <- run []
       return $ r1 `T.append` r2 `T.append` r3
 
-expectOk :: ProgramResult -> IO T.Text
-expectOk (ExitSuccess, stdout, _) = cleanOutput stdout
-expectOk p = return $ "UNEXPECTED_SUCCESS\n\n" `T.append` printProcResult p
+expectOk :: (ProgramResult, AgdaResult) -> T.Text
+expectOk (res, ret) = case ret of
+  AgdaSuccess{} -> stdOut res
+  AgdaFailure{} -> "AGDA_UNEXPECTED_FAILURE\n\n" <> printProgramResult res
 
-expectFail :: ProgramResult -> IO AgdaResult
-expectFail res@(ret, stdout, _) =
-  if ret == ExitSuccess
-    then return $ AgdaUnexpectedSuccess res
-    else AgdaResult <$> cleanOutput stdout
+expectFail :: (ProgramResult, AgdaResult) -> TestResult
+expectFail (res, ret) = case ret of
+  AgdaSuccess{} -> TestUnexpectedSuccess res
+  -- If it's a type error, we do not print the exit code
+  AgdaFailure _ (Just TCMError) -> TestResult $ stdOut res
+  -- Otherwise, we print all the output
+  AgdaFailure{}                 -> TestResult $ printProgramResult res
 
 -- | Treats newlines or consecutive whitespaces as one single whitespace.
 --
@@ -106,17 +185,24 @@ expectFail res@(ret, stdout, _) =
 -- for comparing the results should be fine.
 resDiff :: T.Text -> T.Text -> GDiff
 resDiff t1 t2 =
-  if strip t1 == strip t2
+  if stripConsecutiveWhiteSpace t1 == stripConsecutiveWhiteSpace t2
     then
       Equal
     else
       DiffText Nothing t1 t2
-  where
-    strip = replace (mkRegex " +") " " . replace (mkRegex "(\n|\r)") " "
+
+
+-- | Converts newlines and consecutive whitespaces into one single whitespace.
+--
+stripConsecutiveWhiteSpace :: T.Text -> T.Text
+stripConsecutiveWhiteSpace
+  = replace (mkRegex " +")      " "
+  . replace (mkRegex "(\n|\r)") " "
 
 resShow :: T.Text -> GShow
 resShow = ShowText
 
-printAgdaResult :: AgdaResult -> T.Text
-printAgdaResult (AgdaResult t)            = t
-printAgdaResult (AgdaUnexpectedSuccess p) = "AGDA_UNEXPECTED_SUCCESS\n\n" `T.append` printProcResult p
+printTestResult :: TestResult -> T.Text
+printTestResult = \case
+  TestResult t            -> t
+  TestUnexpectedSuccess p -> "AGDA_UNEXPECTED_SUCCESS\n\n" <> printProgramResult p

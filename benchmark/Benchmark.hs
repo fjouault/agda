@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE NamedFieldPuns #-}
 
@@ -12,12 +11,6 @@ import Text.PrettyPrint hiding (char)
 import Text.Printf
 import Data.Monoid
 import System.Environment
-
-#if __GLASGOW_HASKELL__ <= 704
-instance Applicative ReadP where
-  pure  = return
-  (<*>) = ap
-#endif
 
 type Bytes = Integer
 type MegaBytes = Integer
@@ -56,28 +49,29 @@ many' p = many p <* notP p
 orElse :: ReadP a -> ReadP a -> ReadP a
 orElse p q = p +++ (notP p *> q)
 
+munchTo :: Char -> ReadP String
+munchTo c = munch (c /=) <* char c
+
 lineP :: ReadP String
-lineP = do
-  s <- munch ('\n' /=)
-  char '\n'
-  return s
+lineP = munchTo '\n'
 
 integerP :: ReadP Integer
 integerP = do
   skipSpaces
-  s <- munch (`elem` (',':['0'..'9']))
-  return $ read $ filter (/=',') s
+  s <- filter (/=',') <$> munch1 (`elem` (',':['0'..'9']))
+  guard (not $ null s)
+  return $ read s
 
 bytesP :: ReadP Bytes
 bytesP = integerP <* skipSpaces <* string "bytes"
 
 megaBytesP :: ReadP MegaBytes
-megaBytesP = integerP <* skipSpaces <* (string "Mb" +++ string "MB")
+megaBytesP = integerP <* skipSpaces <* (string "Mb" +++ string "MB" +++ string "MiB")
 
 floatP :: ReadP Float
 floatP = do
   skipSpaces
-  s <- munch (`elem` ('.':['0'..'9']))
+  s <- munch1 (`elem` ('.':['0'..'9']))
   return $ read s
 
 timeP :: ReadP Seconds
@@ -87,37 +81,28 @@ percentP :: ReadP Percent
 percentP = floatP <* char '%'
 
 metaP :: ReadP Metas
-metaP = munch (/= ':') *> string ":" *> integerP <* string " metas" <* lineP
+metaP = munchTo ':' *> integerP <* string " metas" <* lineP
 
 collectionP :: ReadP (Integer, Seconds)
-collectionP = do
-  n <- integerP
-  munch (/= '(')
-  char '('
-  t <- timeP
-  lineP
-  return (n, t)
+collectionP = (,) <$> integerP <* munchTo '(' <*> timeP <* lineP
 
-data Ticks = Metas Integer | Constraints Integer | MaxMetas Integer | MaxConstraints Integer
+data Ticks = Tick String Integer
+  deriving (Show)
 
-tickP =
-  t Metas          "metas" +++
-  t Constraints    "attempted-constraints" +++
-  t MaxMetas       "max-open-metas" +++
-  t MaxConstraints "max-open-constraints"
+tickP = Tick <$> label <*> integerP <* lineP
   where
-    t c s = c <$ string ("  " ++ s ++ " = ") <*> integerP <* lineP
+    label = unwords <$> many (munch (== ' ') *> munch1 (not . isSpace))
 
 ticksP =
-  string "Ticks for " *> lineP *> many' tickP
+  string "Accumulated statistics" *> lineP *> many' tickP
 
 statsP :: ReadP Statistics
 statsP = do
-  ticks <- concat <$> many' ticksP
-  let numberOfMetas        = sum [ n | Metas n <- ticks ]
-      attemptedConstraints = sum [ n | Constraints n <- ticks ]
-      maxMetas             = maximum $ 0 : [ n | MaxMetas n <- ticks ]
-      maxConstraints       = maximum $ 0 : [ n | MaxConstraints n <- ticks ]
+  ticks <- ticksP `orElse` return []
+  let numberOfMetas        = sum [ n | Tick "metas" n <- ticks ]
+      attemptedConstraints = sum [ n | Tick "attempted-constraints" n <- ticks ]
+      maxMetas             = maximum $ 0 : [ n | Tick "max-open-metas" n <- ticks ]
+      maxConstraints       = maximum $ 0 : [ n | Tick "max-open-constraints" n <- ticks ]
   command <- lineP
   many lineP
   memoryInUse <- skipSpaces *> megaBytesP <* skipSpaces <* string "total memory" <* lineP

@@ -4,10 +4,12 @@ module _ where
 open import Agda.Builtin.Unit
 open import Agda.Builtin.Bool
 open import Agda.Builtin.Nat
+open import Agda.Builtin.Word
 open import Agda.Builtin.List
 open import Agda.Builtin.String
 open import Agda.Builtin.Char
 open import Agda.Builtin.Float
+open import Agda.Builtin.Sigma
 
 -- Names --
 
@@ -48,8 +50,23 @@ data Relevance : Set where
 {-# BUILTIN RELEVANT   relevant   #-}
 {-# BUILTIN IRRELEVANT irrelevant #-}
 
+-- Arguments also have a quantity.
+data Quantity : Set where
+  quantity-0 quantity-ω : Quantity
+
+{-# BUILTIN QUANTITY   Quantity   #-}
+{-# BUILTIN QUANTITY-0 quantity-0 #-}
+{-# BUILTIN QUANTITY-ω quantity-ω #-}
+
+-- Relevance and quantity are combined into a modality.
+data Modality : Set where
+  modality : (r : Relevance) (q : Quantity) → Modality
+
+{-# BUILTIN MODALITY             Modality #-}
+{-# BUILTIN MODALITY-CONSTRUCTOR modality #-}
+
 data ArgInfo : Set where
-  arg-info : (v : Visibility) (r : Relevance) → ArgInfo
+  arg-info : (v : Visibility) (m : Modality) → ArgInfo
 
 data Arg (A : Set) : Set where
   arg : (i : ArgInfo) (x : A) → Arg A
@@ -71,6 +88,7 @@ data Abs (A : Set) : Set where
 
 data Literal : Set where
   nat    : (n : Nat)    → Literal
+  word64 : (n : Word64) → Literal
   float  : (x : Float)  → Literal
   char   : (c : Char)   → Literal
   string : (s : String) → Literal
@@ -79,6 +97,7 @@ data Literal : Set where
 
 {-# BUILTIN AGDALITERAL   Literal #-}
 {-# BUILTIN AGDALITNAT    nat     #-}
+{-# BUILTIN AGDALITWORD64 word64  #-}
 {-# BUILTIN AGDALITFLOAT  float   #-}
 {-# BUILTIN AGDALITCHAR   char    #-}
 {-# BUILTIN AGDALITSTRING string  #-}
@@ -87,21 +106,6 @@ data Literal : Set where
 
 -- Patterns --
 
-data Pattern : Set where
-  con    : (c : Name) (ps : List (Arg Pattern)) → Pattern
-  dot    : Pattern
-  var    : (s : String)  → Pattern
-  lit    : (l : Literal) → Pattern
-  proj   : (f : Name)    → Pattern
-  absurd : Pattern
-
-{-# BUILTIN AGDAPATTERN   Pattern #-}
-{-# BUILTIN AGDAPATCON    con     #-}
-{-# BUILTIN AGDAPATDOT    dot     #-}
-{-# BUILTIN AGDAPATVAR    var     #-}
-{-# BUILTIN AGDAPATLIT    lit     #-}
-{-# BUILTIN AGDAPATPROJ   proj    #-}
-{-# BUILTIN AGDAPATABSURD absurd  #-}
 
 -- Terms --
 
@@ -125,15 +129,27 @@ data Term where
 data Sort where
   set     : (t : Term) → Sort
   lit     : (n : Nat) → Sort
+  prop    : (t : Term) → Sort
+  propLit : (n : Nat) → Sort
+  inf     : (n : Nat) → Sort
   unknown : Sort
 
-data Clause where
-  clause        : (ps : List (Arg Pattern)) (t : Term) → Clause
-  absurd-clause : (ps : List (Arg Pattern)) → Clause
+data Pattern : Set where
+  con    : (c : Name) (ps : List (Arg Pattern)) → Pattern
+  dot    : (t : Term)    → Pattern
+  var    : (x : Nat)     → Pattern
+  lit    : (l : Literal) → Pattern
+  proj   : (f : Name)    → Pattern
+  absurd : (x : Nat)     → Pattern
 
-{-# BUILTIN AGDASORT    Sort   #-}
-{-# BUILTIN AGDATERM    Term   #-}
-{-# BUILTIN AGDACLAUSE  Clause #-}
+data Clause where
+  clause        : (tel : List (Σ String λ _ → Arg Type)) (ps : List (Arg Pattern)) (t : Term) → Clause
+  absurd-clause : (tel : List (Σ String λ _ → Arg Type)) (ps : List (Arg Pattern)) → Clause
+
+{-# BUILTIN AGDATERM    Term    #-}
+{-# BUILTIN AGDASORT    Sort    #-}
+{-# BUILTIN AGDAPATTERN Pattern #-}
+{-# BUILTIN AGDACLAUSE  Clause  #-}
 
 {-# BUILTIN AGDATERMVAR         var       #-}
 {-# BUILTIN AGDATERMCON         con       #-}
@@ -148,7 +164,17 @@ data Clause where
 
 {-# BUILTIN AGDASORTSET         set     #-}
 {-# BUILTIN AGDASORTLIT         lit     #-}
+{-# BUILTIN AGDASORTPROP        prop    #-}
+{-# BUILTIN AGDASORTPROPLIT     propLit #-}
+{-# BUILTIN AGDASORTINF         inf     #-}
 {-# BUILTIN AGDASORTUNSUPPORTED unknown #-}
+
+{-# BUILTIN AGDAPATCON    con     #-}
+{-# BUILTIN AGDAPATDOT    dot     #-}
+{-# BUILTIN AGDAPATVAR    var     #-}
+{-# BUILTIN AGDAPATLIT    lit     #-}
+{-# BUILTIN AGDAPATPROJ   proj    #-}
+{-# BUILTIN AGDAPATABSURD absurd  #-}
 
 {-# BUILTIN AGDACLAUSECLAUSE clause        #-}
 {-# BUILTIN AGDACLAUSEABSURD absurd-clause #-}

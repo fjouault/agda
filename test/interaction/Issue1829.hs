@@ -5,10 +5,12 @@ import Control.Monad
 import RunAgda
 
 file        = "Issue1829.agda"
-extraArgs   = [ "--caching"
+extraArgs   = [ "--no-libraries"
+              , "--caching"
               , "--ignore-interfaces"
               , "+RTS"
-              , "-M4M"
+              , "-M5M"
+              , "-A1M"
               , "-RTS"
               ]
 repetitions = 1000

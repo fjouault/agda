@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.Auto.Auto
       (auto
@@ -8,32 +7,30 @@ module Agda.Auto.Auto
 
 import Prelude hiding (null)
 
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ( (<$), pure )
-#endif
-
-import Data.Functor
+import Control.Monad.Except
 import Control.Monad.State
+
 import qualified Data.List as List
 import qualified Data.Map as Map
 import Data.IORef
 import qualified System.Timeout
 import Data.Maybe
 import qualified Data.Traversable as Trav
+import qualified Data.HashMap.Strict as HMap
 
 import Agda.Utils.Permutation (permute, takeP)
 import Agda.TypeChecking.Monad hiding (withCurrentModule)
 import Agda.TypeChecking.Telescope
-
-import Agda.Syntax.Common (Hiding(..))
 import qualified Agda.Syntax.Abstract as A
 import Agda.Syntax.Abstract.Pretty (prettyA)
+import qualified Agda.Syntax.Concrete.Name as C
 import qualified Text.PrettyPrint as PP
 import qualified Agda.TypeChecking.Pretty as TCM
 import Agda.Syntax.Position
 import qualified Agda.Syntax.Internal as I
 import Agda.Syntax.Translation.InternalToAbstract
 import Agda.Syntax.Translation.AbstractToConcrete (abstractToConcreteScope, abstractToConcrete_, runAbsToCon, toConcrete)
+import Agda.Interaction.Base
 import Agda.Interaction.BasicOps hiding (refine)
 import Agda.TypeChecking.Reduce (normalise)
 import Agda.Syntax.Common
@@ -42,7 +39,6 @@ import Agda.Syntax.Scope.Monad (withCurrentModule)
 import qualified Agda.Syntax.Abstract.Name as AN
 import qualified Agda.TypeChecking.Monad.Base as TCM
 import Agda.TypeChecking.EtaContract (etaContract)
-import qualified Agda.Utils.HashMap as HMap
 
 import Agda.Auto.Options
 import Agda.Auto.Convert
@@ -53,15 +49,14 @@ import Agda.Auto.Typecheck
 
 import Agda.Auto.CaseSplit
 
-import Agda.Utils.Except ( runExceptT, MonadError(catchError) )
 import Agda.Utils.Functor
 import Agda.Utils.Impossible
 import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Null
+import Agda.Utils.Pretty ( prettyShow )
 import Agda.Utils.Tuple
 
-#include "undefined.h"
 
 insertAbsurdPattern :: String -> String
 insertAbsurdPattern [] = []
@@ -108,12 +103,14 @@ stopWithMsg msg = return $ AutoResult (Solutions []) (Just msg)
 --   If the @autoMessage@ part of the result is set to @Just msg@, the
 --   message @msg@ produced by Agsy should be displayed to the user.
 
+{-# SPECIALIZE auto :: InteractionId -> Range -> String -> TCM AutoResult #-}
 auto
-  :: InteractionId
+  :: MonadTCM tcm
+  => InteractionId
   -> Range
   -> String
-  -> TCM AutoResult
-auto ii rng argstr = do
+  -> tcm AutoResult
+auto ii rng argstr = liftTCM $ locallyTC eMakeCase (const True) $ do
 
   -- Parse hints and other configuration.
   let autoOptions = parseArgs argstr
@@ -179,7 +176,7 @@ auto ii rng argstr = do
         ticks <- liftIO $ newIORef 0
 
         let exsearch initprop recinfo defdfv =
-             liftIO $ System.Timeout.timeout (getTimeOut timeout * 1000000)
+             liftIO $ System.Timeout.timeout (getTimeOut timeout * 1000)
                     $ loop 0
              where
                loop d = do
@@ -194,7 +191,8 @@ auto ii rng argstr = do
                  nsol' <- readIORef nsol
                  if nsol' /= 0 && depreached then loop (d + costIncrease) else return depreached
 
-        let getsols sol = do
+        let getsols :: [I.Term] -> TCM [(MetaId, A.Expr)]
+            getsols sol = do
              exprs <- forM (zip (Map.keys tccons) sol) $ \ (mi, e) -> do
                mv   <- lookupMeta mi
                e    <- etaContract e
@@ -227,7 +225,7 @@ auto ii rng argstr = do
                     sctx = (Id "h", closify htyp) : map (\x -> (NoId, closify x)) modargs
                     ntt = closify (NotM $ App Nothing (NotM OKVal) (Const ee) (NotM ALNil))
                 res <- exsearch (tcSearchSC False sctx ntt (Meta m)) Nothing defdfv
-                rsols <- liftM reverse $ liftIO $ readIORef sols
+                rsols <- fmap reverse $ liftIO $ readIORef sols
                 if null rsols then do
                   nsol' <- liftIO $ readIORef nsol
                   stopWithMsg $ insuffsols (pick + numsols - nsol')
@@ -237,9 +235,9 @@ auto ii rng argstr = do
                     mv <- lookupMeta mi
                     withMetaInfo (getMetaInfo mv) $ do
                       (mi,) <$> abstractToConcrete_ e
-                  let ss = dropWhile (== ' ') . dropWhile (/= ' ') . show
+                  let ss = dropWhile (== ' ') . dropWhile (/= ' ') . prettyShow
                       disp [(_, cexpr)] = ss cexpr
-                      disp cexprs = concat $ map (\ (mi, cexpr) -> ss cexpr ++ " ") cexprs
+                      disp cexprs = concatMap (\ (mi, cexpr) -> ss cexpr ++ " ") cexprs
                   ticks <- liftIO $ readIORef ticks
                   stopWithMsg $ unlines $
                     ("Listing disproof(s) " ++ show pick ++ "-" ++ show (pick + length rsols - 1)) :
@@ -278,10 +276,10 @@ auto ii rng argstr = do
                  ) eqcons
           res <- exsearch initprop recinfo defdfv
           riis <- map swap <$> getInteractionIdsAndMetas
-          let timeoutString | isNothing res = " after timeout (" ++ show timeout ++ "s)"
+          let timeoutString | isNothing res = " after timeout (" ++ show timeout ++ "ms)"
                             | otherwise     = ""
           if listmode then do
-            rsols <- liftM reverse $ liftIO $ readIORef sols
+            rsols <- fmap reverse $ liftIO $ readIORef sols
             if null rsols then do
               nsol' <- liftIO $ readIORef nsol
               stopWithMsg $ insuffsols (pick + numsols - nsol') ++ timeoutString
@@ -294,13 +292,13 @@ auto ii rng argstr = do
                   withMetaInfo (getMetaInfo mv) $ do
                     e' <- abstractToConcrete_ e
                     return (mi, e')
-              let disp [(_, cexpr)] = show cexpr
+              let disp [(_, cexpr)] = prettyShow cexpr
                   disp cexprs = concat $ for cexprs $ \ (mi, cexpr) ->
                     maybe (show mi) show (lookup mi riis)
-                      ++ " := " ++ show cexpr ++ " "
+                      ++ " := " ++ prettyShow cexpr ++ " "
               ticks <- liftIO $ readIORef ticks
               stopWithMsg $ "Listing solution(s) " ++ show pick ++ "-" ++ show (pick + length rsols - 1) ++ timeoutString ++
-                        "\n" ++ unlines (map (\(x, y) -> show y ++ "  " ++ disp x) $ zip cexprss [pick..])
+                        "\n" ++ unlines (zipWith (\x y -> show y ++ "  " ++ disp x) cexprss [pick..])
            else {- not listmode -}
             case res of
              Nothing -> do
@@ -324,9 +322,10 @@ auto ii rng argstr = do
                   loop [] = return $ AutoResult (Solutions []) (Just "")
                   loop (term : terms') = do
                     -- On exception, try next solution
-                    flip catchError (const $ loop terms') $ do
+                    flip catchError (\ e -> do reportSDoc "auto" 40 $ "Solution failed:" TCM.<?> TCM.prettyTCM e
+                                               loop terms') $ do
                       exprs <- getsols term
-                      reportSDoc "auto" 20 $ TCM.text "Trying solution " TCM.<+> TCM.prettyTCM exprs
+                      reportSDoc "auto" 20 $ "Trying solution " TCM.<+> TCM.prettyTCM exprs
                       giveress <- forM exprs $ \ (mi, expr0) -> do
                         let expr = killRange expr0
                         case lookup mi riis of
@@ -340,7 +339,7 @@ auto ii rng argstr = do
                                         let scope = getMetaScope mv
                                         ce <- abstractToConcreteScope scope ae
                                         let cmnt = if ii' == ii then agsyinfo ticks else ""
-                                        return (Just (ii', show ce ++ cmnt), Nothing)
+                                        return (Just (ii', prettyShow ce ++ cmnt), Nothing)
                            -- Andreas, 2015-05-17, Issue 1504
                            -- When Agsy produces an ill-typed solution, return nothing.
                            -- TODO: try other solution.
@@ -354,7 +353,7 @@ auto ii rng argstr = do
                                          ) exprs
                       let msgs = catMaybes $ msg : map snd giveress
                           msg' = unlines msgs <$ guard (not $ null msgs)
-                      return $ AutoResult (Solutions $ catMaybes $ map fst giveress) msg'
+                      return $ AutoResult (Solutions $ mapMaybe fst giveress) msg'
 
      MCaseSplit -> do
       case thisdefinfo of
@@ -362,12 +361,12 @@ auto ii rng argstr = do
         case Map.elems tccons of
          [(m, mytype, mylocalVars, _)] | null eqcons -> do
           (ids, pats) <- constructPats cmap mi clause
-          let ctx = map (\((hid, id), t) -> HI hid (id, t)) (zip ids mylocalVars)
+          let ctx = zipWith (\(hid, id) t -> HI hid (id, t)) ids mylocalVars
           ticks <- liftIO $ newIORef 0
           let [rectyp'] = mymrectyp
           defdfv <- getdfv mi def
           myrecdef <- liftIO $ newIORef $ ConstDef {cdname = "", cdorigin = (Nothing, def), cdtype = rectyp', cdcont = Postulate, cddeffreevars = defdfv}
-          sols <- liftIO $ System.Timeout.timeout (getTimeOut timeout * 1000000) (
+          sols <- liftIO $ System.Timeout.timeout (getTimeOut timeout * 1000) (
              let r d = do
                   sols <- liftIO $ caseSplitSearch ticks __IMPOSSIBLE__ myhints meqr __IMPOSSIBLE__ d myrecdef ctx mytype pats
                   case sols of
@@ -380,12 +379,12 @@ auto ii rng argstr = do
             case cls' of
              Left{} -> stopWithMsg "No solution found"
              Right cls' -> do
-              cls'' <- forM cls' $ \ (I.Clause _ _ tel ps body t catchall reachable) -> do
+              cls'' <- forM cls' $ \ (I.Clause _ _ tel ps body t catchall exact recursive reachable ell) -> do
                 withCurrentModule (AN.qnameModule def) $ do
                  -- Normalise the dot patterns
                  ps <- addContext tel $ normalise ps
                  body <- etaContract body
-                 liftM modifyAbstractClause $ inTopContext $ reify $ AN.QNamed def $ I.Clause noRange noRange tel ps body t catchall reachable
+                 fmap modifyAbstractClause $ inTopContext $ reify $ AN.QNamed def $ I.Clause noRange noRange tel ps body t catchall exact recursive reachable ell
               moduleTel <- lookupSection (AN.qnameModule def)
               pcs <- withInteractionId ii $ inTopContext $ addContext moduleTel $ mapM prettyA cls''
               ticks <- liftIO $ readIORef ticks
@@ -408,25 +407,25 @@ auto ii rng argstr = do
        normalise targettype
       let tctx = length $ envContext $ clEnv minfo
 
-      hits <- if elem "-a" hints then do
+      hits <- if "-a" `elem` hints then do
         st <- liftTCM $ join $ pureTCM $ \st _ -> return st
         let defs = st^.stSignature.sigDefinitions
             idefs = st^.stImports.sigDefinitions
             alldefs = HMap.keys defs ++ HMap.keys idefs
-        liftM catMaybes $ mapM (\n ->
+        catMaybes <$> mapM (\n ->
           case thisdefinfo of
            Just (def, _, _) | def == n -> return Nothing
            _ -> do
             cn <- withMetaInfo minfo $ runAbsToCon $ toConcrete n
-            if head (show cn) == '.' then -- not in scope
+            if C.isInScope cn == C.NotInScope then
               return Nothing
-             else do
+            else do
               c <- getConstInfo n
               ctyp <- normalise $ defType c
               cdfv <- withMetaInfo minfo $ getDefFreeVars n
               return $ case matchType cdfv tctx ctyp targettyp of
                Nothing -> Nothing
-               Just score -> Just (show cn, score)
+               Just score -> Just (prettyShow cn, score)
          ) alldefs
        else do
         let scopeinfo = clScope (getMetaInfo mv)
@@ -436,13 +435,13 @@ auto ii rng argstr = do
             modnames = case thisdefinfo of
                         Just (def, _, _) -> filter (\(_, n) -> n /= def) qnames
                         Nothing -> qnames
-        liftM catMaybes $ mapM (\(cn, n) -> do
+        catMaybes <$> mapM (\(cn, n) -> do
           c <- getConstInfo n
           ctyp <- normalise $ defType c
           cdfv <- withMetaInfo minfo $ getDefFreeVars n
           return $ case matchType cdfv tctx ctyp targettyp of
            Nothing -> Nothing
-           Just score -> Just (show cn, score)
+           Just score -> Just (prettyShow cn, score)
          ) modnames
 
       let sorthits = List.sortBy (\(_, (pa1, pb1)) (_, (pa2, pb2)) -> case compare pa2 pa1 of {EQ -> compare pb1 pb2; o -> o}) hits
@@ -453,7 +452,7 @@ auto ii rng argstr = do
             else
              let showhits = take 10 $ drop pick' sorthits
              in stopWithMsg $ "Listing candidate(s) " ++ show pick' ++ "-" ++ show (pick' + length showhits - 1) ++ " (found " ++ show (length sorthits) ++ " in total)\n" ++
-                           unlines (map (\(i, (cn, _)) -> show i ++ "  " ++ cn) (zip [pick'..pick' + length showhits - 1] showhits))
+                           unlines (zipWith (\i (cn, _) -> show i ++ "  " ++ cn) [pick'..pick' + length showhits - 1] showhits)
        else
         if pick >= length sorthits then
          stopWithMsg $ insuffcands $ length sorthits
@@ -494,10 +493,10 @@ getEqCombinators ii rng = do
 -- | Templates for error messages
 
 genericNotEnough :: String -> Int -> String
-genericNotEnough str n = List.intercalate " " $ case n of
-  0 -> [ "No"    , str, "found"]
-  1 -> [ "Only 1", str, "found" ]
-  _ -> [ "Only", show n, str ++ "s", "found" ]
+genericNotEnough str n = unwords $ case n of
+  0 -> ["No", str, "found"]
+  1 -> ["Only 1", str, "found"]
+  _ -> ["Only", show n, str ++ "s", "found"]
 
 insuffsols :: Int -> String
 insuffsols  = genericNotEnough "solution"

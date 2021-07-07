@@ -1,6 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP        #-}
-
 -- | A cut-down implementation of lenses, with names taken from
 --   Edward Kmett's lens package.
 
@@ -9,7 +6,7 @@ module Agda.Utils.Lens
   , (<&>) -- reexported from Agda.Utils.Functor
   ) where
 
-import Control.Applicative
+import Control.Applicative ( Const(Const), getConst )
 import Control.Monad.State
 import Control.Monad.Reader
 import Control.Monad.Writer
@@ -55,7 +52,15 @@ over :: Lens' i o -> LensMap i o
 over l f o = runIdentity $ l (Identity . f) o
 
 
--- * State accessors and modifiers.
+-- * State accessors and modifiers using 'StateT'.
+
+-- | Focus on a part of the state for a stateful computation.
+focus :: Monad m => Lens' i o -> StateT i m a -> StateT o m a
+focus l m = StateT $ \ o -> do
+  (a, i) <- runStateT m (o ^. l)
+  return (a, set l i o)
+
+-- * State accessors and modifiers using 'MonadState'.
 
 -- | Read a part of the state.
 use :: MonadState o m => Lens' i o -> m i
@@ -74,29 +79,26 @@ l %= f = modify $ over l f
 
 infix 4 %==
 -- | Modify a part of the state monadically.
-(%==)
-#if __GLASGOW_HASKELL__ <= 708
-  :: (Functor m, MonadState o m)
-#else
-  :: MonadState o m
-#endif
-  => Lens' i o -> (i -> m i) -> m ()
+(%==) :: MonadState o m => Lens' i o -> (i -> m i) -> m ()
 l %== f = put =<< l f =<< get
 
 infix 4 %%=
 -- | Modify a part of the state monadically, and return some result.
-(%%=)
-#if __GLASGOW_HASKELL__ <= 708
-  :: (Functor m, MonadState o m)
-#else
-  :: MonadState o m
-#endif
-  => Lens' i o -> (i -> m (i, r)) -> m r
+(%%=) :: MonadState o m => Lens' i o -> (i -> m (i, r)) -> m r
 l %%= f = do
   o <- get
   (o', r) <- runWriterT $ l (WriterT . f) o
   put o'
   return r
+
+-- | Modify a part of the state locally.
+locallyState :: MonadState o m => Lens' i o -> (i -> i) -> m r -> m r
+locallyState l f k = do
+  old <- use l
+  l %= f
+  x <- k
+  l .= old
+  return x
 
 -- * Read-only state accessors and modifiers.
 
@@ -107,6 +109,9 @@ view l = asks (^. l)
 -- | Modify a part of the state in a subcomputation.
 locally :: MonadReader o m => Lens' i o -> (i -> i) -> m a -> m a
 locally l = local . over l
+
+locally' :: ((o -> o) -> m a -> m a) -> Lens' i o -> (i -> i) -> m a -> m a
+locally' local l = local . over l
 
 key :: Ord k => k -> Lens' (Maybe v) (Map k v)
 key k f m = f (Map.lookup k m) <&> \ v -> Map.alter (const v) k m

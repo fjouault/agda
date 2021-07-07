@@ -1,11 +1,9 @@
-{-# LANGUAGE CPP                       #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
 
 module Agda.TypeChecking.SizedTypes.WarshallSolver where
 
-import Prelude hiding (null, truncate)
+import Prelude hiding ( null, truncate )
 
-import Control.Applicative hiding (Const, empty)
+
 import Control.Monad
 
 import Data.Function (on)
@@ -28,32 +26,31 @@ import Agda.Utils.Functor
 import Agda.Utils.Null
 import Agda.Utils.Pretty
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
-type Graph r f a = Graph.Graph (Node r f) (Node r f) a
-type Edge' r f a = Graph.Edge  (Node r f) (Node r f) a
+type Graph r f a = Graph.Graph (Node r f) a
+type Edge' r f a = Graph.Edge  (Node r f) a
 type Key r f = Edge' r f ()
 type Nodes r f = Graph.Nodes (Node r f)
 type LabelledEdge r f = Edge' r f Label
 
-src :: Edge s t e -> s
+src :: Edge n e -> n
 src = Graph.source
 
-dest :: Edge s t e -> t
+dest :: Edge n e -> n
 dest = Graph.target
 
-lookupEdge :: (Ord s, Ord t) => Graph.Graph s t e -> s -> t -> Maybe e
+lookupEdge :: Ord n => Graph.Graph n e -> n -> n -> Maybe e
 lookupEdge g s t = Graph.lookup s t g
 
-graphToList :: Graph.Graph s t e -> [Edge s t e]
-graphToList = Graph.toList
+graphToList :: Graph.Graph n e -> [Edge n e]
+graphToList = Graph.edges
 
-graphFromList :: (Ord s, Ord t) => [Edge s t e] -> Graph.Graph s t e
-graphFromList = Graph.fromList
+graphFromList :: Ord n => [Edge n e] -> Graph.Graph n e
+graphFromList = Graph.fromEdges
 
-insertEdge :: (Ord s, Ord t, MeetSemiLattice e, Top e) =>
-              Edge s t e -> Graph.Graph s t e -> Graph.Graph s t e
+insertEdge :: (Ord n, MeetSemiLattice e, Top e) =>
+              Edge n e -> Graph.Graph n e -> Graph.Graph n e
 insertEdge e g
   | isTop (label e) = g
   | otherwise       = Graph.insertEdgeWith meet e g
@@ -74,11 +71,11 @@ setFoldl step start = List.foldl' step start . Set.toAscList
 -- setFoldl = Set.foldl'
 
 -- | Floyd-Warshall algorithm.
-transClos :: forall n a . (Ord n, Dioid a) => Graph.Graph n n a -> Graph.Graph n n a
+transClos :: forall n a . (Ord n, Dioid a) => Graph.Graph n a -> Graph.Graph n a
 transClos g = setFoldl step g $ allNodes ns
   where
     ns       = computeNodes g
-    srcs     = Set.toAscList $ srcNodes  ns
+    srcs     = Set.toAscList $ srcNodes ns
     dests    = Set.toAscList $ tgtNodes ns
     -- @step g v@ adds all intermediate edges @u --> w@ via @v@ to @g@
     -- step :: (Ord n, Dioid a) => Graph.Graph n n a -> n -> Graph.Graph n n a
@@ -99,7 +96,7 @@ data Weight
 
 instance Pretty Weight where
   pretty (Offset x) = pretty x
-  pretty Infinity   = text "∞"
+  pretty Infinity   = "∞"
 
 instance Ord Weight where
   x        <= Infinity = True
@@ -196,7 +193,7 @@ instance Ord Label where
 
 instance Pretty Label where
   pretty (Label cmp w) = pretty cmp <> pretty w
-  pretty LInf          = text "∞"
+  pretty LInf          = "∞"
 
 instance MeetSemiLattice Label where
   -- one label is neutral
@@ -238,8 +235,8 @@ data Node rigid flex
   deriving (Show, Eq, Ord)
 
 instance (Pretty rigid, Pretty flex) => Pretty (Node rigid flex) where
-  pretty NodeZero      = text "0"
-  pretty NodeInfty     = text "∞"
+  pretty NodeZero      = "0"
+  pretty NodeInfty     = "∞"
   pretty (NodeRigid x) = pretty x
   pretty (NodeFlex  x) = pretty x
 
@@ -268,9 +265,6 @@ nodeToSizeExpr n =
 -- | An edge is negative if its label is.
 instance Negative a => Negative (Edge' r f a) where
   negative = negative . label
-
--- instance Show a => Show (Edge' a) where
---   show (Edge u v l) = show u ++ " -(" ++ show l ++ ")-> " ++ show v
 
 instance (Ord r, Ord f, MeetSemiLattice a) => MeetSemiLattice (Edge' r f a) where
   e@(Edge u v l) `meet` e'@(Edge u' v' l')
@@ -350,10 +344,10 @@ instance (Ord r, Ord f, Negative a) => Negative (Graphs r f a) where
 implies :: (Ord r, Ord f, Pretty r, Pretty f, Pretty a, Top a, Ord a, Negative a)
   => Graph r f a -> Graph r f a -> Bool
 -- iterate 'test' over all edges in g
-implies h g = and $ map test $ graphToList g
-  -- NB: doing the @test k l@ before the recursive @b@ gives
-  -- opportunity to short-cut the conjunction @&&@.
+implies h g = all test (graphToList g)
   where
+    -- NB: doing the @test k l@ before the recursive @b@ gives
+    -- opportunity to short-cut the conjunction @&&@.
     -- test :: Key -> a -> Bool
     test k@(Edge src dest l)
       | isZeroNode src, not (negative l) = True
@@ -363,9 +357,15 @@ implies h g = and $ map test $ graphToList g
       | isTop l                          = True
       | otherwise = case lookupEdge h src dest of
         Nothing -> False
-        Just l' -> if l' <= l then True else
-          trace ("edge " ++ prettyShow (l <$ k) ++ " not implied by " ++ prettyShow (l' <$ k)) $
-            False
+        Just l' ->
+          (l' <= l) || ( trace
+                           ( "edge " ++ prettyShow (l <$ k)
+                               ++ " not implied by "
+                               ++ prettyShow (l' <$ k)
+                           )
+                           $ False
+                       )
+
 -- implies h g = Map.foldlWithKey (\ b k l -> test k l && b) True g
 --   -- NB: doing the @test k l@ before the recursive @b@ gives
 --   -- opportunity to short-cut the conjunction @&&@.
@@ -384,7 +384,7 @@ implies h g = and $ map test $ graphToList g
 --             False
 
 nodeFromSizeExpr :: SizeExpr' rigid flex -> (Node rigid flex, Offset)
-nodeFromSizeExpr e = case e of
+nodeFromSizeExpr = \case
   Const   n -> (NodeZero   , n)
   Rigid i n -> (NodeRigid i, n)
   Flex  x n -> (NodeFlex x , n)
@@ -979,7 +979,7 @@ testSuccs = commonSuccs hg [n1,n2]
     n3 = NodeRigid "k"
     n4 = NodeRigid "l"
     n5 = NodeRigid "m"
-    hg = Graph.fromList
+    hg = Graph.fromEdges
          [ Graph.Edge n1 n3 $ Label Le 1
          , Graph.Edge n1 n4 $ Label Le 2
          , Graph.Edge n1 n5 $ Label Le 3
@@ -997,7 +997,7 @@ testLub = lub hg (Rigid "i" 0) (Rigid "j" 2)
     n3 = NodeRigid "k"
     n4 = NodeRigid "l"
     n5 = NodeRigid "m"
-    hg = Graph.fromList
+    hg = Graph.fromEdges
          [ Graph.Edge n1 n3 $ Label Le 0
          , Graph.Edge n1 n4 $ Label Le 2
          , Graph.Edge n1 n5 $ Label Le 4

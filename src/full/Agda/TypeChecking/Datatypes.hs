@@ -1,25 +1,22 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.TypeChecking.Datatypes where
 
+import Control.Monad.Except
+
 import Data.Maybe (fromMaybe)
-import qualified Data.List as List
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin (constructorForm)
 import Agda.TypeChecking.Telescope
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Pretty
 
 import Agda.Utils.Either
-import Agda.Utils.Functor
 import Agda.Utils.Pretty ( prettyShow )
 import Agda.Utils.Size
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 ---------------------------------------------------------------------------
@@ -27,14 +24,19 @@ import Agda.Utils.Impossible
 ---------------------------------------------------------------------------
 
 -- | Get true constructor with record fields.
-getConHead :: QName -> TCM (Either SigError ConHead)
-getConHead c = mapRight (conSrcCon . theDef) <$> getConstInfo' c
+getConHead :: (HasConstInfo m) => QName -> m (Either SigError ConHead)
+getConHead c = runExceptT $ do
+  def <- ExceptT $ getConstInfo' c
+  case theDef def of
+    Constructor { conSrcCon = c' } -> return c'
+    Record     { recConHead = c' } -> return c'
+    _ -> throwError $ SigUnknown $ prettyShow c ++ " is not a constructor"
 
 -- | Get true constructor with fields, expanding literals to constructors
 --   if possible.
 getConForm :: QName -> TCM (Either SigError ConHead)
 getConForm c = caseEitherM (getConHead c) (return . Left) $ \ ch -> do
-  Con con _ [] <- ignoreSharing <$> constructorForm (Con ch ConOCon [])
+  Con con _ [] <- constructorForm (Con ch ConOCon [])
   return $ Right con
 
 -- | Augment constructor with record fields (preserve constructor name).
@@ -52,6 +54,17 @@ getConstructorData c = do
     Constructor{conData = d} -> return d
     _                        -> __IMPOSSIBLE__
 
+-- | Is the datatype of this constructor a Higher Inductive Type?
+--   Precondition: The argument must refer to a constructor of a datatype or record.
+consOfHIT :: HasConstInfo m => QName -> m Bool
+consOfHIT c = do
+  d <- getConstructorData c
+  def <- theDef <$> getConstInfo d
+  case def of
+    Datatype {dataPathCons = xs} -> return $ not $ null xs
+    Record{} -> return False
+    _  -> __IMPOSSIBLE__
+
 -- | @getConType c t@ computes the constructor parameters from type @t@
 --   and returns them plus the instantiated type of constructor @c@.
 --   This works also if @t@ is a function type ending in a data/record type;
@@ -60,9 +73,10 @@ getConstructorData c = do
 --   @Nothing@ if @t@ is not a data/record type or does not have
 --   a constructor @c@.
 getConType
-  :: ConHead  -- ^ Constructor.
+  :: PureTCM m
+  => ConHead  -- ^ Constructor.
   -> Type     -- ^ Ending in data/record type.
-  -> TCM (Maybe ((QName, Type, Args), Type))
+  -> m (Maybe ((QName, Type, Args), Type))
        -- ^ @Nothing@ if not ends in data or record type.
        --
        --   @Just ((d, dt, pars), ct)@ otherwise, where
@@ -72,9 +86,9 @@ getConType
        --     @ct@   is the type of the constructor instantiated to the parameters.
 getConType c t = do
   reportSDoc "tc.getConType" 30 $ sep $
-    [ text "getConType: constructor "
+    [ "getConType: constructor "
     , prettyTCM c
-    , text " at type "
+    , " at type "
     , prettyTCM t
     ]
   TelV tel t <- telView t
@@ -84,11 +98,11 @@ getConType c t = do
   -- (applied to at least the parameters).
   -- Note: @t@ will have some unbound deBruijn indices if view outside of @tel@.
   reportSLn "tc.getConType" 35 $ "  target type: " ++ prettyShow t
-  applySubst (strengthenS __IMPOSSIBLE__ (size tel)) <$> do
+  applySubst (strengthenS impossible (size tel)) <$> do
     addContext tel $ getFullyAppliedConType c t
   -- Andreas, 2017-08-18, issue #2703:
   -- The original code
-  --    getFullyAppliedConType c $ applySubst (strengthenS __IMPOSSIBLE__ (size tel)) t
+  --    getFullyAppliedConType c $ applySubst (strengthenS impossible (size tel)) t
   -- crashes because substitution into @Def@s is slightly too strict
   -- (see @defApp@ and @canProject@).
   -- Strengthening the parameters after the call to @getFullyAppliedConType@
@@ -104,9 +118,10 @@ getConType c t = do
 --
 --   Precondition: @t@ is reduced.
 getFullyAppliedConType
-  :: ConHead  -- ^ Constructor.
+  :: PureTCM m
+  => ConHead  -- ^ Constructor.
   -> Type     -- ^ Reduced type of the fully applied constructor.
-  -> TCM (Maybe ((QName, Type, Args), Type))
+  -> m (Maybe ((QName, Type, Args), Type))
        -- ^ @Nothing@ if not data or record type.
        --
        --   @Just ((d, dt, pars), ct)@ otherwise, where
@@ -115,15 +130,15 @@ getFullyAppliedConType
        --     @pars@ are the reconstructed parameters,
        --     @ct@   is the type of the constructor instantiated to the parameters.
 getFullyAppliedConType c t = do
-  reportSLn "tc.getConType" 35 $ List.intercalate " " $
+  reportSLn "tc.getConType" 35 $ unwords $
     [ "getFullyAppliedConType", prettyShow c, prettyShow t ]
   c <- fromRight __IMPOSSIBLE__ <$> do getConHead $ conName c
-  case ignoreSharing $ unEl t of
+  case unEl t of
     -- Note that if we come e.g. from getConType,
     -- then the non-parameter arguments of @es@ might contain __IMPOSSIBLE__
     -- coming from strengthening.  (Thus, printing them is not safe.)
     Def d es -> do
-      reportSLn "tc.getConType" 35 $ List.intercalate " " $
+      reportSLn "tc.getConType" 35 $ unwords $
         [ "getFullyAppliedConType: case Def", prettyShow d, prettyShow es ]
       def <- getConstInfo d
       let cont n = do
@@ -137,25 +152,24 @@ getFullyAppliedConType c t = do
         _ ->  return Nothing
     _ -> return Nothing
 
-data HasEta = NoEta | YesEta
-  deriving (Eq)
-
 data ConstructorInfo
-  = DataCon Nat                  -- ^ Arity.
-  | RecordCon HasEta [Arg QName] -- ^ List of field names.
+  = DataCon Nat
+      -- ^ Arity.
+  | RecordCon PatternOrCopattern HasEta [Dom QName]
+      -- ^ List of field names.
 
 -- | Return the number of non-parameter arguments to a data constructor,
 --   or the field names of a record constructor.
 --
 --   For getting just the arity of constructor @c@,
 --   use @either id size <$> getConstructorArity c@.
-getConstructorInfo :: QName -> TCM ConstructorInfo
+getConstructorInfo :: HasConstInfo m => QName -> m ConstructorInfo
 getConstructorInfo c = do
   (theDef <$> getConstInfo c) >>= \case
     Constructor{ conData = d, conArity = n } -> do
       (theDef <$> getConstInfo d) >>= \case
         r@Record{ recFields = fs } ->
-           return $ RecordCon (if recEtaEquality r then YesEta else NoEta) fs
+           return $ RecordCon (recPatternMatching r) (recEtaEquality r) fs
         Datatype{} ->
            return $ DataCon n
         _ -> __IMPOSSIBLE__
@@ -177,20 +191,18 @@ isDatatype d = do
 -- | Check if a name refers to a datatype or a record.
 isDataOrRecordType :: QName -> TCM (Maybe DataOrRecord)
 isDataOrRecordType d = do
-  def <- getConstInfo d
-  case theDef def of
+  (theDef <$> getConstInfo d) >>= \case
+    Record{ recPatternMatching } -> return $ Just $ IsRecord recPatternMatching
     Datatype{} -> return $ Just IsData
-    Record{}   -> return $ Just IsRecord
     _          -> return $ Nothing
 
 -- | Precodition: 'Term' is 'reduce'd.
 isDataOrRecord :: Term -> TCM (Maybe QName)
-isDataOrRecord v = do
-  case ignoreSharing v of
+isDataOrRecord = \case
     Def d _ -> fmap (const d) <$> isDataOrRecordType d
     _       -> return Nothing
 
-getNumberOfParameters :: QName -> TCM (Maybe Nat)
+getNumberOfParameters :: HasConstInfo m => QName -> m (Maybe Nat)
 getNumberOfParameters d = do
   def <- getConstInfo d
   case theDef def of
@@ -198,6 +210,12 @@ getNumberOfParameters d = do
     Record{ recPars = n }      -> return $ Just n
     Constructor{ conPars = n } -> return $ Just n
     _                          -> return Nothing
+
+getNotErasedConstructors :: QName -> TCM [QName]
+getNotErasedConstructors d = do
+  cs <- getConstructors d
+  flip filterM cs $ \ c -> do
+    usableModality <$> getConstInfo c
 
 -- | Precondition: Name is a data or record type.
 getConstructors :: QName -> TCM [QName]
@@ -214,60 +232,3 @@ getConstructors_ = \case
     Datatype{dataCons = cs} -> Just cs
     Record{recConHead = h}  -> Just [conName h]
     _                       -> Nothing
-
--- | Precondition: Name is a data or record type.
-getConHeads :: QName -> TCM [ConHead]
-getConHeads d = fromMaybe __IMPOSSIBLE__ <$>
-  getConHeads' d
-
--- | 'Nothing' if not data or record type name.
-getConHeads' :: QName -> TCM (Maybe [ConHead])
-getConHeads' d = getConHeads_ . theDef <$> getConstInfo d
-
--- | 'Nothing' if not data or record definition.
-getConHeads_ :: Defn -> Maybe [ConHead]
-getConHeads_ = \case
-    Datatype{dataCons = cs} -> Just $ map (\ c -> ConHead c Inductive []) cs
-    Record{recConHead = h}  -> Just [h]
-    _                       -> Nothing
-
-{- UNUSED
-data DatatypeInfo = DataInfo
-  { datatypeName   :: QName
-  , datatypeParTel :: Telescope
-  , datatypePars   :: Args
-  , datatypeIxTel  :: Telescope
-  , datatypeIxs    :: Args
-  }
-
--- | Get the name and parameters from a type if it's a datatype or record type
---   with a named constructor.
-getDatatypeInfo :: Type -> TCM (Maybe DatatypeInfo)
-getDatatypeInfo t = do
-  t <- reduce t
-  case unEl t of
-    Def d args -> do
-      n          <- getDefFreeVars d
-      args       <- return $ genericDrop n args
-      def        <- instantiateDef =<< getConstInfo d
-      TelV tel _ <- telView (defType def)
-      let npars  = case theDef def of
-            Datatype{dataPars = np} -> Just np
-            Record{recPars = np, recNamedCon = True}
-              | genericLength args == np -> Just np
-              | otherwise                -> __IMPOSSIBLE__
-            _                            -> Nothing
-      return $ do
-        np <- npars
-        let (pt, it) = genericSplitAt np $ telToList tel
-            parTel   = telFromList pt
-            ixTel    = telFromList it
-            (ps, is) = genericSplitAt np args
-        return $ DataInfo { datatypeName = d
-                          , datatypeParTel = parTel
-                          , datatypePars   = ps
-                          , datatypeIxTel  = ixTel
-                          , datatypeIxs    = is
-                          }
-    _ -> return Nothing
--}

@@ -3,6 +3,8 @@
 
 \AgdaHide{
 \begin{code}
+{-# OPTIONS --sized-types #-}
+
 module Issue854.WellTypedSemantics where
 
 open import Level using (lower)
@@ -12,15 +14,15 @@ open import Data.Unit
 open import Data.Sum
 open import Data.Product
 open import Data.List
-open import Data.List.Any
+open import Data.List.Relation.Unary.Any
+open import Data.List.Relation.Binary.Pointwise hiding (refl)
 open import Data.Container.FreeMonad using (rawMonad; inn)
     renaming (_⋆_ to _⋆^C_)
 open import Data.W
 open import Relation.Binary.PropositionalEquality
-open import Relation.Binary.List.Pointwise hiding (refl)
 open import Category.Monad
 
-open import Data.List.Any.Membership.Propositional
+open import Data.List.Membership.Propositional
 open import Issue854.Types
 open import Issue854.Context
 open import Issue854.EilenbergMooreAlgebra as EMA
@@ -38,7 +40,7 @@ open import Issue854.RunCompat
 
 ⟦_⟧^con : ∀ {Δ P A} → (P , A) ∈ Δ → ⟦ P ⟧^VType →
          (⟦ A ⟧^VType → ⟦ μ Δ ⟧^VType) → ⟦ μ Δ ⟧^VType
-⟦ m ⟧^con p k = sup (sh m p) (k ∘ ar m p)
+⟦ m ⟧^con p k = sup (sh m p , k ∘ ar m p)
 
 ⟦_⟧^op : ∀ {Σ P A} → (P , A) ∈ Σ → (⟦ P ⟧^VType → Σ ⋆^S ⟦ A ⟧^VType)
 ⟦ m ⟧^op s = inn (sh m s , (M.return ∘ ar m s))
@@ -62,7 +64,7 @@ mutual
     where
     module M = RawMonad rawMonad
 
-  ⟦ _to_ {Σ″ = Σ″}{V = V} c k p q ⟧^c γ = >>= ⟦ Σ″ ⋆ V ⟧^CType
+  ⟦ _to_ {Σ″ = Σ″}{V = V} c k p q ⟧^c γ = bind ⟦ Σ″ ⋆ V ⟧^CType
     (embed (⊆→⇒ p) (⟦ c ⟧^c γ))
     (λ u → embed (⊆→⇒ q) (⟦ k ⟧^c (γ , u)))
 

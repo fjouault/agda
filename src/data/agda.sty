@@ -5,7 +5,7 @@
 \ProvidesPackage{agda}
 
 \RequirePackage{ifxetex, ifluatex, xifthen, xcolor, polytable, etoolbox,
-                calc, environ}
+                calc, environ, xparse, xkeyval}
 
 % https://tex.stackexchange.com/questions/47576/combining-ifxetex-and-ifluatex-with-the-logical-or-operation
 \newif\ifxetexorluatex
@@ -35,84 +35,13 @@
   \@AgdaEnableLinkstrue
 }
 
-% If the "nofontsetup" option is used, then the package does not
-% select any fonts, and it does not change the font encoding.
-\newif\if@AgdaSetupFonts\@AgdaSetupFontstrue
-\DeclareOption{nofontsetup}{
-  \@AgdaSetupFontsfalse
-}
-
-% If the "noinputencodingsetup" option is used, then the package does
-% not change the input encoding, and it does not load the `ucs`
-% package.
-\newif\if@AgdaSetupInputEncoding\@AgdaSetupInputEncodingtrue
-\DeclareOption{noinputencodingsetup}{
-  \@AgdaSetupInputEncodingfalse
-}
-
 \ProcessOptions\relax
-
-% ----------------------------------------------------------------------
-% Input encoding setup
-
-\if@AgdaSetupInputEncoding
-  \ifxetexorluatex
-
-    \providecommand{\DeclareUnicodeCharacter}[2]{\relax}
-
-  \else
-
-    \RequirePackage{ucs}
-    \RequirePackage[utf8x]{inputenc}
-
-  \fi
-\fi
 
 % ----------------------------------------------------------------------
 % Font setup
 
 \tracinglostchars=2 % If the font is missing some symbol, then say
                     % so in the compilation output.
-
-\if@AgdaSetupFonts
-  % XeLaTeX or LuaLaTeX
-  \ifxetexorluatex
-
-    % Hack to get the amsthm package working.
-    % https://tex.stackexchange.com/questions/130491/xelatex-error-paragraph-ended-before-tempa-was-complete
-    \let\AgdaOpenBracket\[\let\AgdaCloseBracket\]
-    \RequirePackage{fontspec}
-    \let\[\AgdaOpenBracket\let\]\AgdaCloseBracket
-    \RequirePackage{unicode-math}
-
-    \setmainfont
-      [ Ligatures      = TeX
-      , BoldItalicFont = xits-bolditalic.otf
-      , BoldFont       = xits-bold.otf
-      , ItalicFont     = xits-italic.otf
-      ]
-      {xits-regular.otf}
-
-    \setmathfont{xits-math.otf}
-    \setmonofont[Mapping=tex-text]{FreeMono.otf}
-
-    % Make mathcal and mathscr appear as different.
-    % https://tex.stackexchange.com/questions/120065/xetex-what-happened-to-mathcal-and-mathscr
-    \setmathfont[range={\mathcal,\mathbfcal},StylisticSet=1]{xits-math.otf}
-    \setmathfont[range=\mathscr]{xits-math.otf}
-
-  % pdfLaTeX
-  \else
-
-    % https://tex.stackexchange.com/questions/1774/how-to-insert-pipe-symbol-in-latex
-    \RequirePackage[T1]{fontenc}
-
-    \RequirePackage{amsfonts, amssymb}
-    \RequirePackage[safe]{tipa} % See page 12 of the tipa manual for what
-                                % safe does.
-
-  \fi
-\fi
 
 % ----------------------------------------------------------------------
 % Colour schemes.
@@ -186,28 +115,15 @@
 % ----------------------------------------------------------------------
 % Font styles.
 
-\ifxetexorluatex
-  \newcommand{\AgdaFontStyle}[1]{\ensuremath{\mathsf{#1}}}
-  \ifthenelse{\equal{\AgdaColourScheme}{bw}}{
-      \newcommand{\AgdaKeywordFontStyle}[1]{\underline{#1}}
-  }{
-      \newcommand{\AgdaKeywordFontStyle}[1]{\ensuremath{\mathsf{#1}}}
-  }
-  \newcommand{\AgdaStringFontStyle}[1]{\ensuremath{\texttt{#1}}}
-  \newcommand{\AgdaCommentFontStyle}[1]{\ensuremath{\texttt{#1}}}
-  \newcommand{\AgdaBoundFontStyle}[1]{\ensuremath{\mathit{#1}}}
-
-\else
-  \newcommand{\AgdaFontStyle}[1]{\textsf{#1}}
-  \ifthenelse{\equal{\AgdaColourScheme}{bw}}{
-      \newcommand{\AgdaKeywordFontStyle}[1]{\underline{#1}}
-  }{
-      \newcommand{\AgdaKeywordFontStyle}[1]{\textsf{#1}}
-  }
-  \newcommand{\AgdaStringFontStyle}[1]{\texttt{#1}}
-  \newcommand{\AgdaCommentFontStyle}[1]{\texttt{#1}}
-  \newcommand{\AgdaBoundFontStyle}[1]{\textit{#1}}
-\fi
+\newcommand{\AgdaFontStyle}[1]{\textsf{#1}}
+\ifthenelse{\equal{\AgdaColourScheme}{bw}}{
+    \newcommand{\AgdaKeywordFontStyle}[1]{\underline{#1}}
+}{
+    \newcommand{\AgdaKeywordFontStyle}[1]{\textsf{#1}}
+}
+\newcommand{\AgdaStringFontStyle}[1]{\texttt{#1}}
+\newcommand{\AgdaCommentFontStyle}[1]{\texttt{#1}}
+\newcommand{\AgdaBoundFontStyle}[1]{\textit{#1}}
 
 % ----------------------------------------------------------------------
 % Colours.
@@ -218,7 +134,7 @@
 
     % Aspect colours.
     \definecolor{AgdaComment}      {HTML}{000000}
-    \definecolor{AgdaOption}       {HTML}{000000}
+    \definecolor{AgdaPragma}       {HTML}{000000}
     \definecolor{AgdaKeyword}      {HTML}{000000}
     \definecolor{AgdaString}       {HTML}{000000}
     \definecolor{AgdaNumber}       {HTML}{000000}
@@ -227,6 +143,7 @@
 
     % NameKind colours.
     \definecolor{AgdaBound}                 {HTML}{000000}
+    \definecolor{AgdaGeneralizable}         {HTML}{000000}
     \definecolor{AgdaInductiveConstructor}  {HTML}{000000}
     \definecolor{AgdaCoinductiveConstructor}{HTML}{000000}
     \definecolor{AgdaDatatype}              {HTML}{000000}
@@ -242,8 +159,10 @@
     % Other aspect colours.
     \definecolor{AgdaDottedPattern}     {HTML}{000000}
     \definecolor{AgdaUnsolvedMeta}      {HTML}{D3D3D3}
+    \definecolor{AgdaUnsolvedConstraint}{HTML}{D3D3D3}
     \definecolor{AgdaTerminationProblem}{HTML}{BEBEBE}
     \definecolor{AgdaIncompletePattern} {HTML}{D3D3D3}
+    \definecolor{AgdaErrorWarning}      {HTML}{BEBEBE}
     \definecolor{AgdaError}             {HTML}{696969}
 
     % Misc.
@@ -255,7 +174,7 @@
 
     % Aspect colours.
     \definecolor{AgdaComment}      {HTML}{B22222}
-    \definecolor{AgdaOption}       {HTML}{000000}
+    \definecolor{AgdaPragma}       {HTML}{000000}
     \definecolor{AgdaKeyword}      {HTML}{000000}
     \definecolor{AgdaString}       {HTML}{000000}
     \definecolor{AgdaNumber}       {HTML}{000000}
@@ -264,6 +183,7 @@
 
     % NameKind colours.
     \definecolor{AgdaBound}                 {HTML}{A020F0}
+    \definecolor{AgdaGeneralizable}         {HTML}{A020F0}
     \definecolor{AgdaInductiveConstructor}  {HTML}{8B0000}
     \definecolor{AgdaCoinductiveConstructor}{HTML}{8B0000}
     \definecolor{AgdaDatatype}              {HTML}{0000CD}
@@ -279,8 +199,10 @@
     % Other aspect colours.
     \definecolor{AgdaDottedPattern}     {HTML}{000000}
     \definecolor{AgdaUnsolvedMeta}      {HTML}{FFD700}
+    \definecolor{AgdaUnsolvedConstraint}{HTML}{FFD700}
     \definecolor{AgdaTerminationProblem}{HTML}{FF0000}
     \definecolor{AgdaIncompletePattern} {HTML}{A020F0}
+    \definecolor{AgdaErrorWarning}      {HTML}{FF0000}
     \definecolor{AgdaError}             {HTML}{F4A460}
 
     % Misc.
@@ -291,7 +213,7 @@
 }{
     % Aspect colours.
     \definecolor{AgdaComment}      {HTML}{B22222}
-    \definecolor{AgdaOption}       {HTML}{000000}
+    \definecolor{AgdaPragma}       {HTML}{000000}
     \definecolor{AgdaKeyword}      {HTML}{CD6600}
     \definecolor{AgdaString}       {HTML}{B22222}
     \definecolor{AgdaNumber}       {HTML}{A020F0}
@@ -300,6 +222,7 @@
 
     % NameKind colours.
     \definecolor{AgdaBound}                 {HTML}{000000}
+    \definecolor{AgdaGeneralizable}         {HTML}{000000}
     \definecolor{AgdaInductiveConstructor}  {HTML}{008B00}
     \definecolor{AgdaCoinductiveConstructor}{HTML}{8B7500}
     \definecolor{AgdaDatatype}              {HTML}{0000CD}
@@ -315,8 +238,10 @@
     % Other aspect colours.
     \definecolor{AgdaDottedPattern}     {HTML}{000000}
     \definecolor{AgdaUnsolvedMeta}      {HTML}{FFFF00}
+    \definecolor{AgdaUnsolvedConstraint}{HTML}{FFFF00}
     \definecolor{AgdaTerminationProblem}{HTML}{FFA07A}
     \definecolor{AgdaIncompletePattern} {HTML}{F5DEB3}
+    \definecolor{AgdaErrorWarning}      {HTML}{FFA07A}
     \definecolor{AgdaError}             {HTML}{FF0000}
 
     % Misc.
@@ -332,8 +257,8 @@
 % Aspect commands.
 \newcommand{\AgdaComment}     [1]
     {\AgdaNoSpaceMath{\AgdaCommentFontStyle{\textcolor{AgdaComment}{#1}}}}
-\newcommand{\AgdaOption}      [1]
-    {\AgdaNoSpaceMath{\AgdaCommentFontStyle{\textcolor{AgdaOption}{#1}}}}
+\newcommand{\AgdaPragma}      [1]
+    {\AgdaNoSpaceMath{\AgdaCommentFontStyle{\textcolor{AgdaPragma}{#1}}}}
 \newcommand{\AgdaKeyword}     [1]
     {\AgdaNoSpaceMath{\AgdaKeywordFontStyle{\textcolor{AgdaKeyword}{#1}}}}
 \newcommand{\AgdaString}      [1]
@@ -371,6 +296,8 @@
 
 \newcommand{\AgdaBound}[1]
     {\AgdaNoSpaceMath{\AgdaBoundFontStyle{\textcolor{AgdaBound}{\AgdaFormat{#1}{#1}}}}}
+\newcommand{\AgdaGeneralizable}[1]
+    {\AgdaNoSpaceMath{\AgdaBoundFontStyle{\textcolor{AgdaGeneralizable}{\AgdaFormat{#1}{#1}}}}}
 \newcommand{\AgdaInductiveConstructor}[1]
     {\AgdaNoSpaceMath{\AgdaFontStyle{\textcolor{AgdaInductiveConstructor}{\AgdaFormat{#1}{\AgdaLink{#1}}}}}}
 \newcommand{\AgdaCoinductiveConstructor}[1]
@@ -399,11 +326,15 @@
 \newcommand{\AgdaDottedPattern}     [1]{\textcolor{AgdaDottedPattern}{#1}}
 \newcommand{\AgdaUnsolvedMeta}      [1]
     {\AgdaFontStyle{\colorbox{AgdaUnsolvedMeta}{#1}}}
+\newcommand{\AgdaUnsolvedConstraint}[1]
+    {\AgdaFontStyle{\colorbox{AgdaUnsolvedConstraint}{#1}}}
 \newcommand{\AgdaTerminationProblem}[1]
     {\AgdaFontStyle{\colorbox{AgdaTerminationProblem}{#1}}}
 \newcommand{\AgdaIncompletePattern} [1]{\colorbox{AgdaIncompletePattern}{#1}}
+\newcommand{\AgdaErrorWarning}      [1]{\colorbox{AgdaErrorWarning}{#1}}
 \newcommand{\AgdaError}             [1]
     {\AgdaFontStyle{\textcolor{AgdaError}{\underline{#1}}}}
+\newcommand{\AgdaCatchallClause}    [1]{#1} % feel free to change this
 
 % Used to hide code from LaTeX.
 %
@@ -593,23 +524,89 @@
   \Agda@AlignEnd{}%
   \ignorespacesafterend}
 
-% Vertical space used for empty lines. By default \baselineskip.
+% Vertical space used for empty lines. By default \abovedisplayskip.
 \newlength{\AgdaEmptySkip}
-\setlength{\AgdaEmptySkip}{\baselineskip}
+\setlength{\AgdaEmptySkip}{\abovedisplayskip}
 
 % Extra space to be inserted for empty lines (the difference between
 % \AgdaEmptySkip and \baselineskip). Used internally.
 \newlength{\AgdaEmptyExtraSkip}
 
+% Counter used for code numbers.
+\newcounter{AgdaCodeNumber}
+% Formats a code number.
+\newcommand{\AgdaFormatCodeNumber}[1]{(#1)}
+
+% A boolean used to handle the option number.
+\newboolean{Agda@Number}
+\setboolean{Agda@Number}{false}
+
+% A boolean used to handle the option inline*. (For some reason the
+% approach used for hide and inline does not work for inline*.)
+\newboolean{Agda@InlineStar}
+\setboolean{Agda@InlineStar}{false}
+
+% Keys used by the code environment.
+\define@boolkey[Agda]{code}{hide}[true]{}
+\define@boolkey[Agda]{code}{inline}[true]{}
+\define@boolkey[Agda]{code}{inline*}[true]{%
+  \setboolean{Agda@InlineStar}{true}}
+\define@key[Agda]{code}{number}[]{%
+  \ifthenelse{\boolean{Agda@Number}}{}{%
+    \setboolean{Agda@Number}{true}%
+    % Increase the counter if this has not already been done.
+    \refstepcounter{AgdaCodeNumber}}%
+  % If the label is non-empty, set it. Note that it is possible to
+  % give several labels for a single code listing.
+  \ifthenelse{\equal{#1}{}}{}{\label{#1}}}
+
 % The code environment.
 %
-% Code can be hidden by writing \begin{code}[hide].
+% Options:
+%
+% * hide: The code is hidden. Other options are ignored.
+%
+% * number: Give the code an equation number.
+%
+% * number=l: Give the code an equation number and the label l. It is
+%   possible to use this option several times with different labels.
+%
+% * inline/inline*: The code is inlined. In this case most of the
+%   discussion above does not apply, alignment is not respected, and so
+%   on. It is recommended to only use this option for a single line of
+%   code, and to not use two consecutive spaces in this piece of code.
+%
+%   Note that this environment ignores spaces after its end. If a space
+%   (\AgdaSpace{}) should be inserted after the inline code, use
+%   inline*, otherwise use inline.
+%
+%   When this option is used number is ignored.
 %
 % The implementation is based on plainhscode in lhs2TeX's
 % polycode.fmt, written by Andres Löh.
 \NewEnviron{code}[1][]{%
-  % Conditionally hide the code.
-  \ifthenelse{\equal{#1}{hide}}{}{%
+  % Process the options. Complain about unknown options.
+  \setkeys[Agda]{code}[number]{#1}%
+  \ifAgda@code@hide%
+    % Hide the code.
+  \else%
+  \ifAgda@code@inline%
+    % Inline code.
+    %
+    % Make the polytable primitives emitted by the LaTeX backend
+    % do nothing.
+    \DeclareDocumentCommand{\>}{O{}O{}}{}%
+    \DeclareDocumentCommand{\<}{O{}}{}%
+    \AgdaCodeStyle\BODY%
+  \else%
+  \ifthenelse{\boolean{Agda@InlineStar}}{%
+    % Inline code with space at the end.
+    %
+    \DeclareDocumentCommand{\>}{O{}O{}}{}%
+    \DeclareDocumentCommand{\<}{O{}}{}%
+    \AgdaCodeStyle\BODY\AgdaSpace{}}{%
+    %
+    % Displayed code.
     %
     % Conditionally emit space before the code block. Unconditionally
     % switch to a new line.
@@ -618,6 +615,20 @@
                   \value{Agda@SuppressStart} = \value{Agda@Current}\)}{%
       \Agda@NewlineWithVerticalSpace{\abovedisplayskip}}{%
       \Agda@NewlineWithVerticalSpace{0pt}}%
+    %
+    % Check if numbers have been requested. If they have, then a side
+    % effect of this call is that Agda@Number is set to true, the code
+    % number counter is increased, and the label (if any) is set.
+    \setkeys[Agda]{code}[hide,inline,inline*]{#1}%
+    \ifthenelse{\boolean{Agda@Number}}{%
+      % Equation numbers have been requested. Use a minipage, so that
+      % there is room for the code number to the right, and the code
+      % number becomes centered vertically.
+      \begin{minipage}{%
+          \linewidth-%
+          \widthof{%
+            \AgdaSpace{}%
+            \AgdaFormatCodeNumber{\theAgdaCodeNumber}}}}{}%
     %
     % Indent the entire code block.
     \advance\leftskip\mathindent%
@@ -642,6 +653,12 @@
       \BODY%
     \end{pboxed}%
     %
+    \ifthenelse{\boolean{Agda@Number}}{%
+      % Equation numbers have been requested.
+      \end{minipage}%
+      % Insert the code number to the right.
+      \hfill \AgdaFormatCodeNumber{\theAgdaCodeNumber}}{}%
+    %
     % Does the label Agda@DoNotSuppressAfter@<current code block
     % number> exist?
     \ifcsdef{r@Agda@DoNotSuppressSpaceAfter@\theAgda@Current}{%
@@ -657,7 +674,12 @@
       \Agda@NewlineWithVerticalSpace{0pt}}%
     %
     % Step the code block counter, but only for non-hidden code.
-    \stepcounter{Agda@Current}}}
+    \stepcounter{Agda@Current}}%
+  \fi%
+  \fi%
+  % Reset Agda@Number and Agda@InlineStar.
+  \setboolean{Agda@Number}{false}%
+  \setboolean{Agda@InlineStar}{false}}
 
 % Space inserted after tokens.
 \newcommand{\AgdaSpace}{ }
@@ -683,5 +705,8 @@
                  \cnttest{\value{Agda@Current} - #1}{>=}{
                           \value{Agda@AlignStart}}
               \)}{\AgdaIndentSpace{}}{}}
+
+% Underscores are typeset using \AgdaUnderscore{}.
+\newcommand{\AgdaUnderscore}{\_}
 
 \endinput

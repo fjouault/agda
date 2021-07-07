@@ -1,1 +1,2 @@
-Cannot set OPTION pragma --no-termination-check with safe flag.
+Issue2442-conflicting.agda:1,1-46
+Cannot set OPTIONS pragma --no-termination-check with safe flag.

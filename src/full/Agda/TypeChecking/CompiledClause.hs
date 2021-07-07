@@ -1,6 +1,3 @@
-{-# LANGUAGE CPP                #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-
 -- | Case trees.
 --
 --   After coverage checking, pattern matching is translated
@@ -11,14 +8,18 @@ module Agda.TypeChecking.CompiledClause where
 
 import Prelude hiding (null)
 
+import Control.DeepSeq
+
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.Semigroup (Semigroup, Monoid, (<>), mempty, mappend, Any(..))
-import Data.Foldable (Foldable, foldMap)
-import Data.Traversable (Traversable, traverse)
+import Data.Semigroup hiding (Arg(..))
+
+
+
 
 import Data.Data (Data)
-import Data.Typeable (Typeable)
+
+import GHC.Generics (Generic)
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
@@ -27,13 +28,12 @@ import Agda.Syntax.Literal
 import Agda.Syntax.Position
 
 import Agda.Utils.Null
-import Agda.Utils.Pretty hiding ((<>))
+import Agda.Utils.Pretty
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 data WithArity c = WithArity { arity :: Int, content :: c }
-  deriving (Typeable, Data, Functor, Foldable, Traversable, Show)
+  deriving (Data, Functor, Foldable, Traversable, Show, Generic)
 
 -- | Branches in a case tree.
 
@@ -44,14 +44,20 @@ data Case c = Branches
   , conBranches    :: Map QName (WithArity c)
     -- ^ Map from constructor (or projection) names to their arity
     --   and the case subtree.  (Projections have arity 0.)
+  , etaBranch      :: Maybe (ConHead, WithArity c)
+    -- ^ Eta-expand with the given (eta record) constructor. If this is
+    --   present, there should not be any conBranches or litBranches.
   , litBranches    :: Map Literal c
     -- ^ Map from literal to case subtree.
   , catchAllBranch :: Maybe c
     -- ^ (Possibly additional) catch-all clause.
   , fallThrough :: Maybe Bool
     -- ^ (if True) In case of non-canonical argument use catchAllBranch.
+  , lazyMatch :: Bool
+    -- ^ Lazy pattern match. Requires single (non-copattern) branch with no lit
+    --   branches and no catch-all.
   }
-  deriving (Typeable, Data, Functor, Foldable, Traversable, Show)
+  deriving (Data, Functor, Foldable, Traversable, Show, Generic)
 
 -- | Case tree with bodies.
 
@@ -66,23 +72,38 @@ data CompiledClauses' a
     --   and name suggestions for the free variables. This is needed to build
     --   lambdas on the right hand side for partial applications which can
     --   still reduce.
-  | Fail
-    -- ^ Absurd case.
-  deriving (Typeable, Data, Functor, Traversable, Foldable, Show)
+  | Fail [Arg ArgName]
+    -- ^ Absurd case. Add the free variables here as well so we can build correct
+    --   number of lambdas for strict backends. (#4280)
+  deriving (Data, Functor, Traversable, Foldable, Show, Generic)
 
 type CompiledClauses = CompiledClauses' Term
 
 litCase :: Literal -> c -> Case c
-litCase l x = Branches False Map.empty (Map.singleton l x) Nothing (Just False)
+litCase l x = Branches False Map.empty Nothing (Map.singleton l x) Nothing (Just False) False
 
 conCase :: QName -> Bool -> WithArity c -> Case c
-conCase c b x = Branches False (Map.singleton c x) Map.empty Nothing (Just b)
+conCase c b x = Branches False (Map.singleton c x) Nothing Map.empty Nothing (Just b) False
+
+etaCase :: ConHead -> WithArity c -> Case c
+etaCase c x = Branches False Map.empty (Just (c, x)) Map.empty Nothing (Just False) True
 
 projCase :: QName -> c -> Case c
-projCase c x = Branches True (Map.singleton c $ WithArity 0 x) Map.empty Nothing (Just False)
+projCase c x = Branches True (Map.singleton c $ WithArity 0 x) Nothing Map.empty Nothing (Just False) False
 
 catchAll :: c -> Case c
-catchAll x = Branches False Map.empty Map.empty (Just x) (Just True)
+catchAll x = Branches False Map.empty Nothing Map.empty (Just x) (Just True) False
+
+-- | Check that the requirements on lazy matching (single inductive case) are
+--   met, and set lazy to False otherwise.
+checkLazyMatch :: Case c -> Case c
+checkLazyMatch b = b { lazyMatch = lazyMatch b && requirements }
+  where
+    requirements = and
+      [ null (catchAllBranch b)
+      , Map.size (conBranches b) <= 1
+      , null (litBranches b)
+      , not $ projPatterns b ]
 
 -- | Check whether a case tree has a catch-all clause.
 hasCatchAll :: CompiledClauses -> Bool
@@ -93,6 +114,15 @@ hasCatchAll = getAny . loop
     Done{}    -> mempty
     Case _ br -> maybe (foldMap loop br) (const $ Any True) $ catchAllBranch br
 
+-- | Check whether a case tree has any projection patterns
+hasProjectionPatterns :: CompiledClauses -> Bool
+hasProjectionPatterns = getAny . loop
+  where
+  loop cc = case cc of
+    Fail{}    -> mempty
+    Done{}    -> mempty
+    Case _ br -> Any (projPatterns br) <> foldMap loop br
+
 instance Semigroup c => Semigroup (WithArity c) where
   WithArity n1 c1 <> WithArity n2 c2
     | n1 == n2  = WithArity n1 (c1 <> c2)
@@ -102,25 +132,31 @@ instance (Semigroup c, Monoid c) => Monoid (WithArity c) where
   mempty  = WithArity __IMPOSSIBLE__ mempty
   mappend = (<>)
 
-instance (Semigroup m, Monoid m) => Semigroup (Case m) where
-  Branches cop  cs  ls  m b <> Branches cop' cs' ls' m' b' =
+instance Semigroup m => Semigroup (Case m) where
+  Branches cop cs eta ls m b lazy <> Branches cop' cs' eta' ls' m' b' lazy' = checkLazyMatch $
     Branches (cop || cop') -- for @projCase <> mempty@
              (Map.unionWith (<>) cs cs')
+             (unionEta eta eta')
              (Map.unionWith (<>) ls ls')
              (m <> m')
              (combine b b')
+             (lazy && lazy')
    where
      combine Nothing  b'        = b
      combine b        Nothing   = b
      combine (Just b) (Just b') = Just $ b && b'
+
+     unionEta Nothing b = b
+     unionEta b Nothing = b
+     unionEta Just{} Just{} = __IMPOSSIBLE__
 
 instance (Semigroup m, Monoid m) => Monoid (Case m) where
   mempty  = empty
   mappend = (<>)
 
 instance Null (Case m) where
-  empty = Branches False Map.empty Map.empty Nothing Nothing
-  null (Branches _cop cs ls mcatch _b) = null cs && null ls && null mcatch
+  empty = Branches False Map.empty Nothing Map.empty Nothing Nothing True
+  null (Branches _cop cs eta ls mcatch _b _lazy) = null cs && null eta && null ls && null mcatch
 
 -- * Pretty instances.
 
@@ -128,29 +164,28 @@ instance Pretty a => Pretty (WithArity a) where
   pretty = pretty . content
 
 instance Pretty a => Pretty (Case a) where
-  prettyPrec p (Branches _cop cs ls m b) =
-    mparens (p > 0) $ vcat $
-      prettyMap cs ++ prettyMap ls ++ prC m
+  prettyPrec p (Branches _cop cs eta ls m b lazy) =
+    mparens (p > 0) $ prLazy lazy <+> vcat (prettyMap_ cs ++ prEta eta ++ prettyMap_ ls ++ prC m)
     where
+      prLazy True  = "~"
+      prLazy False = empty
       prC Nothing = []
-      prC (Just x) = [text "_ ->" <+> pretty x]
+      prC (Just x) = ["_ ->" <+> pretty x]
+      prEta Nothing = []
+      prEta (Just (c, cc)) = [("eta" <+> pretty c <+> "->") <?> pretty cc]
 
-prettyMap :: (Pretty k, Pretty v) => Map k v -> [Doc]
-prettyMap m = [ sep [ pretty k <+> text "->"
-                    , nest 2 $ pretty v ]
-              | (k, v) <- Map.toList m ]
+prettyMap_ :: (Pretty k, Pretty v) => Map k v -> [Doc]
+prettyMap_ = map prettyAssign . Map.toList
 
 instance Pretty CompiledClauses where
-  pretty (Done hs t) = text ("done" ++ show hs) <+> pretty t
-  pretty Fail        = text "fail"
+  pretty (Done hs t) = ("done" <> pretty hs) <?> pretty t
+  pretty Fail{}      = "fail"
   pretty (Case n bs) | projPatterns bs =
-    sep [ text "record"
+    sep [ "record"
         , nest 2 $ pretty bs
         ]
   pretty (Case n bs) =
-    sep [ text ("case " ++ prettyShow n ++ " of")
-        , nest 2 $ pretty bs
-        ]
+    text ("case " ++ prettyShow n ++ " of") <?> pretty bs
 
 -- * KillRange instances.
 
@@ -158,16 +193,17 @@ instance KillRange c => KillRange (WithArity c) where
   killRange = fmap killRange
 
 instance KillRange c => KillRange (Case c) where
-  killRange (Branches cop con lit all b) = Branches cop
+  killRange (Branches cop con eta lit all b lazy) = Branches cop
     (killRangeMap con)
+    (killRange eta)
     (killRangeMap lit)
     (killRange all)
-    b
+    b lazy
 
 instance KillRange CompiledClauses where
   killRange (Case i br) = killRange2 Case i br
   killRange (Done xs v) = killRange2 Done xs v
-  killRange Fail        = Fail
+  killRange (Fail xs)   = killRange1 Fail xs
 
 -- * TermLike instances
 
@@ -182,3 +218,9 @@ instance TermLike a => TermLike (Case a) where
 instance TermLike a => TermLike (CompiledClauses' a) where
   traverseTermM = traverse . traverseTermM
   foldTerm      = foldMap . foldTerm
+
+-- NFData instances
+
+instance NFData c => NFData (WithArity c)
+instance NFData a => NFData (Case a)
+instance NFData a => NFData (CompiledClauses' a)

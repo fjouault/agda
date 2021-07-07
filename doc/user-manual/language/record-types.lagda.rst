@@ -1,5 +1,7 @@
 ..
   ::
+  {-# OPTIONS --guardedness #-}
+
   module language.record-types where
 
   open import Agda.Builtin.Bool
@@ -17,9 +19,16 @@
 Record Types
 ************
 
+.. contents::
+   :depth: 2
+   :local:
+
 Records are types for grouping values together. They generalise the
 dependent product type by providing named fields and (optional)
 further components.
+
+Example: the Pair type constructor
+----------------------------------
 
 Record types can be declared using the ``record`` keyword
 
@@ -34,8 +43,8 @@ Record types can be declared using the ``record`` keyword
        fst : A
        snd : B
 
-This defines a new type ``Pair : Set → Set → Set`` and two projection
-functions
+This defines a new type constructor ``Pair : Set → Set → Set`` and two
+projection functions
 
 .. code-block:: agda
 
@@ -49,13 +58,32 @@ Elements of record types can be defined using a record expression
    p23 : Pair Nat Nat
    p23 = record { fst = 2; snd = 3 }
 
-or using :ref:`copatterns <copatterns>`
+or using :ref:`copatterns <copatterns>`. Copatterns may be used
+prefix
 
 ::
 
    p34 : Pair Nat Nat
    Pair.fst p34 = 3
    Pair.snd p34 = 4
+
+suffix (in which case they are written prefixed with a dot)
+
+::
+
+   p56 : Pair Nat Nat
+   p56 .Pair.fst = 5
+   p56 .Pair.snd = 6
+
+or using an :ref:`anonymous copattern-matching lambda <pattern-lambda>`
+(you may only use the suffix form of copatterns in this case)
+
+::
+
+   p78 : Pair Nat Nat
+   p78 = λ where
+     .Pair.fst → 7
+     .Pair.snd → 8
 
 If you use the ``constructor`` keyword, you can also use the named
 constructor to define elements of the record type:
@@ -71,7 +99,6 @@ constructor to define elements of the record type:
   p45 : Pair Nat Nat
   p45 = 4 , 5
 
-
 In this sense, record types behave much like single constructor
 datatypes (but see :ref:`eta-expansion` below).
 
@@ -80,7 +107,7 @@ datatypes (but see :ref:`eta-expansion` below).
 Declaring, constructing and decomposing records
 -----------------------------------------------
 
-Declarating record types
+Declaring record types
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 The general form of a record declaration is as follows:
@@ -101,7 +128,8 @@ particular, fields can be given in more than one block, interspersed
 with other declarations. Each field is a component of the
 record. Types of later fields can depend on earlier fields.
 
-The directives available are ``eta-equality``, ``no-eta-equality``
+The directives available are ``eta-equality``, ``no-eta-equality``,
+``pattern``
 (see :ref:`eta-expansion`), ``inductive`` and ``co-inductive`` (see
 :ref:`recursive-records`).
 
@@ -114,7 +142,7 @@ Record values are constructed by giving a value for each record field:
 
    record { <fieldname1> = <term1> ; <fieldname2> = <term2> ; ... }
 
-where the types of the terms matches the types of the fields. If a
+where the types of the terms match the types of the fields. If a
 constructor ``<constructorname>`` has been declared for the record,
 this can also be written
 
@@ -139,7 +167,7 @@ Records can also be constructed by :ref:`updating other records
 Building records from modules
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The ``record { <fields> }`` syntax also accept module names. Fields
+The ``record { <fields> }`` syntax also accepts module names. Fields
 are defined using the corresponding definitions from the given module.
 For instance assuming this record type R and module M:
 
@@ -190,12 +218,12 @@ records:
   sum : Pair Nat Nat → Nat
   sum (x , y) = x + y
 
-Internally, this is translated to
+Or, using a :ref:`let binding record pattern<let-record-pattern>`:
 
 ::
 
   sum' : Pair Nat Nat → Nat
-  sum' p = (Pair.fst p) + (Pair.snd p)
+  sum' p = let (x , y) = p in x + y
 
 
 .. note::
@@ -225,7 +253,10 @@ Then we can update (some of) the record value’s fields in the following way:
 
 Here ``new`` normalises to ``record { a = 0; b = 2; c = 5 }``. Any
 expression yielding a value of type ``MyRecord`` can be used instead of
-``old``. Using that :ref:`records can be built from module names <record-building-from-modules>`, together with the fact that :ref:`all records define a module <record-modules>`, this can also be written as
+``old``. Using that :ref:`records can be built from module names
+<record-building-from-modules>`, together with the fact that
+:ref:`all records define a module <record-modules>`, this can also be
+written as
 
 ::
 
@@ -291,7 +322,8 @@ include a new binding for ``length`` (for instance ``length = _``).
 Record modules
 --------------
 
-Along with a new type, a record declaration also defines a module containing
+Along with a new type, a record declaration also defines a module with the same name, parameterised
+over an element of the record type containing
 the projection functions. This allows records to be "opened", bringing the
 fields into scope. For instance
 
@@ -301,7 +333,15 @@ fields into scope. For instance
   swap p = snd , fst
     where open Pair p
 
-It possible to add arbitrary definitions to the record module, by defining them
+In the example, the record module ``Pair`` has the shape
+
+.. code-block:: agda
+
+  module Pair {A B : Set} (p : Pair A B) where
+    fst : A
+    snd : B
+
+It's possible to add arbitrary definitions to the record module, by defining them
 inside the record declaration
 
 ::
@@ -336,7 +376,7 @@ inside the record declaration
 Eta-expansion
 -------------
 
-The eta rule for a record type
+The eta (η) rule for a record type
 
 .. code-block:: agda
 
@@ -348,9 +388,9 @@ The eta rule for a record type
 
 states that every ``x : R`` is definitionally equal to ``record { a =
 R.a x ; b = R.b x ; c = R.c x }``. By default, all (inductive) record
-types enjoy eta-equality if the positivity checker has confirmed it is
+types enjoy η-equality if the positivity checker has confirmed it is
 safe to have it. The keywords ``eta-equality``/``no-eta-equality``
-enable/disable eta rules for the record type being declared.
+enable/disable η rules for the record type being declared.
 
 .. _recursive-records:
 
@@ -377,12 +417,30 @@ coinductive.
 
 Inductive records have ``eta-equality`` on by default, while
 ``no-eta-equality`` is the default for coinductive records. In fact,
-the ``eta-equality`` and ``inductive`` directives are not allowed
+the ``eta-equality`` and ``coinductive`` directives are not allowed
 together, since this can easily make Agda loop. This can be overridden
 at your own risk by using the pragma ``ETA`` instead.
 
 It is possible to pattern match on inductive records, but not on
-copinductive ones.
+coinductive ones.
+
+However, inductive records without η-equality do not support both matching on
+the record constructor and construction of record elements by
+copattern matching.  It has been discovered that the combination of
+both leads to loss of subject reduction, i.e., reduction does not
+preserve typing. For records without η, matching on the record
+constructor is off by default and construction by copattern matching
+is on.  If you want the converse, you can add the record directive
+``pattern``::
+
+  record HereditaryList : Set where
+    inductive
+    no-eta-equality
+    pattern
+    field sublists : List HereditaryList
+
+  pred : HereditaryList → List HereditaryList
+  pred record{ sublists = ts } = ts
 
 .. _instance-fields:
 
@@ -468,4 +526,3 @@ types. For instance we can define ``Nat`` instances for ``Eq``, ``Ord`` and
 
     NumNat : Num Nat
     fromNat {{NumNat}} n = n
-

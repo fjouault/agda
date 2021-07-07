@@ -1,4 +1,4 @@
-{-# OPTIONS --universe-polymorphism #-}
+{-# OPTIONS --universe-polymorphism --guardedness #-}
 -- {-# OPTIONS --verbose tc.constr.findInScope:15 #-}
 -- {-# OPTIONS --verbose tc.meta.eta:20 #-}
 -- {-# OPTIONS --verbose tc.conv.term:20 #-}
@@ -17,12 +17,14 @@ open import Category.Monad.Partiality using (_⊥; now; isNow; never; run_for_st
 open import Category.Monad.State using (StateMonad)
 open import Category.Applicative.Indexed using (IFun)
 open import Function using (_$_)
+open import Function.Reasoning
 open import Level using (zero; Level)
 --open import Data.Unit hiding (_≟_)
 open import Data.Bool using (if_then_else_)
 open import Data.Nat using (ℕ; _≟_; _+_; suc; _*_)
 open import Relation.Nullary.Decidable using (⌊_⌋)
-open import Data.List using (List; _∷_; []; [_]; null) renaming (monad to listMonad)
+open import Data.List using (List; _∷_; []; [_]; null)
+open import Data.List.Categorical using () renaming (monad to listMonad)
 --open import Data.Product
 
 module RawMonadExt {li f} {I : Set li} {M : IFun I f} (m : RawIMonad M) where
@@ -58,7 +60,7 @@ test1 k =  do x ← return k
 
 test2 : ℕ → (List ℕ) ⊥
 test2 k =  do x ← return [ k ]
-              if ⌊ k ≟ 4 ⌋ then return (x >>= nToList) else never
+              if ⌊ k ≟ 4 ⌋ then return ((x ∶ List ℕ) >>= nToList) else never
 test' : ℕ → (List ℕ) ⊥
 test' k = do x ← return (k ∷ k + 1 ∷ [])
              if null x then never else return (x >>= nToList)

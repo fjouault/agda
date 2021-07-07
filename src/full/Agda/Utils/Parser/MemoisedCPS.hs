@@ -20,7 +20,6 @@
 -- the author of this module whether the change leads to more
 -- non-termination for grammars that are not cyclic.)
 
-{-# LANGUAGE CPP                   #-}
 
 module Agda.Utils.Parser.MemoisedCPS
   ( ParserClass(..)
@@ -30,16 +29,16 @@ module Agda.Utils.Parser.MemoisedCPS
   , ParserWithGrammar
   ) where
 
-import Control.Applicative
-import Control.Monad (ap, liftM2)
-import Control.Monad.State.Strict (State, evalState, runState, get, put, modify')
+import Control.Applicative ( Alternative((<|>), empty, many, some) )
+import Control.Monad (liftM2, (<=<))
+import Control.Monad.State.Strict (State, evalState, runState, get, modify')
 
 import Data.Array
 import Data.Hashable
 import qualified Data.HashMap.Strict as Map
 import Data.HashMap.Strict (HashMap)
-import qualified Data.HashSet as Set
-import Data.HashSet (HashSet)
+
+
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.List as List
@@ -50,7 +49,6 @@ import qualified Text.PrettyPrint.HughesPJ as PP
 
 import Agda.Utils.Pretty ( mparens )
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Positions.
@@ -68,8 +66,8 @@ type Cont k r tok b a = Pos -> a -> M k r tok b [b]
 -- | Memoised values.
 
 data Value k r tok b = Value
-  { results       :: !(IntMap [r])
-  , continuations :: [Cont k r tok b r]
+  { _results       :: !(IntMap [r])
+  , _continuations :: [Cont k r tok b r]
   }
 
 -- | The parser type.
@@ -161,7 +159,7 @@ sat p = sat' (\t -> if p t then Just t else Nothing)
 -- | Parses a single token.
 
 token :: ParserClass p k r tok => p tok
-token = doc (text "·") (sat' Just)
+token = doc "·" (sat' Just)
 
 -- | Parses a given token.
 
@@ -194,8 +192,7 @@ instance ParserClass (Parser k r tok) k r tok where
     let alter j zero f m =
           IntMap.alter (Just . f . fromMaybe zero) j m
 
-        lookupTable   = fmap (\m -> Map.lookup key =<<
-                                    IntMap.lookup i m) get
+        lookupTable   = fmap (Map.lookup key <=< IntMap.lookup i) get
         insertTable v = modify' $ alter i Map.empty (Map.insert key v)
 
     v <- lookupTable
@@ -203,7 +200,7 @@ instance ParserClass (Parser k r tok) k r tok where
       Nothing -> do
         insertTable (Value IntMap.empty [k])
         unP p input i $ \j r -> do
-          Just (Value rs ks) <- lookupTable
+          ~(Just (Value rs ks)) <- lookupTable
           insertTable (Value (alter j [] (r :) rs) ks)
           concat <$> mapM (\k -> k j r) ks  -- See note [Reverse ks?].
       Just (Value rs ks) -> do
@@ -282,14 +279,14 @@ instance Monad (ParserWithGrammar k r tok) where
   return  = pure
   p >>= f =
     pg (parser p >>= parser . f)
-       ((\(d, p) -> (mparens (p < bindP) d <+> text ">>= ?", bindP))
+       ((\(d, p) -> (mparens (p < bindP) d <+> ">>= ?", bindP))
           <$> docs p)
 
 instance Functor (ParserWithGrammar k r tok) where
   fmap f p = pg (fmap f (parser p)) (docs p)
 
 instance Applicative (ParserWithGrammar k r tok) where
-  pure x    = pg (pure x) (return (text "ε", atomP))
+  pure x    = pg (pure x) (return ("ε", atomP))
   p1 <*> p2 =
     pg (parser p1 <*> parser p2)
        (liftM2 (\(d1, p1) (d2, p2) ->
@@ -305,12 +302,12 @@ starDocs s p =
   (\(d, p) -> (mparens (p < starP) d <+> text s, starP)) <$> docs p
 
 instance Alternative (ParserWithGrammar k r tok) where
-  empty     = pg empty (return (text "∅", atomP))
+  empty     = pg empty (return ("∅", atomP))
   p1 <|> p2 =
     pg (parser p1 <|> parser p2)
        (liftM2 (\(d1, p1) (d2, p2) ->
                    (sep [ mparens (p1 < choiceP) d1
-                        , text "|"
+                        , "|"
                         , mparens (p2 < choiceP) d2
                         ], choiceP))
                (docs p1) (docs p2))
@@ -340,7 +337,7 @@ memoiseDocs key p = do
 
 instance ParserClass (ParserWithGrammar k r tok) k r tok where
   parse p                 = parse (parser p)
-  sat' p                  = pg (sat' p) (return (text "<sat ?>", atomP))
+  sat' p                  = pg (sat' p) (return ("<sat ?>", atomP))
   annotate f p            = pg (parser p) (f <$> docs p)
   memoise key p           = pg (memoise key (parser p))
                                (memoiseDocs key p)
@@ -350,8 +347,8 @@ instance ParserClass (ParserWithGrammar k r tok) k r tok where
     d
       $+$
     nest 2 (foldr1 ($+$) $
-      text "where" :
-      map (\(k, d) -> fst (prettyKey k) <+> text "∷=" <+>
+      "where" :
+      map (\(k, d) -> fst (prettyKey k) <+> "∷=" <+>
                         maybe __IMPOSSIBLE__ fst d)
           (Map.toList ds))
     where

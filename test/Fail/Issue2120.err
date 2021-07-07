@@ -1,7 +1,5 @@
 Failed to solve the following constraints:
-  _22 := λ { (zero , refl) → zero } :? Σ Nat _B_19 → Nat
-  _20 := zero [blocked on problem 13]
-  [13] Nat =< _B_19 zero : Set
+  Nat =< _B_19 zero (blocked on _B_19)
 Unsolved metas at the following locations:
   Issue2120.agda:16,10-36
   Issue2120.agda:16,48-49

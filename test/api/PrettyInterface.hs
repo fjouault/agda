@@ -9,12 +9,14 @@ module Main where
 
 import Control.Monad.IO.Class ( MonadIO(liftIO) )
 import Data.Foldable
+import qualified Data.HashMap.Strict as HashMap
 
 ------------------------------------------------------------------------------
 -- Agda library imports
 
-import Agda.Interaction.Imports        ( typeCheckMain, Mode(TypeCheck) )
-import Agda.Interaction.Options        ( defaultOptions )
+import Agda.Interaction.FindFile ( SourceFile(..) )
+import Agda.Interaction.Imports ( typeCheckMain, Mode(TypeCheck), parseSource, CheckResult(CheckResult), crInterface )
+import Agda.Interaction.Options ( defaultOptions )
 
 -- import Agda.Syntax.Translation.InternalToAbstract ( reify )
 -- import Agda.Syntax.Translation.AbstractToConcrete ()
@@ -23,7 +25,6 @@ import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Pretty
 
 import Agda.Utils.FileName
-import qualified Agda.Utils.HashMap as HashMap
 
 import Agda.Utils.Pretty (render)
 
@@ -37,8 +38,8 @@ main = do
 mainTCM :: TCM ()
 mainTCM = do
   setCommandLineOptions defaultOptions
-  f <- liftIO $ absolute "PrettyInterface.agda"
-  (i, _mw) <- typeCheckMain f TypeCheck
+  f <- liftIO $ SourceFile <$> absolute "PrettyInterface.agda"
+  CheckResult { crInterface = i } <- typeCheckMain TypeCheck =<< parseSource f
   compilerMain i
 
 compilerMain :: Interface -> TCM ()

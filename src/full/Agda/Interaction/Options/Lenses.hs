@@ -8,8 +8,14 @@ module Agda.Interaction.Options.Lenses where
 
 import Control.Monad.State
 
+import Data.Set (Set)
+import qualified Data.Set as Set
+
+import System.FilePath ((</>))
+
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.State
+import Agda.Interaction.Library (getPrimitiveLibDir)
 import Agda.Interaction.Options
 
 import Agda.Utils.Lens
@@ -20,9 +26,11 @@ import Agda.Utils.FileName
 ---------------------------------------------------------------------------
 
 class LensPragmaOptions a where
-  getPragmaOptions :: a -> PragmaOptions
-  setPragmaOptions :: PragmaOptions -> a -> a
-  mapPragmaOptions :: (PragmaOptions -> PragmaOptions) -> a -> a
+  getPragmaOptions  :: a -> PragmaOptions
+  setPragmaOptions  :: PragmaOptions -> a -> a
+  mapPragmaOptions  :: (PragmaOptions -> PragmaOptions) -> a -> a
+  lensPragmaOptions :: Lens' PragmaOptions a
+  -- lensPragmaOptions :: forall f. Functor f => (PragmaOptions -> f PragmaOptions) -> a -> f a
 
   -- default implementations
   setPragmaOptions     = mapPragmaOptions . const
@@ -31,13 +39,15 @@ class LensPragmaOptions a where
 instance LensPragmaOptions CommandLineOptions where
   getPragmaOptions = optPragmaOptions
   setPragmaOptions opts st = st { optPragmaOptions = opts }
+  lensPragmaOptions f st = f (optPragmaOptions st) <&> \ opts -> st { optPragmaOptions = opts }
 
 instance LensPragmaOptions TCState where
   getPragmaOptions = (^.stPragmaOptions)
   setPragmaOptions = set stPragmaOptions
+  lensPragmaOptions = stPragmaOptions
 
-modifyPragmaOptions :: (PragmaOptions -> PragmaOptions) -> TCM ()
-modifyPragmaOptions = modify . mapPragmaOptions
+modifyPragmaOptions :: MonadTCState m => (PragmaOptions -> PragmaOptions) -> m ()
+modifyPragmaOptions = modifyTC . mapPragmaOptions
 
 ---------------------------------------------------------------------------
 -- ** Verbosity in the local pragma options
@@ -60,11 +70,11 @@ instance LensVerbosity TCState where
   getVerbosity = getVerbosity . getPragmaOptions
   mapVerbosity = mapPragmaOptions . mapVerbosity
 
-modifyVerbosity :: (Verbosity -> Verbosity) -> TCM ()
-modifyVerbosity = modify . mapVerbosity
+modifyVerbosity :: MonadTCState m => (Verbosity -> Verbosity) -> m ()
+modifyVerbosity = modifyTC . mapVerbosity
 
-putVerbosity :: Verbosity -> TCM ()
-putVerbosity = modify . setVerbosity
+putVerbosity :: MonadTCState m => Verbosity -> m ()
+putVerbosity = modifyTC . setVerbosity
 
 ---------------------------------------------------------------------------
 -- * Command line options
@@ -87,8 +97,8 @@ instance LensCommandLineOptions TCState where
   getCommandLineOptions = getCommandLineOptions . stPersistentState
   mapCommandLineOptions = updatePersistentState . mapCommandLineOptions
 
-modifyCommandLineOptions :: (CommandLineOptions -> CommandLineOptions) -> TCM ()
-modifyCommandLineOptions = modify . mapCommandLineOptions
+modifyCommandLineOptions :: MonadTCState m => (CommandLineOptions -> CommandLineOptions) -> m ()
+modifyCommandLineOptions = modifyTC . mapCommandLineOptions
 
 ---------------------------------------------------------------------------
 -- ** Safe mode
@@ -107,7 +117,7 @@ class LensSafeMode a where
 
 instance LensSafeMode PragmaOptions where
   getSafeMode = optSafe
-  setSafeMode is opts = opts { optSafe = is }
+  setSafeMode is opts = opts { optSafe = is } -- setSafeOption
 
 instance LensSafeMode CommandLineOptions where
   getSafeMode = getSafeMode . getPragmaOptions
@@ -121,12 +131,85 @@ instance LensSafeMode TCState where
   getSafeMode = getSafeMode . getCommandLineOptions
   mapSafeMode = mapCommandLineOptions . mapSafeMode
 
-modifySafeMode :: (SafeMode -> SafeMode) -> TCM ()
-modifySafeMode = modify . mapSafeMode
+modifySafeMode :: MonadTCState m => (SafeMode -> SafeMode) -> m ()
+modifySafeMode = modifyTC . mapSafeMode
 
-putSafeMode :: SafeMode -> TCM ()
-putSafeMode = modify . setSafeMode
+putSafeMode :: MonadTCState m => SafeMode -> m ()
+putSafeMode = modifyTC . setSafeMode
 
+-- | These builtins may use postulates, and are still considered --safe
+
+builtinModulesWithSafePostulates :: Set FilePath
+builtinModulesWithSafePostulates =
+  primitiveModules `Set.union` (Set.fromList
+  [ "Agda" </> "Builtin" </> "Bool.agda"
+  , "Agda" </> "Builtin" </> "Char.agda"
+  , "Agda" </> "Builtin" </> "Char" </> "Properties.agda"
+  , "Agda" </> "Builtin" </> "Coinduction.agda"
+  , "Agda" </> "Builtin" </> "Cubical" </> "Glue.agda"
+  , "Agda" </> "Builtin" </> "Cubical" </> "HCompU.agda"
+  , "Agda" </> "Builtin" </> "Cubical" </> "Id.agda"
+  , "Agda" </> "Builtin" </> "Cubical" </> "Path.agda"
+  , "Agda" </> "Builtin" </> "Cubical" </> "Sub.agda"
+  , "Agda" </> "Builtin" </> "Equality" </> "Erase.agda"
+  , "Agda" </> "Builtin" </> "Equality.agda"
+  , "Agda" </> "Builtin" </> "Float.agda"
+  , "Agda" </> "Builtin" </> "Float" </> "Properties.agda"
+  , "Agda" </> "Builtin" </> "FromNat.agda"
+  , "Agda" </> "Builtin" </> "FromNeg.agda"
+  , "Agda" </> "Builtin" </> "FromString.agda"
+  , "Agda" </> "Builtin" </> "Int.agda"
+  , "Agda" </> "Builtin" </> "IO.agda"
+  , "Agda" </> "Builtin" </> "List.agda"
+  , "Agda" </> "Builtin" </> "Maybe.agda"
+  , "Agda" </> "Builtin" </> "Nat.agda"
+  , "Agda" </> "Builtin" </> "Reflection.agda"
+  , "Agda" </> "Builtin" </> "Reflection" </> "Properties.agda"
+  , "Agda" </> "Builtin" </> "Reflection" </> "External.agda"
+  , "Agda" </> "Builtin" </> "Sigma.agda"
+  , "Agda" </> "Builtin" </> "Size.agda"
+  , "Agda" </> "Builtin" </> "Strict.agda"
+  , "Agda" </> "Builtin" </> "String.agda"
+  , "Agda" </> "Builtin" </> "String" </> "Properties.agda"
+  , "Agda" </> "Builtin" </> "Unit.agda"
+  , "Agda" </> "Builtin" </> "Word.agda"
+  , "Agda" </> "Builtin" </> "Word" </> "Properties.agda"
+  ])
+
+-- | These builtins may not use postulates under --safe. They are not
+--   automatically unsafe, but will be if they use an unsafe feature.
+
+builtinModulesWithUnsafePostulates :: Set FilePath
+builtinModulesWithUnsafePostulates = Set.fromList
+  [ "Agda" </> "Builtin" </> "TrustMe.agda"
+  , "Agda" </> "Builtin" </> "Equality" </> "Rewrite.agda"
+  ]
+
+primitiveModules :: Set FilePath
+primitiveModules = Set.fromList
+  [ "Agda" </> "Primitive.agda"
+  , "Agda" </> "Primitive" </> "Cubical.agda"
+  ]
+
+builtinModules :: Set FilePath
+builtinModules = builtinModulesWithSafePostulates `Set.union`
+                 builtinModulesWithUnsafePostulates
+
+isPrimitiveModule :: MonadIO m => FilePath -> m Bool
+isPrimitiveModule file = do
+  libdirPrim <- liftIO getPrimitiveLibDir
+  return (file `Set.member` Set.map (libdirPrim </>) primitiveModules)
+
+isBuiltinModule :: MonadIO m => FilePath -> m Bool
+isBuiltinModule file = do
+  libdirPrim <- liftIO getPrimitiveLibDir
+  return (file `Set.member` Set.map (libdirPrim </>) builtinModules)
+
+isBuiltinModuleWithSafePostulates :: MonadIO m => FilePath -> m Bool
+isBuiltinModuleWithSafePostulates file = do
+  libdirPrim <- liftIO getPrimitiveLibDir
+  let safeBuiltins   = Set.map (libdirPrim </>) builtinModulesWithSafePostulates
+  return (file `Set.member` safeBuiltins)
 
 ---------------------------------------------------------------------------
 -- ** Include directories
@@ -165,17 +248,17 @@ instance LensIncludePaths TCState where
   getAbsoluteIncludePaths = getAbsoluteIncludePaths . getCommandLineOptions
   mapAbsoluteIncludePaths = mapCommandLineOptions . mapAbsoluteIncludePaths
 
-modifyIncludePaths :: ([FilePath] -> [FilePath]) -> TCM ()
-modifyIncludePaths = modify . mapIncludePaths
+modifyIncludePaths :: MonadTCState m => ([FilePath] -> [FilePath]) -> m ()
+modifyIncludePaths = modifyTC . mapIncludePaths
 
-putIncludePaths :: [FilePath] -> TCM ()
-putIncludePaths = modify . setIncludePaths
+putIncludePaths :: MonadTCState m => [FilePath] -> m ()
+putIncludePaths = modifyTC . setIncludePaths
 
-modifyAbsoluteIncludePaths :: ([AbsolutePath] -> [AbsolutePath]) -> TCM ()
-modifyAbsoluteIncludePaths = modify . mapAbsoluteIncludePaths
+modifyAbsoluteIncludePaths :: MonadTCState m => ([AbsolutePath] -> [AbsolutePath]) -> m ()
+modifyAbsoluteIncludePaths = modifyTC . mapAbsoluteIncludePaths
 
-putAbsoluteIncludePaths :: [AbsolutePath] -> TCM ()
-putAbsoluteIncludePaths = modify . setAbsoluteIncludePaths
+putAbsoluteIncludePaths :: MonadTCState m => [AbsolutePath] -> m ()
+putAbsoluteIncludePaths = modifyTC . setAbsoluteIncludePaths
 
 ---------------------------------------------------------------------------
 -- ** Include directories
@@ -207,8 +290,8 @@ instance LensPersistentVerbosity TCState where
   getPersistentVerbosity = getPersistentVerbosity . getCommandLineOptions
   mapPersistentVerbosity = mapCommandLineOptions . mapPersistentVerbosity
 
-modifyPersistentVerbosity :: (PersistentVerbosity -> PersistentVerbosity) -> TCM ()
-modifyPersistentVerbosity = modify . mapPersistentVerbosity
+modifyPersistentVerbosity :: MonadTCState m => (PersistentVerbosity -> PersistentVerbosity) -> m ()
+modifyPersistentVerbosity = modifyTC . mapPersistentVerbosity
 
-putPersistentVerbosity :: PersistentVerbosity -> TCM ()
-putPersistentVerbosity = modify . setPersistentVerbosity
+putPersistentVerbosity :: MonadTCState m => PersistentVerbosity -> m ()
+putPersistentVerbosity = modifyTC . setPersistentVerbosity

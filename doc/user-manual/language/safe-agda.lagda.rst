@@ -8,54 +8,87 @@
 Safe Agda
 *********
 
-By using the command-line option ``--safe``, a user can
-specify that Agda should ensure that features leading to
-possible inconsistencies should be disabled.
+By using the option ``--safe`` (as a pragma option, or on the
+command-line), a user can specify that Agda should ensure that
+features leading to possible inconsistencies should be disabled.
 
 Here is a list of the features ``--safe`` is incompatible with:
 
-* ``postulate`` can be used to assume any axiom.
+* ``postulate``; can be used to assume any axiom.
 
-* ``--allow-unsolved-metas`` forces Agda to accept unfinished proofs.
+* :option:`--allow-unsolved-metas`; forces Agda to accept unfinished
+  proofs.
 
-* ``--no-positivity-check`` makes it possible to write non-terminating
-  programs by structural "induction" on non strictly positive datatypes.
+* :option:`--allow-incomplete-matches`; forces Agda to accept
+  unfinished proofs.
 
-* ``--no-termination-check`` gives loopy programs any type.
+* :option:`--no-positivity-check`; makes it possible to write
+  non-terminating programs by structural "induction" on non strictly
+  positive datatypes.
 
-* ``--type-in-type`` allows the user to encode the Girard-Hurken paradox.
+* :option:`--no-termination-check`; gives loopy programs any type.
 
-* ``--injective-type-constructors`` together with excluded middle leads
-  to an inconsistency via Chnug-Kil Hur's construction.
+* :option:`--type-in-type` and :option:`--omega-in-omega`; allow the
+  user to encode the Girard-Hurken paradox.
 
-* ``guardedness-preserving-type-constructors`` is based on a rather
-  operational understanding of ``∞``/``♯_``; it's not yet clear if
-  this extension is consistent.
+* :option:`--injective-type-constructors`; together with excluded
+  middle leads to an inconsistency via Chung-Kil Hur's construction.
 
-* ``--experimental-irrelevance`` enables potentially unsound irrelevance
-  features (irrelevant levels, irrelevant data matching).
+* :option:`--guardedness` together with :option:`--sized-types`;
+  currently can be used to define a type which is both inductive and
+  coinductive, which leads to an inconsistency. This might be fixed in
+  the future.
 
-* ``--rewriting`` turns any equation into one that holds definitionally.
-  It can at the very least break convergence.
+* :option:`--experimental-irrelevance` and
+  :option:`--irrelevant-projections`; enables potentially unsound
+  irrelevance features (irrelevant levels, irrelevant data matching,
+  and projection of irrelevant record fields, respectively).
+
+* :option:`--rewriting`; turns any equation into one that holds
+  definitionally.  It can at the very least break convergence.
+
+* :option:`--cubical` together with :option:`--with-K`; the univalence
+  axiom is provable using cubical constructions, which falsifies the K
+  axiom.
+
+* The ``primEraseEquality`` primitive together with
+  :option:`--without-K`; using ``primEraseEquality``, one can derive
+  the K axiom.
+
+* :option:`--allow-exec`; allows system calls during type checking.
+
+The option ``--safe`` is coinfective (see
+:ref:`consistency-checking-options`); if a module is declared safe,
+then all its imported modules must also be declared safe.
+
+.. NOTE::
+
+   The :option:`--guardedness` and :option:`--sized-types` options are
+   both on by default.  However, unless they have been set explicitly
+   by the user, setting the ``--safe`` option will turn them both
+   off. That is to say that
+
+   .. code-block:: agda
+
+     {-# OPTIONS --safe #-}
+
+   will correspond to ``--safe``, :option:`--no-guardedness`, and
+   :option:`--no-sized-types`.  When both
+
+   .. code-block:: agda
+
+     {-# OPTIONS --safe --guardedness #-}
+
+   and
+
+   .. code-block:: agda
+
+     {-# OPTIONS --guardedness --safe #-}
+
+   will turn on ``--safe``, :option:`--guardedness`, and
+   :option:`--no-sized-types`.
 
 
-Known Issues
-============
-
-Pragma Option
--------------
-
-It is possible to specify ``{-# OPTIONS --safe #-}`` at the top of a file.
-Unfortunately a known bug (see `#2487 <https://github.com/agda/agda/issues/2487>`_)
-means that the option choice is not repercuted in the imported file. Therefore
-only the command-line option can be trusted.
-
-Standard Library
-----------------
-
-The standard library uses a lot of unsafe features (e.g. ``postulate`` in
-the Foreign Function Interface) and these are not isolated in separate
-modules. As a consequence virtually any project relying on the standard
-library will not be successfully typechecked with the ``--safe`` option.
-There is `work in progress <https://github.com/agda/agda-stdlib/issues/143>`_
-to fix this issue.
+   Setting both :option:`--sized-types` and :option:`--guardedness`
+   whilst demanding that the module is ``--safe`` will lead to an
+   error as combining these options currently is inconsistent.

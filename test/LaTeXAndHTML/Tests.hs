@@ -1,13 +1,6 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE DoAndIfThenElse   #-}
-{-# LANGUAGE LambdaCase        #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 module LaTeXAndHTML.Tests where
-
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ((<$>))
-#endif
 
 import Control.Monad
 import Data.Char
@@ -15,6 +8,7 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Text.Encoding
 import qualified Data.ByteString as BS
+import qualified Data.Text as T
 
 import qualified Network.URI.Encode
 import System.Directory
@@ -24,12 +18,14 @@ import System.IO.Temp
 import System.Process
 import qualified System.Process.Text as PT
 import qualified System.Process.ByteString as PB
-import qualified Data.Text as T
+import Text.Read (readMaybe)
 
 import Test.Tasty
 import Test.Tasty.Silver
 import Test.Tasty.Silver.Advanced (readFileMaybe)
+import Test.Tasty.Silver.Filter
 
+import UserManual.Tests (examplesInUserManual)
 import Utils
 
 import Agda.Utils.Three
@@ -39,8 +35,22 @@ type LaTeXProg = String
 allLaTeXProgs :: [LaTeXProg]
 allLaTeXProgs = ["pdflatex", "xelatex", "lualatex"]
 
-testDir :: FilePath
-testDir = "test" </> "LaTeXAndHTML" </> "succeed"
+testDirPrefix :: FilePath -> FilePath
+testDirPrefix x = "test" </> "LaTeXAndHTML" </> x
+
+-- Andreas, 2021-01-30
+-- See issue #5140 for the split into these two directories.
+testDirs :: [FilePath]
+testDirs = map testDirPrefix
+  [ "fail"
+  , "succeed"
+  ]
+
+userManualTestDir :: FilePath
+userManualTestDir = testDirPrefix "user-manual"
+
+disabledTests :: [RegexFilter]
+disabledTests = []
 
 -- | List of test groups with names
 --
@@ -50,7 +60,9 @@ testDir = "test" </> "LaTeXAndHTML" </> "succeed"
 --
 tests :: IO [TestTree]
 tests = do
-  allTests <- taggedListOfAllTests
+  agdaBin  <- getAgdaBin
+  suiteTests <- concat <$> mapM (taggedListOfAllTests agdaBin) testDirs
+  let allTests = suiteTests ++ userManualTests agdaBin
   let (html, latex, quicklatex) = (\ f -> partition3 (f . fst) allTests) $ \case
         HTML       -> One
         LaTeX      -> Two
@@ -62,12 +74,11 @@ tests = do
     , testGroup "QuickLaTeXOnly" $ map snd quicklatex
     ]
 
-taggedListOfAllTests :: IO [(Kind, TestTree)]
-taggedListOfAllTests = do
+taggedListOfAllTests :: FilePath -> FilePath -> IO [(Kind, TestTree)]
+taggedListOfAllTests agdaBin testDir = do
   inpFiles <- getAgdaFilesInDir NonRec testDir
-  agdaBin  <- getAgdaBin
   return $
-    [ (k, mkLaTeXOrHTMLTest k agdaBin f)
+    [ (k, mkLaTeXOrHTMLTest k False agdaBin testDir f)
     | f <- inpFiles
     -- Note that the LaTeX backends are only tested on the @.lagda@
     -- and @.lagda.tex@ files.
@@ -75,6 +86,15 @@ taggedListOfAllTests = do
                          | any (`List.isSuffixOf` takeExtensions f)
                                [".lagda",".lagda.tex"]
                          ]
+    ]
+
+-- See issue #3372 for the origin of these tests.
+-- | These tests do not have a @.lagda[.tex]@ source.
+userManualTests :: FilePath -> [(Kind, TestTree)]
+userManualTests agdaBin =
+    [ (k, mkLaTeXOrHTMLTest k True agdaBin userManualTestDir f)
+    | f <- examplesInUserManual
+    , k <- [LaTeX, QuickLaTeX]
     ]
 
 data LaTeXResult
@@ -92,10 +112,13 @@ data Kind = LaTeX | QuickLaTeX | HTML
 
 mkLaTeXOrHTMLTest
   :: Kind
+  -> Bool     -- ^ Should the file be copied to the temporary test
+              --   directory before the test is run?
   -> FilePath -- ^ Agda binary.
+  -> FilePath -- ^ Test directory in which input file resides.
   -> FilePath -- ^ Input file.
   -> TestTree
-mkLaTeXOrHTMLTest k agdaBin inp =
+mkLaTeXOrHTMLTest k copy agdaBin testDir inp =
   goldenVsAction
     testName
     goldenFile
@@ -105,7 +128,13 @@ mkLaTeXOrHTMLTest k agdaBin inp =
   extension = case k of
     LaTeX      -> "tex"
     QuickLaTeX -> "quick.tex"
-    HTML       -> "html"
+    HTML       -> if "MdHighlight" `List.isPrefixOf` inFileName
+                  then "md"
+                  else if "RsTHighlight" `List.isPrefixOf` inFileName
+                  then "rst"
+                  else if "OrgHighlight" `List.isPrefixOf` inFileName
+                  then "org"
+                  else "html"
 
   flags :: FilePath -> [String]
   flags dir = case k of
@@ -115,13 +144,17 @@ mkLaTeXOrHTMLTest k agdaBin inp =
     where
     latexFlags = ["--latex", "--latex-dir=" ++ dir]
 
+  inFileName  = takeFileName inp
   testName    = asTestName testDir inp ++ "_" ++ show k
-  flagFile    = dropAgdaExtension inp <.> "flags"
-  goldenFile  = dropAgdaExtension inp <.> extension
+  baseName    = if copy
+                then testDir </> dropAgdaExtension inFileName
+                else dropAgdaExtension inp
+  flagFile    = baseName <.> "flags"
+  goldenFile  = baseName <.> extension
   -- For removing a LaTeX compiler when testing @Foo.lagda@, you can
   -- create a file @Foo.compile@ with the list of the LaTeX compilers
   -- that you want to use (e.g. ["xelatex", "lualatex"]).
-  compFile    = dropAgdaExtension inp <.> ".compile"
+  compFile    = baseName <.> ".compile"
   outFileName = case k of
     LaTeX      -> golden
     HTML       -> Network.URI.Encode.encode golden
@@ -140,14 +173,17 @@ mkLaTeXOrHTMLTest k agdaBin inp =
     extraFlags <- if flagFileExists
                   then lines <$> readFile flagFile
                   else return []
-    let agdaArgs = flags outDir ++
-                   [ "-i" ++ testDir
-                   , inp
+    let newFile  = outDir </> inFileName
+        agdaArgs = flags outDir ++
+                   [ "-i" ++ if copy then outDir else testDir
+                   , if copy then newFile else inp
                    , "--ignore-interfaces"
+                   , "--no-libraries"
                    ] ++ extraFlags
+    when copy $ copyFile inp newFile
     res@(ret, _, _) <- PT.readProcessWithExitCode agdaBin agdaArgs T.empty
     if ret /= ExitSuccess then
-      return $ AgdaFailed res
+      return $ AgdaFailed (toProgramResult res)
     else do
       output <- decodeUtf8 <$> BS.readFile (outDir </> outFileName)
       let done    = return $ Success output
@@ -197,7 +233,7 @@ printLaTeXResult dir r = case r of
   Success t         -> t
   AgdaFailed p      -> "AGDA_COMPILE_FAILED\n\n"
                          `T.append`
-                       mangle (printProcResult p)
+                       mangle (printProgramResult p)
   LaTeXFailed progs -> "LATEX_COMPILE_FAILED with "
                          `T.append`
                        T.intercalate ", " (map T.pack progs)
@@ -207,9 +243,3 @@ printLaTeXResult dir r = case r of
   removeCWD
     | null dir  = id
     | otherwise = T.concat . T.splitOn (T.pack dir)
-
-readMaybe :: Read a => String -> Maybe a
-readMaybe s =
-  case reads s of
-    [(x, rest)] | all isSpace rest -> Just x
-    _                              -> Nothing

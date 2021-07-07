@@ -12,11 +12,16 @@ Language Reference
    coinduction
    copatterns
    core-language
+   coverage-checking
    cubical
+   cumulativity
    data-types
+   flat
    foreign-function-interface
    function-definitions
    function-types
+   generalization-of-declared-variables
+   guarded-cubical
    implicit-arguments
    instance-arguments
    irrelevance
@@ -31,12 +36,16 @@ Language Reference
    positivity-checking
    postulates
    pragmas
+   prop
    record-types
    reflection
    rewriting
+   runtime-irrelevance
    safe-agda
    sized-types
+   sort-system
    syntactic-sugar
+   syntax-declarations
    telescopes
    termination-checking
    universe-levels

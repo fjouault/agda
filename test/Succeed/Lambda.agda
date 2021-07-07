@@ -46,8 +46,6 @@ module Prelude where
   {-# BUILTIN STRING  String #-}
   {-# BUILTIN CHAR    Char   #-}
   {-# BUILTIN LIST    List   #-}
-  {-# BUILTIN NIL     nil    #-}
-  {-# BUILTIN CONS    _::_    #-}
 
   primitive
     primStringEquality : String -> String -> Bool

@@ -2,6 +2,8 @@
 
 module Agda.Utils.Haskell.Syntax where
 
+import Data.Text (Text)
+
 -- * Modules
 
 data Module = Module ModuleName [ModulePragma] [ImportDecl] [Decl]
@@ -24,14 +26,21 @@ data Decl = TypeDecl Name [TyVarBind] Type
           | DataDecl DataOrNew Name [TyVarBind] [ConDecl] [Deriving]
           | TypeSig [Name] Type
           | FunBind [Match]
+            -- ^ Should not be used when 'LocalBind' could be used.
+          | LocalBind Strictness Name Rhs
+            -- ^ Should only be used in @let@ or @where@.
           | PatSyn Pat Pat
           | FakeDecl String
+          | Comment String
   deriving (Eq)
 
 data DataOrNew = DataType | NewType
   deriving (Eq)
 
-data ConDecl = ConDecl Name [Type]
+data ConDecl = ConDecl Name [(Maybe Strictness, Type)]
+  deriving (Eq)
+
+data Strictness = Lazy | Strict
   deriving (Eq)
 
 type Deriving = (QName, [Type])
@@ -78,6 +87,7 @@ data Exp = Var QName
          | Con QName
          | Lit Literal
          | InfixApp Exp QOp Exp
+         | Ann Exp Type
          | App Exp Exp
          | Lambda [Pat] Exp
          | Let Binds Exp
@@ -91,7 +101,7 @@ data Exp = Var QName
 data Alt = Alt Pat Rhs (Maybe Binds)
   deriving (Eq)
 
-data Literal = Int Integer | Frac Rational | Char Char | String String
+data Literal = Int Integer | Frac Rational | Char Char | String Text
   deriving (Eq)
 
 -- * Names

@@ -23,14 +23,8 @@ Boxed-loop = Box Boxed-loop
 postulate
   boxed-loop : Boxed-loop
 
-test₁ : Boxed-loop
-test₁ = quoteGoal g in boxed-loop
-
 test₂ : Term
 test₂ = quoteTerm Loop
-
-test₃ : Loop → List (Arg Term)
-test₃ _ = quoteContext
 
 macro
 
@@ -80,7 +74,7 @@ macro
     bindTC (reduce V) λ V →
     unify hole V
     where
-    varg = arg (arg-info visible relevant)
+    varg = arg (arg-info visible (modality relevant quantity-ω))
     V    = def (quote Vec) (varg (def (quote Boxed-loop) []) ∷
                             varg (lit (nat 1)) ∷
                             [])

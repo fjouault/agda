@@ -1,8 +1,8 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.TypeChecking.Substitute.Class where
 
 import Control.Arrow ((***), second)
+
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
@@ -11,8 +11,8 @@ import Agda.TypeChecking.Free
 import Agda.TypeChecking.Substitute.DeBruijn
 
 import Agda.Utils.Empty
+import Agda.Utils.List
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 ---------------------------------------------------------------------------
@@ -26,7 +26,10 @@ class Apply t where
   applyE :: t -> Elims -> t
 
   apply t args = applyE t $ map Apply args
-  applyE t es  = apply  t $ map argFromElim es
+  -- Andreas, 2018-06-18, issue #3136
+  -- This default instance should be removed to get more precise
+  -- crash locations (raise the IMPOSSIBLE in a more specific place).
+  -- applyE t es  = apply  t $ fromMaybe __IMPOSSIBLE__ $ allApplyElims es
     -- precondition: all @es@ are @Apply@s
 
 -- | Apply to some default arguments.
@@ -46,7 +49,7 @@ class Abstract t where
   abstract :: Telescope -> t -> t
 
 ---------------------------------------------------------------------------
--- * Substitution and raising/shifting/weakening
+-- * Substitution and shifting\/weakening\/strengthening
 ---------------------------------------------------------------------------
 
 -- | Apply a substitution.
@@ -58,30 +61,45 @@ class Abstract t where
 -- -----------
 -- Γ ⊢ tρ : Aρ
 
-class DeBruijn t => Subst t a | a -> t where
-  applySubst :: Substitution' t -> a -> a
+class DeBruijn (SubstArg a) => Subst a where
+  type SubstArg a
+  applySubst :: Substitution' (SubstArg a) -> a -> a
 
-raise :: Subst t a => Nat -> a -> a
+  default applySubst :: (a ~ f b, Functor f, Subst b, SubstArg a ~ SubstArg b) => Substitution' (SubstArg a) -> a -> a
+  applySubst rho = fmap (applySubst rho)
+
+-- | Simple constraint alias for a `Subst` instance `a` with arg type `t`.
+type SubstWith t a = (Subst a, SubstArg a ~ t)
+
+-- | `Subst` instance whose agument type is itself
+type EndoSubst a = SubstWith a a
+
+-- | `Subst` instance whose argument type is `Term`
+type TermSubst a = SubstWith Term a
+
+-- | Raise de Bruijn index, i.e. weakening
+raise :: Subst a => Nat -> a -> a
 raise = raiseFrom 0
 
-raiseFrom :: Subst t a => Nat -> Nat -> a -> a
-raiseFrom n k = applySubst (liftS n $ raiseS k)
+raiseFrom :: Subst a => Nat -> Nat -> a -> a
+raiseFrom n k = applySubst (raiseFromS n k)
 
 -- | Replace de Bruijn index i by a 'Term' in something.
-subst :: Subst t a => Int -> t -> a -> a
+subst :: Subst a => Int -> SubstArg a -> a -> a
 subst i u = applySubst $ singletonS i u
 
-strengthen :: Subst t a => Empty -> a -> a
+strengthen :: Subst a => Impossible -> a -> a
 strengthen err = applySubst (compactS err [Nothing])
 
 -- | Replace what is now de Bruijn index 0, but go under n binders.
 --   @substUnder n u == subst n (raise n u)@.
-substUnder :: Subst t a => Nat -> t -> a -> a
+substUnder :: Subst a => Nat -> SubstArg a -> a -> a
 substUnder n u = applySubst (liftS n (singletonS 0 u))
 
 -- ** Identity instances
 
-instance Subst Term QName where
+instance Subst QName where
+  type SubstArg QName = Term
   applySubst _ q = q
 
 ---------------------------------------------------------------------------
@@ -124,7 +142,7 @@ singletonS n u = map deBruijnVar [0..n-1] ++# consS u (raiseS n)
 --    ---------------------------------
 --    Γ, A, Δ ⊢ inplace |Δ| u : Γ, A, Δ
 --   @
-inplaceS :: Subst a a => Int -> a -> Substitution' a
+inplaceS :: EndoSubst a => Int -> a -> Substitution' a
 inplaceS k u = singletonS k u `composeS` liftS (k + 1) (raiseS 1)
 
 -- | Lift a substitution under k binders.
@@ -147,10 +165,10 @@ dropS n (u :# rho)         = dropS (n - 1) rho
 dropS n (Strengthen _ rho) = dropS (n - 1) rho
 dropS n (Lift 0 rho)       = __IMPOSSIBLE__
 dropS n (Lift m rho)       = wkS 1 $ dropS (n - 1) $ liftS (m - 1) rho
-dropS n (EmptyS err)       = __IMPOSSIBLE__
+dropS n (EmptyS err)       = throwImpossible err
 
 -- | @applySubst (ρ `composeS` σ) v == applySubst ρ (applySubst σ v)@
-composeS :: Subst a a => Substitution' a -> Substitution' a -> Substitution' a
+composeS :: EndoSubst a => Substitution' a -> Substitution' a -> Substitution' a
 composeS rho IdS = rho
 composeS IdS sgm = sgm
 composeS rho (EmptyS err) = EmptyS err
@@ -165,12 +183,12 @@ composeS rho (Lift n sgm) = lookupS rho 0 :# composeS rho (wkS 1 (liftS (n - 1) 
 --   Γ ⊢ σ : Δ
 --   Γ ⊢ δ : Θσ
 splitS :: Int -> Substitution' a -> (Substitution' a, Substitution' a)
-splitS 0 rho                  = (rho, EmptyS __IMPOSSIBLE__)
+splitS 0 rho                  = (rho, EmptyS impossible)
 splitS n (u :# rho)           = second (u :#) $ splitS (n - 1) rho
 splitS n (Strengthen err rho) = second (Strengthen err) $ splitS (n - 1) rho
 splitS n (Lift 0 _)           = __IMPOSSIBLE__
 splitS n (Wk m rho)           = wkS m *** wkS m $ splitS n rho
-splitS n IdS                  = (raiseS n, liftS n $ EmptyS __IMPOSSIBLE__)
+splitS n IdS                  = (raiseS n, liftS n $ EmptyS impossible)
 splitS n (Lift m rho)         = wkS 1 *** liftS 1 $ splitS (n - 1) (liftS (m - 1) rho)
 splitS n (EmptyS err)         = __IMPOSSIBLE__
 
@@ -184,7 +202,7 @@ us ++# rho = foldr consS rho us
 --      ----------------------------- (treating Nothing as having any type)
 --        Γ ⊢ prependS vs ρ : Δ, Θ
 --   @
-prependS :: DeBruijn a => Empty -> [Maybe a] -> Substitution' a -> Substitution' a
+prependS :: DeBruijn a => Impossible -> [Maybe a] -> Substitution' a -> Substitution' a
 prependS err us rho = foldr f rho us
   where
     f Nothing  rho = Strengthen err rho
@@ -193,16 +211,14 @@ prependS err us rho = foldr f rho us
 parallelS :: DeBruijn a => [a] -> Substitution' a
 parallelS us = us ++# idS
 
-compactS :: DeBruijn a => Empty -> [Maybe a] -> Substitution' a
+compactS :: DeBruijn a => Impossible -> [Maybe a] -> Substitution' a
 compactS err us = prependS err us idS
 
 -- | Γ ⊢ (strengthenS ⊥ |Δ|) : Γ,Δ
-strengthenS :: Empty -> Int -> Substitution' a
-strengthenS err n
-  | n < 0     = __IMPOSSIBLE__
-  | otherwise = iterate (Strengthen err) idS !! n
+strengthenS :: Impossible -> Int -> Substitution' a
+strengthenS err = indexWithDefault __IMPOSSIBLE__ $ iterate (Strengthen err) idS
 
-lookupS :: Subst a a => Substitution' a -> Nat -> a
+lookupS :: EndoSubst a => Substitution' a -> Nat -> a
 lookupS rho i = case rho of
   IdS                    -> deBruijnVar i
   Wk n IdS               -> let j = i + n in
@@ -212,12 +228,24 @@ lookupS rho i = case rho of
              | i < 0     -> __IMPOSSIBLE__
              | otherwise -> lookupS rho (i - 1)
   Strengthen err rho
-             | i == 0    -> absurd err
+             | i == 0    -> throwImpossible err
              | i < 0     -> __IMPOSSIBLE__
              | otherwise -> lookupS rho (i - 1)
   Lift n rho | i < n     -> deBruijnVar i
              | otherwise -> raise n $ lookupS rho (i - n)
-  EmptyS err             -> absurd err
+  EmptyS err             -> throwImpossible err
+
+
+-- | lookupS (listS [(x0,t0)..(xn,tn)]) xi = ti, assuming x0 < .. < xn.
+
+listS :: EndoSubst a => [(Int,a)] -> Substitution' a
+listS ((i,t):ts) = singletonS i t `composeS` listS ts
+listS []         = IdS
+
+-- | @Γ, Ξ, Δ ⊢ raiseFromS |Δ| |Ξ| : Γ, Δ@
+raiseFromS :: Nat -> Nat -> Substitution' a
+raiseFromS n k = liftS n $ raiseS k
+
 
 ---------------------------------------------------------------------------
 -- * Functions on abstractions
@@ -225,31 +253,31 @@ lookupS rho i = case rho of
 ---------------------------------------------------------------------------
 
 -- | Instantiate an abstraction. Strict in the term.
-absApp :: Subst t a => Abs a -> t -> a
+absApp :: Subst a => Abs a -> SubstArg a -> a
 absApp (Abs   _ v) u = subst 0 u v
 absApp (NoAbs _ v) _ = v
 
 -- | Instantiate an abstraction. Lazy in the term, which allow it to be
 --   __IMPOSSIBLE__ in the case where the variable shouldn't be used but we
 --   cannot use 'noabsApp'. Used in Apply.
-lazyAbsApp :: Subst t a => Abs a -> t -> a
+lazyAbsApp :: Subst a => Abs a -> SubstArg a -> a
 lazyAbsApp (Abs   _ v) u = applySubst (u :# IdS) v  -- Note: do not use consS here!
 lazyAbsApp (NoAbs _ v) _ = v
 
 -- | Instantiate an abstraction that doesn't use its argument.
-noabsApp :: Subst t a => Empty -> Abs a -> a
+noabsApp :: Subst a => Impossible -> Abs a -> a
 noabsApp err (Abs   _ v) = strengthen err v
 noabsApp _   (NoAbs _ v) = v
 
-absBody :: Subst t a => Abs a -> a
+absBody :: Subst a => Abs a -> a
 absBody (Abs   _ v) = v
 absBody (NoAbs _ v) = raise 1 v
 
-mkAbs :: (Subst t a, Free a) => ArgName -> a -> Abs a
+mkAbs :: (Subst a, Free a) => ArgName -> a -> Abs a
 mkAbs x v | 0 `freeIn` v = Abs x v
           | otherwise    = NoAbs x (raise (-1) v)
 
-reAbs :: (Subst t a, Free a) => Abs a -> Abs a
+reAbs :: (Subst a, Free a) => Abs a -> Abs a
 reAbs (NoAbs x v) = NoAbs x v
 reAbs (Abs x v)   = mkAbs x v
 
@@ -259,8 +287,8 @@ reAbs (Abs x v)   = mkAbs x v
 --   at point of application of @k@ and the content of @b@
 --   are at the same context.
 --   Precondition: @a@ and @b@ are at the same context at call time.
-underAbs :: Subst t a => (a -> b -> b) -> a -> Abs b -> Abs b
-underAbs cont a b = case b of
+underAbs :: Subst a => (a -> b -> b) -> a -> Abs b -> Abs b
+underAbs cont a = \case
   Abs   x t -> Abs   x $ cont (raise 1 a) t
   NoAbs x t -> NoAbs x $ cont a t
 
@@ -268,9 +296,9 @@ underAbs cont a b = case b of
 --   performs operation @k@ on @a@ and the body of @b@,
 --   and puts the 'Lam's back.  @a@ is raised correctly
 --   according to the number of abstractions.
-underLambdas :: Subst Term a => Int -> (a -> Term -> Term) -> a -> Term -> Term
-underLambdas n cont a v = loop n a v where
-  loop 0 a v = cont a v
-  loop n a v = case ignoreSharing v of
+underLambdas :: TermSubst a => Int -> (a -> Term -> Term) -> a -> Term -> Term
+underLambdas n cont = loop n where
+  loop 0 a = cont a
+  loop n a = \case
     Lam h b -> Lam h $ underAbs (loop $ n-1) a b
     _       -> __IMPOSSIBLE__

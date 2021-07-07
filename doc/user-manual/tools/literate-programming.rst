@@ -26,9 +26,19 @@ as literate TeX_ files. All code has to appear in code blocks:
    \end{code}
 
 Text outside of code blocks is ignored, as well as text right after
-`\begin{code}`, on the same line. If you provide a suitable definition
-for the code environment, then literate Agda files can double as LaTeX
-document sources. Example definition:
+``\begin{code}``, on the same line.
+
+Agda finds code blocks by looking for the first instance of
+``\begin{code}`` that is not preceded on the same line by ``%`` or
+``\`` (not counting ``\`` followed by any code point), then (starting
+on the next line) the first instance of ``\end{code}`` that is
+preceded by nothing but spaces or tab characters (``\t``), and so on
+(always starting on the next line). Note that Agda does not try to
+figure out if, say, the LaTeX code changes the category code of ``%``.
+
+If you provide a suitable definition for the code environment, then
+literate Agda files can double as LaTeX document sources. Example
+definition:
 
 .. code-block:: latex
 
@@ -39,9 +49,9 @@ document sources. Example definition:
      {} % Add fancy options here if you like.
 
 The :ref:`LaTeX backend <generating-latex>` or the preprocessor
-lhs2TeX_ can also be used to produce tex code from literate Agda
-files. See :ref:`unicode-latex` for how to make LaTeX accept Agda files
-using the UTF-8 character encoding.
+lhs2TeX_ can also be used to produce LaTeX code from literate Agda
+files. See :ref:`unicode-latex` for how to make LaTeX accept Agda
+files using the UTF-8 character encoding.
 
 Literate reStructuredText
 -------------------------
@@ -118,11 +128,34 @@ HTML or LaTeX using PanDoc_.
   difficulty of interpreting their indentation level with respect to
   the rest of the file.
 
+Literate Org
+------------
+
+Files ending in :file:`.lagda.org` are interpreted as literate
+Org_ files. Code blocks are surrounded by two lines including only
+```#+begin_src agda2``` and ```#+end_src``` (case insensitive).
+
+.. code-block:: text
+
+    This line is ordinary text, which is ignored by Agda.
+
+    #+begin_src agda2
+    module Whatever where
+    -- Agda code goes here
+    #+end_src
+
+    Another non-code line.
+
+* Code blocks which should be ignored by Agda, but rendered in the
+  final document may be placed in source blocks without the ``agda2``
+  label.
+
 
 .. _TeX: http://tug.org/
-.. _reStructuredText: http://docutils.sourceforge.net/rst.html
+.. _reStructuredText: http://docutils.sourceforge.io/rst.html
 .. _Markdown: https://daringfireball.net/projects/markdown/
+.. _Org: https://orgmode.org
 
 .. _lhs2TeX: https://www.andres-loeh.de/lhs2tex/
-.. _Sphinx: http://sphinx-doc.org/
-.. _Pandoc: http://pandoc.org/
+.. _Sphinx: http://www.sphinx-doc.org/en/stable/
+.. _Pandoc: https://pandoc.org/

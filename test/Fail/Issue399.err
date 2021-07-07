@@ -1,26 +1,20 @@
 Failed to solve the following constraints:
-  _37 := λ {.a} → mymaybemplus [blocked on problem 38]
-  _11 := (_ : _1) [a] :? Set (_10 m mzero)
-  _8 := (_ : _1) [a] :? Set (_7 m mzero)
-  _3 := (_ : _1) [a] :? Set (_2 m)
-  [38, 39] _9 _32 (λ {.a} → _35) =< Maybe .a
-             : Set (_7 _32 (λ {.a} → _35))
-  [38, 40] _12 _32 (λ {.a} → _35) =< Maybe .a
-             : Set (_10 _32 (λ {.a} → _35))
-  _10 _32 (λ {.a} → _35) = .Agda.Primitive.lzero
-  .Agda.Primitive.lzero = _10 _32 (λ {.a} → _35)
-  _7 _32 (λ {.a} → _35) = .Agda.Primitive.lzero
-  .Agda.Primitive.lzero = _7 _32 (λ {.a} → _35)
-  _34 := λ {.a} → mymaybemzero [blocked on problem 33]
-  [33, 34] _4 _32 =< Maybe .a : Set (_2 _32)
-  _2 _32 = .Agda.Primitive.lzero
-  .Agda.Primitive.lzero = _2 _32
-  _31 := Maybe [blocked on problem 30]
-  [30] Set _a_30 → Set _a_30 =< _1 : Set (.Agda.Primitive.lsuc _a_30)
-  .Agda.Primitive.lsuc _a_30 = _0
-  dLub Set₁ (λ a → Set (_7 m mzero .Agda.Primitive.⊔ _10 m mzero))
+  Set = _10 (m = Maybe) (mzero = mymaybemzero) (blocked on _10)
+  _12 (m = Maybe) (mzero = mymaybemzero) =< Maybe a (blocked on _12)
+  Set = _7 (m = Maybe) (mzero = mymaybemzero) (blocked on _7)
+  _9 (m = Maybe) (mzero = mymaybemzero) =< Maybe a (blocked on _9)
+  Set = _2 (m = Maybe) (blocked on _2)
+  _4 (m = Maybe) =< Maybe a (blocked on _4)
+  Set (Agda.Primitive.lsuc _a_66) = _0 (blocked on _0)
+  Set _a_66 → Set _a_66 =< _1 (blocked on _1)
+  piSort Set₁
+  (λ a →
+     funSort (_7 (m = m) (mzero = mzero))
+     (funSort (_10 (m = m) (mzero = mzero)) Set))
     =< Set₁
-  dLub Set₁ (λ a → Set (_2 m)) =< Set₁
+    (blocked on any(_7, _10))
+  piSort Set₁ (λ a → funSort (_2 (m = m)) Set) =< Set₁
+    (blocked on _2)
 Unsolved metas at the following locations:
   Issue399.agda:7,20-21
   Issue399.agda:8,30-33

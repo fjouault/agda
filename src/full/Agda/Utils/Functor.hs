@@ -1,24 +1,28 @@
-{-# LANGUAGE CPP #-}
-
 -- | Utilities for functors.
 
 module Agda.Utils.Functor
-  ( module Agda.Utils.Functor
-  , (<$>) -- from Data.Functor
+  ( (<.>)
+  , for
+  , Decoration(traverseF, distributeF)
+  , dmap
+  , dget
+  -- From Data.Functor:
+  , (<$>)
+  , ($>)
+  -- Defined identically as in Data.Functor.
+  -- Should be simply re-exported (vs redefined) once
+  -- MIN_VERSION_base >= 4.11.0.0
+  -- At time of this writing, we support 4.9.0.0.
+  , (<&>)
   )
   where
 
 import Control.Applicative ( Const(Const), getConst )
 
-import Data.Functor
+import Data.Functor (($>))
 import Data.Functor.Identity
 import Data.Functor.Compose
-import Data.Functor.Classes
 
-infixr 4 $>
-
-($>) :: Functor f => f a -> b -> f b
-($>) = flip (<$)
 
 infixr 9 <.>
 
@@ -29,13 +33,15 @@ infixr 9 <.>
 -- | The true pure @for@ loop.
 --   'Data.Traversable.for' is a misnomer, it should be @forA@.
 for :: Functor m => m a -> (a -> b) -> m b
-for = flip fmap
+for a b = fmap b a
+{-# INLINE for #-}
 
-infix 4 <&>
+infixl 1 <&>
 
 -- | Infix version of 'for'.
 (<&>) :: Functor m => m a -> (a -> b) -> m b
-(<&>) = for
+(<&>) a b = fmap b a
+{-# INLINE (<&>) #-}
 
 -- | A decoration is a functor that is traversable into any functor.
 --

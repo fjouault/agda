@@ -1,5 +1,6 @@
 ..
   ::
+  {-# OPTIONS --rewriting --sized-types #-}
   module language.function-definitions where
 
   open import language.built-ins
@@ -47,7 +48,7 @@ where ``f`` is a new identifier, ``pᵢ`` and ``qᵢ`` are patterns of type ``A�
 and ``d`` and ``e`` are expressions.
 
 The declaration above gives the identifier ``f`` the type
-``(x₁ : A₁) → … → (x₁ : A₁) → B`` and ``f`` is defined by the defining
+``(x₁ : A₁) → … → (xₙ : Aₙ) → B`` and ``f`` is defined by the defining
 equations. Patterns are matched from top to bottom, i.e., the first pattern
 that matches the actual parameters is the one that is used.
 
@@ -58,7 +59,7 @@ By default, Agda checks the following properties of a function definition:
 - No variable should occur more than once on the left-hand side of a single
   clause.
 - The patterns of all clauses should together cover all possible inputs of
-  the function.
+  the function, see :ref:`coverage-checking`.
 - The function should be terminating on all possible inputs, see
   :ref:`termination-checking`.
 
@@ -204,7 +205,7 @@ equation holds, you would not be able to write ``refl``:
     refl : x ≡ x
 
   -- Does not work!
-  lemma : (m : Nat) → max m zero ≡ zero
+  lemma : (m : Nat) → max m zero ≡ m
   lemma = refl
 
 Clauses which do not hold definitionally are usually (but not always)
@@ -212,8 +213,9 @@ the result of writing clauses by hand instead of using Agda's case
 split tactic. These clauses are :ref:`highlighted <highlight>` by
 Emacs.
 
-The ``--exact-split`` :ref:`command-line and pragma option
-<command-line-pragmas>` causes Agda to raise an error whenever a
+.. _catchall-pragma:
+
+The ``--exact-split`` flag causes Agda to raise an error whenever a
 clause in a definition by pattern matching cannot be made to hold
 definitionally. Specific clauses can be excluded from this check by
 means of the ``{-# CATCHALL #-}`` pragma.
@@ -222,8 +224,8 @@ For instance, the above definition of ``max`` will be rejected when
 using the ``--exact-split`` flag because its second clause does not to
 hold definitionally.
 
-When using the ``--exact-split`` flag, catch-all clauses have to be
-marked as such, for instance: ::
+When using the :option:`--exact-split` flag, catch-all clauses have to
+be marked as such, for instance: ::
 
   eq : Nat → Nat → Bool
   eq zero    zero    = true
@@ -231,8 +233,7 @@ marked as such, for instance: ::
   {-# CATCHALL #-}
   eq _       _       = false
 
-The ``--no-exact-split`` :ref:`command-line and pragma option
-<command-line-pragmas>` can be used to override a global
-``--exact-split`` in a file, by adding a pragma
+The :option:`--no-exact-split` flag can be used to override a global
+:option:`--exact-split` in a file, by adding a pragma
 ``{-# OPTIONS --no-exact-split #-}``. This option is enabled by
 default.

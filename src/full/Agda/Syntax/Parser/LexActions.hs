@@ -9,17 +9,24 @@ module Agda.Syntax.Parser.LexActions
     , token
     , withInterval, withInterval', withInterval_
     , withLayout
+    , andThen, skip
     , begin, end, beginWith, endWith
     , begin_, end_
     , lexError
       -- ** Specialized actions
-    , keyword, symbol, identifier, literal
+    , keyword, symbol, identifier, literal, literal', integer
       -- * Lex predicates
     , followedBy, eof, inState
     ) where
 
-import Data.Char
+import Control.Monad.State (modify)
 
+import Data.Bifunctor
+import Data.Char
+import Data.List
+import Data.Maybe
+
+import Agda.Syntax.Common (pattern Ranged)
 import Agda.Syntax.Parser.Lexer
 import Agda.Syntax.Parser.Alex
 import Agda.Syntax.Parser.Monad
@@ -27,9 +34,9 @@ import Agda.Syntax.Parser.Tokens
 import Agda.Syntax.Position
 import Agda.Syntax.Literal
 
-import Agda.Utils.Lens
 import Agda.Utils.List
-import Agda.Utils.Tuple
+
+import Agda.Utils.Impossible
 
 {--------------------------------------------------------------------------
     Scan functions
@@ -37,14 +44,23 @@ import Agda.Utils.Tuple
 
 -- | Called at the end of a file. Returns 'TokEOF'.
 returnEOF :: AlexInput -> Parser Token
-returnEOF inp =
-    do  setLastPos $ lexPos inp
-        setPrevToken "<EOF>"
-        return TokEOF
+returnEOF AlexInput{ lexSrcFile, lexPos } = do
+  -- Andreas, 2018-12-30, issue #3480
+  -- The following setLastPos leads to parse error reporting
+  -- far away from the interesting position, in particular
+  -- if there is a long comment before the EOF.
+  -- (Such a long comment is frequent in interactive programming, as
+  -- commenting out until the end of the file is a common habit.)
+  -- -- setLastPos lexPos
+  -- Without it, we get much more useful error locations.
+  setPrevToken "<EOF>"
+  return $ TokEOF $ posToInterval lexSrcFile lexPos lexPos
 
 -- | Set the current input and lex a new token (calls 'lexToken').
 skipTo :: AlexInput -> Parser Token
-skipTo inp = setLexInput inp >> lexToken
+skipTo inp = do
+  setLexInput inp
+  lexToken
 
 {-| Scan the input to find the next token. Calls
 'Agda.Syntax.Parser.Lexer.alexScanUser'. This is the main lexing function
@@ -54,17 +70,26 @@ used by the parser is the continuation version of this function.
 lexToken :: Parser Token
 lexToken =
     do  inp <- getLexInput
-        lss@(ls:_) <- getLexState
+        lss <- getLexState
         flags <- getParseFlags
-        case alexScanUser (lss, flags) (foolAlex inp) ls of
+        case alexScanUser (lss, flags) inp (headWithDefault __IMPOSSIBLE__ lss) of
             AlexEOF                     -> returnEOF inp
-            AlexSkip inp' len           -> skipTo (newInput inp inp' len)
-            AlexToken inp' len action   -> fmap postToken $ action inp (newInput inp inp' len) len
-            AlexError i                 -> parseError $ "Lexical error" ++
-              (case lexInput i of
-                 '\t' : _ -> " (you may want to replace tabs with spaces)"
-                 _        -> "") ++
-              ":"
+            AlexSkip inp' len           -> skipTo inp'
+            AlexToken inp' len action   -> postToken <$> runLexAction action inp inp' len
+            AlexError i                 -> parseError $ concat
+              [ "Lexical error"
+              , case listToMaybe $ lexInput i of
+                  Just '\t'                -> " (you may want to replace tabs with spaces)"
+                  Just c | not (isPrint c) -> " (unprintable character)"
+                  _ -> ""
+              , ":"
+              ]
+
+isSub :: Char -> Bool
+isSub c = '\x2080' <= c && c <= '\x2089'
+
+readSubscript :: [Char] -> Integer
+readSubscript = read . map (\c -> toEnum (fromEnum c - 0x2080 + fromEnum '0'))
 
 postToken :: Token -> Token
 postToken (TokId (r, "\x03bb")) = TokSymbol SymLambda r
@@ -74,42 +99,9 @@ postToken (TokId (r, "\x2983")) = TokSymbol SymDoubleOpenBrace r
 postToken (TokId (r, "\x2984")) = TokSymbol SymDoubleCloseBrace r
 postToken (TokId (r, "\x2987")) = TokSymbol SymOpenIdiomBracket r
 postToken (TokId (r, "\x2988")) = TokSymbol SymCloseIdiomBracket r
+postToken (TokId (r, "\x2987\x2988")) = TokSymbol SymEmptyIdiomBracket r
 postToken (TokId (r, "\x2200")) = TokKeyword KwForall r
-postToken (TokId (r, s))
-  | set == "Set" && all isSub n = TokSetN (r, readSubscript n)
-  where
-    (set, n)      = splitAt 3 s
-    isSub c       = c `elem` ['\x2080'..'\x2089']
-    readSubscript = read . map (\c -> toEnum (fromEnum c - 0x2080 + fromEnum '0'))
 postToken t = t
-
--- | Use the input string from the previous input (with the appropriate
---   number of characters dropped) instead of the fake input string that
---   was given to Alex (with unicode characters removed).
-newInput :: PreviousInput -> CurrentInput -> TokenLength -> CurrentInput
-newInput inp inp' len =
-    case drop (len - 1) (lexInput inp) of
-        c:s'    -> inp' { lexInput    = s'
-                        , lexPrevChar = c
-                        }
-        []      -> inp' { lexInput = [] }   -- we do get empty tokens moving between states
-
--- | Alex 2 can't handle unicode characters. To solve this we
---   translate all Unicode (non-ASCII) identifiers to @z@, all Unicode
---   operator characters to @+@, and all whitespace characters (except
---   for @\t@ and @\n@) to ' '.
---   Further, non-printable Unicode characters are translated to an
---   arbitrary, harmless ASCII non-printable character, @'\1'@.
---
---   It is important that there aren't any keywords containing @z@, @+@ or @ @.
-
-foolAlex :: AlexInput -> AlexInput
-foolAlex = over lensLexInput $ map $ \ c ->
-  case c of
-    _ | isSpace c && not (c `elem` "\t\n") -> ' '
-    _ | isAscii c                          -> c
-    _ | isPrint c                          -> if isAlpha c then 'z' else '+'
-    _ | otherwise                          -> '\1'
 
 {--------------------------------------------------------------------------
     Lex actions
@@ -117,13 +109,12 @@ foolAlex = over lensLexInput $ map $ \ c ->
 
 -- | The most general way of parsing a token.
 token :: (String -> Parser tok) -> LexAction tok
-token action inp inp' len =
+token action = LexAction $ \ inp inp' len ->
     do  setLexInput inp'
+        let t = take len $ lexInput inp
         setPrevToken t
         setLastPos $ lexPos inp
         action t
-    where
-        t = take len $ lexInput inp
 
 -- | Parse a token from an 'Interval' and the lexed string.
 withInterval :: ((Interval, String) -> tok) -> LexAction tok
@@ -133,7 +124,7 @@ withInterval f = token $ \s -> do
 
 -- | Like 'withInterval', but applies a function to the string.
 withInterval' :: (String -> a) -> ((Interval, a) -> tok) -> LexAction tok
-withInterval' f t = withInterval (t . (id -*- f))
+withInterval' f t = withInterval (t . second f)
 
 -- | Return a token without looking at the lexed string.
 withInterval_ :: (Interval -> r) -> LexAction r
@@ -142,57 +133,83 @@ withInterval_ f = withInterval (f . fst)
 
 -- | Executed for layout keywords. Enters the 'Agda.Syntax.Parser.Lexer.layout'
 --   state and performs the given action.
-withLayout :: LexAction r -> LexAction r
-withLayout a i1 i2 n =
-    do  pushLexState layout
-        a i1 i2 n
+withLayout :: Keyword -> LexAction r -> LexAction r
+withLayout kw a = pushLexState layout `andThen` setLayoutKw `andThen` a
+  where
+  setLayoutKw = modify $ \ st -> st { parseLayKw = kw }
 
+infixr 1 `andThen`
+
+-- | Prepend some parser manipulation to an action.
+andThen :: Parser () -> LexAction r -> LexAction r
+andThen cmd a = LexAction $ \ inp inp' n -> do
+  cmd
+  runLexAction a inp inp' n
+
+-- | Visit the current lexeme again.
+revisit :: LexAction Token
+revisit = LexAction $ \ _ _ _ -> lexToken
+
+-- | Throw away the current lexeme.
+skip :: LexAction Token
+skip = LexAction $ \ _ inp' _ -> skipTo inp'
 
 -- | Enter a new state without consuming any input.
 begin :: LexState -> LexAction Token
-begin code _ _ _ =
-    do  pushLexState code
-        lexToken
+begin code = beginWith code revisit
 
+-- | Exit the current state without consuming any input.
+end :: LexAction Token
+end = endWith revisit
 
 -- | Enter a new state throwing away the current lexeme.
 begin_ :: LexState -> LexAction Token
-begin_ code _ inp' _ =
-    do  pushLexState code
-        skipTo inp'
+begin_ code = beginWith code skip
 
 -- | Exit the current state throwing away the current lexeme.
 end_ :: LexAction Token
-end_ _ inp' _ =
-    do  popLexState
-        skipTo inp'
-
+end_ = endWith skip
 
 -- | Enter a new state and perform the given action.
 beginWith :: LexState -> LexAction a -> LexAction a
-beginWith code a inp inp' n =
-    do  pushLexState code
-        a inp inp' n
+beginWith code a = pushLexState code `andThen` a
 
 -- | Exit the current state and perform the given action.
 endWith :: LexAction a -> LexAction a
-endWith a inp inp' n =
-    do  popLexState
-        a inp inp' n
+endWith a = popLexState `andThen` a
 
-
--- | Exit the current state without consuming any input
-end :: LexAction Token
-end _ _ _ =
-    do  popLexState
-        lexToken
 
 -- | Parse a 'Keyword' token, triggers layout for 'layoutKeywords'.
 keyword :: Keyword -> LexAction Token
-keyword k = layout $ withInterval_ (TokKeyword k)
+keyword k =
+    case k of
+
+        -- Unconditional layout keyword.
+        _ | k `elem` layoutKeywords ->
+            withLayout k cont
+
+        -- Andreas, 2021-05-06, issue #5356:
+        -- @constructor@ is not a layout keyword after all, replaced by @data _ where@.
+        -- -- @constructor@ is not a layout keyword in @record ... where@ blocks,
+        -- -- only in @interleaved mutual@ blocks.
+        -- KwConstructor -> do
+        --     cxt <- getContext
+        --     if inMutualAndNotInWhereBlock cxt
+        --       then withLayout k cont
+        --       else cont
+
+        _ -> cont
     where
-        layout | elem k layoutKeywords  = withLayout
-               | otherwise              = id
+    cont = withInterval_ (TokKeyword k)
+
+    -- Andreas, 2021-05-06, issue #5356:
+    -- @constructor@ is not a layout keyword after all, replaced by @data _ where@.
+    -- -- Most recent block decides ...
+    -- inMutualAndNotInWhereBlock = \case
+    --   Layout KwMutual _ _ : _ -> True
+    --   Layout KwWhere  _ _ : _ -> False
+    --   _ : bs                  -> inMutualAndNotInWhereBlock bs
+    --   []                      -> True  -- For better errors on stray @constructor@ decls.
 
 
 -- | Parse a 'Symbol' token.
@@ -200,10 +217,36 @@ symbol :: Symbol -> LexAction Token
 symbol s = withInterval_ (TokSymbol s)
 
 
+-- | Parse a number.
+
+number :: String -> Integer
+number str = case str of
+    '0' : 'x' : num -> parseNumber 16 num
+    '0' : 'b' : num -> parseNumber 2  num
+    num             -> parseNumber 10 num
+    where
+        parseNumber :: Integer -> String -> Integer
+        parseNumber radix = foldl' (addDigit radix) 0
+
+        -- We rely on Agda.Syntax.Parser.Lexer to enforce that the digits are
+        -- in the correct range (so e.g. the digit 'E' cannot appear in a
+        -- binary number).
+        addDigit :: Integer -> Integer -> Char -> Integer
+        addDigit radix n '_' = n
+        addDigit radix n c   = n * radix + fromIntegral (digitToInt c)
+
+integer :: String -> Integer
+integer = \case
+  '-' : str -> - (number str)
+  str       -> number str
+
 -- | Parse a literal.
-literal :: Read a => (Range -> a -> Literal) -> LexAction Token
-literal lit =
-  withInterval' read (TokLiteral . uncurry lit . mapFst getRange)
+literal' :: (String -> a) -> (a -> Literal) -> LexAction Token
+literal' read lit = withInterval' read $ \ (r, a) ->
+  TokLiteral $ Ranged (getRange r) $ lit a
+
+literal :: Read a => (a -> Literal) -> LexAction Token
+literal = literal' read
 
 -- | Parse an identifier. Identifiers can be qualified (see 'Name').
 --   Example: @Foo.Bar.f@

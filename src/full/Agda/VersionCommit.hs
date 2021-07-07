@@ -1,4 +1,9 @@
+{-# LANGUAGE CPP             #-}
 {-# LANGUAGE TemplateHaskell #-}
+
+#if __GLASGOW_HASKELL__ >= 900
+{-# OPTIONS_GHC -Wno-overlapping-patterns #-}
+#endif
 
 module Agda.VersionCommit where
 
@@ -7,19 +12,19 @@ import Development.GitRev
 import Agda.Version
 
 versionWithCommitInfo :: String
-versionWithCommitInfo = version ++ case commitInfo of
-                                     Nothing   -> ""
-                                     Just info -> "-" ++ info
+versionWithCommitInfo = version ++ maybe "" ("-" ++) commitInfo
 
 -- | Information about current git commit, generated at compile time
 commitInfo :: Maybe String
-commitInfo = case $(gitHash) of
-  "UNKNOWN" -> Nothing
-  hash      -> Just $ abbrev hash ++ dirty
+commitInfo
+  | hash == "UNKNOWN" = Nothing
+  | otherwise         = Just $ abbrev hash ++ dirty
   where
-    -- | Check if there are uncommitted changes
-    dirty | $(gitDirty) = "-dirty"
-          | otherwise   = ""
+    hash = $(gitHash)
 
-    -- | Abbreviate a commit hash while keeping it unambiguous
+    -- Check if any tracked files have uncommitted changes
+    dirty | $(gitDirtyTracked) = "-dirty"
+          | otherwise          = ""
+
+    -- Abbreviate a commit hash while keeping it unambiguous
     abbrev = take 7

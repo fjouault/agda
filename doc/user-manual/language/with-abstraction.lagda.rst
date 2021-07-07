@@ -1,6 +1,6 @@
 ..
   ::
-  {-# OPTIONS --allow-unsolved-metas #-}
+  {-# OPTIONS --allow-unsolved-metas --irrelevant-projections --guardedness #-}
   module language.with-abstraction where
 
   open import Agda.Builtin.Nat using (Nat; zero; suc; _<_)
@@ -27,7 +27,7 @@ With-Abstraction
    :depth: 2
    :local:
 
-With abstraction was first introduced by Conor McBride [McBride2004]_ and lets
+With-abstraction was first introduced by Conor McBride [McBride2004]_ and lets
 you pattern match on the result of an intermediate computation by effectively
 adding an extra argument to the left-hand side of your function.
 
@@ -77,7 +77,7 @@ where you have to spell out the left-hand side:
 - When the pattern matching on the intermediate result refines some of
   the other arguments (see :ref:`dot-patterns`).
 
-- To disambiguate the clauses of nested with abstractions (see
+- To disambiguate the clauses of nested with-abstractions (see
   :ref:`nested-with-abstractions` below).
 
 ..
@@ -106,7 +106,7 @@ following (with the goal types shown in the holes)
 ::
 
     postulate P : ∀ {A} → List A → Set
-    postulate p-nil : P []
+    postulate p-nil : ∀ {A} → P {A} []
     postulate Q : Set
     postulate q-nil : Q
 
@@ -118,14 +118,14 @@ following (with the goal types shown in the holes)
 
       proof : {A : Set} (p : A → Bool) (xs : List A) → P (filter p xs)
       proof p []       = {! P [] !}
-      proof p (x ∷ xs) = {! P (filter p xs | p x) !}
+      proof p (x ∷ xs) = {! P (filter p (x ∷ xs) | p x) !}
 
 ..
   ::
     module ellipsis-proof where
 
-In the cons case we have to prove that ``P`` holds for ``filter p xs | p x``.
-This is the syntax for a stuck with-abstraction--\ ``filter`` cannot reduce
+In the cons case we have to prove that ``P`` holds for ``filter p (x ∷ xs) | p x``.
+This is the syntax for a stuck with-abstraction---\ ``filter`` cannot reduce
 since we don't know the value of ``p x``. This syntax is used for printing, but
 is not accepted as valid Agda code. Now if we with-abstract over ``p x``, but
 don't pattern match on the result we get::
@@ -133,7 +133,7 @@ don't pattern match on the result we get::
       proof : {A : Set} (p : A → Bool) (xs : List A) → P (filter p xs)
       proof p [] = p-nil
       proof p (x ∷ xs) with p x
-      ...                 | r   = {! P (filter p xs | r) !}
+      ...                 | r   = {! P (filter p (x ∷ xs) | r) !}
 
 ..
   ::
@@ -157,8 +157,8 @@ works just as well if we have an argument whose type contains ``filter p xs``.
       proof₂ : {A : Set} (p : A → Bool) (xs : List A) → P (filter p xs) → Q
       proof₂ p [] _ = q-nil
       proof₂ p (x ∷ xs) H with p x
-      ...                    | true  = {! H : P (filter p xs) !}
-      ...                    | false = {! H : P (x ∷ filter p xs) !}
+      ...                    | true  = {! H : P (x ∷ filter p xs) !}
+      ...                    | false = {! H : P (filter p xs) !}
 
 The generalisation is not limited to scrutinees in other with-abstractions. All
 occurrences of the term in the goal type and argument types will be
@@ -231,7 +231,7 @@ have to spell out the left-hand side and write
 Simultaneous abstraction
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can abstract over multiple terms in a single with abstraction. To do this
+You can abstract over multiple terms in a single with-abstraction. To do this
 you separate the terms with vertical bars (``|``).
 
 ::
@@ -330,10 +330,47 @@ lemma to the with-abstraction::
       proof n q    | suc fn | lem = lem q
 
 In this case the type of ``lemma n`` (``P (f n) → R``) is generalised over ``f
-n`` so in the right hand side of the last clause we have ``q : P (suc fn)`` and
+n`` so in the right-hand side of the last clause we have ``q : P (suc fn)`` and
 ``lem : P (suc fn) → R``.
 
 See :ref:`the-inspect-idiom` below for an alternative approach.
+
+..
+  ::
+  module with-modalities where
+
+.. _with-modalities:
+
+Making with-abstractions hidden and/or irrelevant
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is possible to add hiding and relevance annotations to `with`
+expressions. For example::
+
+    module _ (A B : Set) (recompute : .B → .{{A}} → B) where
+
+      _$_ : .(A → B) → .A → B
+      f $ x with .{f} | .(f x) | .{{x}}
+      ... | y = recompute y
+
+This can be useful for hiding with-abstractions that you do not need
+to match on but that need to be abstracted over for the result to be
+well-typed. It can also be used to abstract over the fields of a
+record type with irrelevant fields, for example::
+
+    record EqualBools : Set₁ where
+      field
+        bool1  : Bool
+        bool2  : Bool
+        .same : bool1 ≡ bool2
+    open EqualBools
+
+    example : EqualBools → EqualBools
+    example x with bool1 x | bool2 x | .(same x)
+    ...     | true  | y′ | eq′ = record { bool1 = true;  bool2 = y′; same = eq′ }
+    ...     | false | y′ | eq′ = record { bool1 = false; bool2 = y′; same = eq′ }
+
+
 
 ..
   ::
@@ -341,8 +378,8 @@ See :ref:`the-inspect-idiom` below for an alternative approach.
 
 .. _with-clause-underscore:
 
-Using underscores in pattern repetition
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Using underscores and variables in pattern repetition
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 If an ellipsis `...` cannot be used, the with-clause has to repeat (or
 refine) the patterns of the parent clause.  Since Agda 2.5.3, such
@@ -367,6 +404,102 @@ are not needed.  Here is a (slightly contrived) example::
     test  r  (fTrue p)  with  R.f r
     test  _  (fTrue ())    |  false
     test  _  _             |  true  = true!  -- underscore instead of (isTrue _)
+
+Since Agda 2.5.4, patterns can also be replaced by a variable::
+
+    f : List Nat → List Nat
+    f [] = []
+    f (x ∷ xs) with f xs
+    f xs0 | r = ?
+
+The variable `xs0` is treated as a let-bound variable with value `.x ∷
+.xs` (where `.x : Nat` and `.xs : List Nat` are out of scope). Since
+with-abstraction may change the type of variables, the instantiation
+of such let-bound variables are type checked again after
+with-abstraction.
+
+..
+  ::
+  module with-invert {a} {A : Set a} where
+    open import Agda.Builtin.Nat
+    open import Agda.Builtin.Sigma
+    open import Agda.Builtin.Equality
+    open import Agda.Builtin.Unit
+
+.. _with-invert:
+
+Irrefutable With
+~~~~~~~~~~~~~~~~
+
+When a pattern is irrefutable, we can use a pattern-matching ``with``
+instead of a traditional ``with`` block. This gives us a lightweight
+syntax to make a lot of observations before using a "proper" ``with``
+block. For a basic example of such an irrefutable pattern, see this
+unfolding lemma for ``pred`` ::
+
+    pred : Nat → Nat
+    pred zero    = zero
+    pred (suc n) = n
+
+    NotNull : Nat → Set
+    NotNull zero    = ⊥ -- false
+    NotNull (suc n) = ⊤ -- trivially true
+
+    pred-correct : ∀ n (pr : NotNull n) → suc (pred n) ≡ n
+    pred-correct n pr with suc p ← n = refl
+
+In the above code snippet we do not need to entertain the idea that ``n``
+could be equal to ``zero``: Agda detects that the proof ``pr`` allows us
+to dismiss such a case entirely.
+
+The patterns used in such an inversion clause can be arbitrary. We can
+for instance have deep patterns, e.g. projecting out the second element
+of a vector whose length is neither 0 nor 1:
+
+::
+
+    infixr 5 _∷_
+    data Vec {a} (A : Set a) : Nat → Set a where
+      []  : Vec A zero
+      _∷_ : ∀ {n} → A → Vec A n → Vec A (suc n)
+
+    second : ∀ {n} {pr : NotNull (pred n)} → Vec A n → A
+    second vs with (_ ∷ v ∷ _) ← vs = v
+
+Remember the example of :ref:`simultaneous
+abstraction <simultaneous-abstraction>` from above. A simultaneous
+rewrite / pattern-matching ``with`` is to be understood as being nested.
+That is to say that the type refinements introduced by the first
+case analysis may be necessary to type the following ones.
+
+In the following example, in ``focusAt`` we are only able to perform
+the ``splitAt`` we are interested in because we have massaged the type
+of the vector argument using ``suc-+`` first.
+
+::
+
+    suc-+ : ∀ m n → suc m + n ≡ m + suc n
+    suc-+ zero    n                   = refl
+    suc-+ (suc m) n rewrite suc-+ m n = refl
+
+    infixr 1 _×_
+    _×_ : ∀ {a b} (A : Set a) (B : Set b) → Set ?
+    A × B = Σ A (λ _ → B)
+
+    splitAt : ∀ m {n} → Vec A (m + n) → Vec A m × Vec A n
+    splitAt zero    xs       = ([] , xs)
+    splitAt (suc m) (x ∷ xs) with (ys , zs) ← splitAt m xs = (x ∷ ys , zs)
+
+    -- focusAt m (x₀ ∷ ⋯ ∷ xₘ₋₁ ∷ xₘ ∷ xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ)
+    -- returns ((x₀ ∷ ⋯ ∷ xₘ₋₁) , xₘ , (xₘ₊₁ ∷ ⋯ ∷ xₘ₊ₙ))
+    focusAt : ∀ m {n} → Vec A (suc (m + n)) → Vec A m × A × Vec A n
+    focusAt m {n} vs rewrite suc-+ m n
+                     with (before , focus ∷ after) ← splitAt m vs
+                     = (before , focus , after)
+
+You can alternate arbitrarily many ``rewrite`` and pattern-matching
+``with`` clauses and still perform a ``with`` abstraction afterwards
+if necessary.
 
 ..
   ::
@@ -447,83 +580,68 @@ Note that the with-abstracted arguments introduced by the rewrite (``lhs`` and
 
 .. _the-inspect-idiom:
 
-The inspect idiom
-~~~~~~~~~~~~~~~~~
+With-abstraction equality
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 When you with-abstract a term ``t`` you lose the connection between
 ``t`` and the new argument representing its value. That's fine as long
 as all instances of ``t`` that you care about get generalised by the
 abstraction, but as we saw :ref:`above <with-on-lemma>` this is not
 always the case. In that example we used simultaneous abstraction to
-make sure that we did capture all the instances we needed. An
-alternative to that is to use the *inspect idiom*, which retains a
-proof that the original term is equal to its abstraction.
+make sure that we did capture all the instances we needed.
+
+An alternative to that is to get Agda to remember in an equality proof
+that the patterns in the with clauses come from the expression you abstracted
+over. This is possible using the ``in`` keyword.
 
 ..
   ::
-    module inspect-idiom-simplest where
+    open import Agda.Builtin.Sigma using (Σ; _,_)
+    open import Agda.Builtin.Nat using (_+_)
 
-In the simplest form, the inspect idiom uses a singleton type::
-
-      data Singleton {a} {A : Set a} (x : A) : Set a where
-        _with≡_ : (y : A) → x ≡ y → Singleton x
-
-      inspect : ∀ {a} {A : Set a} (x : A) → Singleton x
-      inspect x = x with≡ refl
-
-Now instead of with-abstracting ``t``, you can abstract over ``inspect t``. For
-instance,
+In the following artificial example, we try to prove that there exists two
+numbers such that one equals the double of the other. We start by computing
+the double of our input ``m`` and call it ``n``. We can then return the nested
+pair containing ``m``, ``n``, and we now need a proof that ``m + m ≡ n``.
+Luckily we used ``in eq`` when computing ``n`` as ``m + m`` and this ``eq``
+is exactly the proof we need.
 
 ::
 
-      filter : {A : Set} → (A → Bool) → List A → List A
-      filter p [] = []
-      filter p (x ∷ xs) with inspect (p x)
-      ...                  | true  with≡ eq = {! eq : p x ≡ true !}
-      ...                  | false with≡ eq = {! eq : p x ≡ false !}
+    double : Nat → Σ Nat (λ m → Σ Nat (λ n → m + m ≡ n))
+    double m with n ← m + m in eq = m , n , eq
 
-Here we get proofs that ``p x ≡ true`` and ``p x ≡ false`` in the respective
-branches that we can on use the right.  Note that since the with-abstraction is
-over ``inspect (p x)`` rather than ``p x``, the goal and argument types are no
-longer generalised over ``p x``. To fix that we can replace the singleton type
-by a function graph type as follows (see :ref:`anonymous-modules` to learn
-about the use of a module to bind the type arguments to ``Graph`` and
-``inspect``)::
+For a more natural example, we prove that ``filter`` (defined at the top of this
+page) is idempotent. That is to say that applying it twice to an input list is
+the same as only applying it once.
 
-    module _ {a b} {A : Set a} {B : A → Set b} where
+In the ``filter-filter p (x ∷ xs)`` case, abstracting over and then matching
+on the result of ``p x`` allows the first call to ``filter p (x ∷ xs)`` to
+reduce.
 
-      data Graph (f : ∀ x → B x) (x : A) (y : B x) : Set b where
-        ingraph : f x ≡ y → Graph f x y
+In case the element ``x`` is kept (i.e. ``p x`` is ``true``), the second call
+to ``filter`` on the LHS goes on to performs the same ``p x`` test. Because we
+have retained the proof that ``p x ≡ true`` in ``eq``, we are able to rewrite
+by this equality and get it to reduce too.
 
-      inspect : (f : ∀ x → B x) (x : A) → Graph f x (f x)
-      inspect _ _ = ingraph refl
+This leads to just enough computation that we can finish the proof with
+an appeal to congruence and the induction hypothesis.
 
-To use this on a term ``g v`` you with-abstract over both ``g v`` and ``inspect
-g v``. For instance, applying this to the example from above we get
+..
+  ::
+    open ellipsis-usage
+
+    cong : {A B : Set} (f : A → B) → ∀ {x y} → x ≡ y → f x ≡ f y
+    cong f refl = refl
 
 ::
 
-    postulate
-      R     : Set
-      P     : Nat → Set
-      f     : Nat → Nat
-      lemma : ∀ n → P (f n) → R
-
-    Q : Nat → Set
-    Q zero    = ⊥
-    Q (suc n) = P (suc n)
-
-    proof : (n : Nat) → Q (f n) → R
-    proof n q with f n    | inspect f n
-    proof n ()   | zero   | _
-    proof n q    | suc fn | ingraph eq = {! q : P (suc fn), eq : f n ≡ suc fn !}
-
-We could then use the proof that ``f n ≡ suc fn`` to apply ``lemma`` to ``q``.
-
-This version of the inspect idiom is defined (using slightly different names)
-in the `standard library <std-lib_>`_ in the module
-``Relation.Binary.PropositionalEquality`` and in the `agda-prelude`_ in
-``Prelude.Equality.Inspect`` (reexported by ``Prelude``).
+    filter-filter : ∀ {A} p (xs : List A) → filter p (filter p xs) ≡ filter p xs
+    filter-filter p []       = refl
+    filter-filter p (x ∷ xs) with p x in eq
+    ... | false = filter-filter p xs -- easy
+    ... | true -- second filter stuck on `p x`: rewrite by `eq`!
+      rewrite eq = cong (x ∷_) (filter-filter p xs)
 
 Alternatives to with-abstraction
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -573,12 +691,125 @@ Helper functions
 ++++++++++++++++
 
 Internally with-abstractions are translated to auxiliary functions
-(see :ref:`technical-details` below) and you can
-always\ [#with-inlining]_ write these functions manually. The downside
-is that the type signature for the helper function needs to be written
-out explicitly, but fortunately the :ref:`emacs-mode` has a command
-(``C-c C-h``) to generate it using the same algorithm that generates
-the type of a with-function.
+(see :ref:`technical-details` below) and you can always write these
+functions manually. The downside is that the type signature for the
+helper function needs to be written out explicitly, but fortunately
+the :ref:`emacs-mode` has a command (``C-c C-h``) to generate it using
+the same algorithm that generates the type of a with-function.
+
+Termination checking
+~~~~~~~~~~~~~~~~~~~~
+
+..
+  ::
+
+  module Termination where
+
+    postulate
+      some-stuff : Nat
+
+    module _ where
+
+The termination checker runs on the translated auxiliary functions, which
+means that some code that looks like it should pass termination checking
+does not. Specifically this happens in call chains like ``c₁ (c₂ x) ⟶ c₁ x``
+where the recursive call is under a with-abstraction. The reason is that
+the auxiliary function only gets passed ``x``, so the call chain is actually
+``c₁ (c₂ x) ⟶ x ⟶ c₁ x``, and the termination checker cannot see that this
+is terminating. For example::
+
+      data D : Set where
+        [_] : Nat → D
+
+..
+  ::
+
+    module M₁ where
+
+      {-# TERMINATING #-}
+
+::
+
+      fails : D → Nat
+      fails [ zero  ] = zero
+      fails [ suc n ] with some-stuff
+      ... | _ = fails [ n ]
+
+The easiest way to work around this problem is to perform a with-abstraction
+on the recursive call up front::
+
+      fixed : D → Nat
+      fixed [ zero  ] = zero
+      fixed [ suc n ] with fixed [ n ] | some-stuff
+      ... | rec | _ = rec
+
+..
+  ::
+
+    module M₂ where
+
+      {-# TERMINATING #-}
+
+If the function takes more arguments you might need to abstract over a
+partial application to just the structurally recursive argument. For instance,
+
+::
+
+      fails : Nat → D → Nat
+      fails _ [ zero  ] = zero
+      fails _ [ suc n ] with some-stuff
+      ... | m = fails m [ n ]
+
+      fixed : Nat → D → Nat
+      fixed _ [ zero  ] = zero
+      fixed _ [ suc n ] with (λ m → fixed m [ n ]) | some-stuff
+      ... | rec | m = rec m
+
+..
+  ::
+
+    postulate
+
+A possible complication is that later with-abstractions might change the
+type of the abstracted recursive call::
+
+        T      : D → Set
+        suc-T  : ∀ {n} → T [ n ] → T [ suc n ]
+        zero-T : T [ zero ]
+
+..
+  ::
+
+    module M₃ where
+
+      {-# TERMINATING #-}
+
+::
+
+      fails : (d : D) → T d
+      fails [ zero  ] = zero-T
+      fails [ suc n ] with some-stuff
+      ... | _ with [ n ]
+      ...   | z = suc-T (fails [ n ])
+
+Trying to abstract over the recursive call as before does not work in this case.
+
+.. code-block:: agda
+
+      still-fails : (d : D) → T d
+      still-fails [ zero ] = zero-T
+      still-fails [ suc n ] with still-fails [ n ] | some-stuff
+      ... | rec | _ with [ n ]
+      ...   | z = suc-T rec -- Type error because rec : T z
+
+To solve the problem you can add ``rec`` to the with-abstraction messing up
+its type. This will prevent it from having its type changed::
+
+      fixed : (d : D) → T d
+      fixed [ zero ] = zero-T
+      fixed [ suc n ] with fixed [ n ] | some-stuff
+      ... | rec | _ with rec | [ n ]
+      ...   | _ | z = suc-T rec
 
 Performance considerations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -604,7 +835,7 @@ from above.
 Technical details
 -----------------
 
-Internally with-abstractions are translated to auxiliary functions--there are
+Internally with-abstractions are translated to auxiliary functions---there are
 no with-abstractions in the :ref:`core-language`. This translation proceeds as
 follows. Given a with-abstraction
 
@@ -787,11 +1018,6 @@ immediate problem (``fst p != w``) and the full type of the with-function. To
 get a more informative error, pointing to the location in the type where the
 error is, you can copy and paste the with-function type from the error message
 and try to type check it separately.
-
-
-.. [#with-inlining] The termination checker has :ref:`special treatment for
-                    with-functions <termination-checking-with>`, so replacing a `with` by the
-                    equivalent helper function might fail termination.
 
 .. [McBride2004] C. McBride and J. McKinna. **The view from the left**. Journal of Functional Programming, 2004.
                  http://strictlypositive.org/vfl.pdf.

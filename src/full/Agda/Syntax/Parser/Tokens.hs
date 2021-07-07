@@ -5,45 +5,65 @@ module Agda.Syntax.Parser.Tokens
     , Symbol(..)
     ) where
 
-import Agda.Syntax.Literal (Literal)
+import Agda.Syntax.Literal (RLiteral)
 import Agda.Syntax.Position
 
 data Keyword
         = KwLet | KwIn | KwWhere | KwData | KwCoData | KwDo
-        | KwPostulate | KwMutual | KwAbstract | KwPrivate | KwInstance
+        | KwPostulate | KwAbstract | KwPrivate | KwInstance
+        | KwInterleaved | KwMutual
         | KwOverlap
         | KwOpen | KwImport | KwModule | KwPrimitive | KwMacro
         | KwInfix | KwInfixL | KwInfixR | KwWith | KwRewrite
-        | KwSet | KwProp | KwForall | KwRecord | KwConstructor | KwField
+        | KwForall | KwRecord | KwConstructor | KwField
         | KwInductive | KwCoInductive
         | KwEta | KwNoEta
         | KwHiding | KwUsing | KwRenaming | KwTo | KwPublic
         | KwOPTIONS | KwBUILTIN | KwLINE
-        | KwCOMPILED_DATA | KwCOMPILED_TYPE | KwCOMPILED | KwCOMPILED_EXPORT
-        | KwHASKELL | KwFOREIGN | KwCOMPILE
-        | KwCOMPILED_JS | KwCOMPILED_UHC | KwCOMPILED_DATA_UHC
-        | KwIMPORT | KwIMPORT_UHC | KwIMPOSSIBLE | KwSTATIC | KwINJECTIVE | KwINLINE
+        | KwFOREIGN | KwCOMPILE
+        | KwIMPOSSIBLE | KwSTATIC | KwINJECTIVE | KwINLINE | KwNOINLINE
         | KwETA
         | KwNO_TERMINATION_CHECK | KwTERMINATING | KwNON_TERMINATING
+        | KwNON_COVERING
+        | KwWARNING_ON_USAGE | KwWARNING_ON_IMPORT
         | KwMEASURE | KwDISPLAY
         | KwREWRITE
-        | KwQuoteGoal | KwQuoteContext | KwQuote | KwQuoteTerm
+        | KwQuote | KwQuoteTerm
         | KwUnquote | KwUnquoteDecl | KwUnquoteDef
         | KwSyntax
         | KwPatternSyn | KwTactic | KwCATCHALL
+        | KwVariable
         | KwNO_POSITIVITY_CHECK | KwPOLARITY
+        | KwNO_UNIVERSE_CHECK
     deriving (Eq, Show)
 
+-- | Unconditional layout keywords.
+--
+-- Some keywords introduce layout only in certain circumstances,
+-- these are not included here.
+--
 layoutKeywords :: [Keyword]
 layoutKeywords =
-    [ KwLet, KwWhere, KwDo, KwPostulate, KwMutual, KwAbstract, KwPrivate, KwInstance, KwMacro, KwPrimitive, KwField ]
+    [ KwAbstract
+    , KwDo
+    , KwField
+    , KwInstance
+    , KwLet
+    , KwMacro
+    , KwMutual
+    , KwPostulate
+    , KwPrimitive
+    , KwPrivate
+    , KwVariable
+    , KwWhere
+    ]
 
 data Symbol
         = SymDot | SymSemi | SymVirtualSemi | SymBar
         | SymColon | SymArrow | SymEqual | SymLambda
         | SymUnderscore | SymQuestionMark   | SymAs
         | SymOpenParen        | SymCloseParen
-        | SymOpenIdiomBracket | SymCloseIdiomBracket
+        | SymOpenIdiomBracket | SymCloseIdiomBracket | SymEmptyIdiomBracket
         | SymDoubleOpenBrace  | SymDoubleCloseBrace
         | SymOpenBrace        | SymCloseBrace
         | SymOpenVirtualBrace | SymCloseVirtualBrace
@@ -60,17 +80,18 @@ data Token
                         -- Non-empty namespace. The intervals for
                         -- "A.B.x" correspond to "A.", "B." and "x".
           -- Literals
-        | TokLiteral    Literal
+        | TokLiteral    RLiteral
           -- Special symbols
         | TokSymbol Symbol Interval
           -- Other tokens
-        | TokString (Interval, String)  -- arbitrary string, used in pragmas
-        | TokSetN (Interval, Integer)
+        | TokString (Interval, String)
+            -- ^ Arbitrary string (not enclosed in double quotes), used in pragmas.
         | TokTeX (Interval, String)
+        | TokMarkup (Interval, String)
         | TokComment (Interval, String)
         | TokDummy      -- Dummy token to make Happy not complain
                         -- about overlapping cases.
-        | TokEOF
+        | TokEOF Interval
     deriving (Eq, Show)
 
 instance HasRange Token where
@@ -80,8 +101,8 @@ instance HasRange Token where
   getRange (TokLiteral lit)    = getRange lit
   getRange (TokSymbol _ i)     = getRange i
   getRange (TokString (i, _))  = getRange i
-  getRange (TokSetN (i, _))    = getRange i
   getRange (TokTeX (i, _))     = getRange i
+  getRange (TokMarkup (i, _))  = getRange i
   getRange (TokComment (i, _)) = getRange i
   getRange TokDummy            = noRange
-  getRange TokEOF              = noRange
+  getRange (TokEOF i)          = getRange i

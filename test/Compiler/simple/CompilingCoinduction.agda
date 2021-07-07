@@ -1,3 +1,4 @@
+{-# OPTIONS --guardedness #-}
 
 module CompilingCoinduction where
 
@@ -21,8 +22,7 @@ postulate
 postulate
   putStrLn : ∞ String → IO Unit
 
-{-# COMPILE GHC putStrLn = Data.Text.IO.putStrLn #-}
-{-# COMPILE UHC putStrLn = UHC.Agda.Builtins.primPutStrLn #-}
+{-# COMPILE GHC putStrLn = Data.Text.IO.putStrLn . MAlonzo.RTE.flat #-}
 {-# COMPILE JS  putStrLn = function(x) { return function(cb) { process.stdout.write(x.flat() + "\n"); cb(0); }; } #-}
 
 main = putStrLn (♯ "a")

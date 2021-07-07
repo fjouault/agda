@@ -1,62 +1,46 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.TypeChecking.Monad.Options where
 
-import Prelude hiding (mapM)
-
-import Control.Applicative
-import Control.Monad.Reader hiding (mapM)
-import Control.Monad.State  hiding (mapM)
+import Control.Arrow ( (&&&) )
+import Control.Monad.Except
+import Control.Monad.Reader
+import Control.Monad.State
+import Control.Monad.Writer
 
 import Data.Maybe
-import Data.Traversable
 
 import System.Directory
 import System.FilePath
 
-import Agda.Syntax.Internal
 import Agda.Syntax.Common
-import Agda.Syntax.Concrete
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Debug
-import {-# SOURCE #-} Agda.TypeChecking.Errors
+import Agda.TypeChecking.Monad.Debug (reportSDoc)
 import Agda.TypeChecking.Warnings
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.State
 import Agda.TypeChecking.Monad.Benchmark
-import {-# SOURCE #-} Agda.Interaction.FindFile
 import Agda.Interaction.Options
 import qualified Agda.Interaction.Options.Lenses as Lens
-import Agda.Interaction.Response
 import Agda.Interaction.Library
-
-import Agda.Utils.Except ( MonadError(catchError) )
 import Agda.Utils.FileName
+import Agda.Utils.Functor
 import Agda.Utils.Maybe
-import Agda.Utils.Monad
-import Agda.Utils.Lens
-import Agda.Utils.List
 import Agda.Utils.Pretty
-import Agda.Utils.Trie (Trie)
-import qualified Agda.Utils.Trie as Trie
-import Agda.Utils.Except
-import Agda.Utils.Either
+import Agda.Utils.WithDefault
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Sets the pragma options.
 
 setPragmaOptions :: PragmaOptions -> TCM ()
 setPragmaOptions opts = do
-  stPragmaOptions %= Lens.mapSafeMode (Lens.getSafeMode opts ||)
+  stPragmaOptions `modifyTCLens` Lens.mapSafeMode (Lens.getSafeMode opts ||)
   clo <- commandLineOptions
-  let unsafe = unsafePragmaOptions opts
-  when (Lens.getSafeMode clo && not (null unsafe)) $ warning $ SafeFlagPragma unsafe
-  ok <- liftIO $ runOptM $ checkOpts (clo { optPragmaOptions = opts })
-  case ok of
+  let unsafe = unsafePragmaOptions clo opts
+  when (Lens.getSafeMode opts && not (null unsafe)) $ warning $ SafeFlagPragma unsafe
+  runOptM (checkOpts clo{ optPragmaOptions = opts }) >>= \case
     Left err   -> __IMPOSSIBLE__
     Right opts -> do
-      stPragmaOptions .= optPragmaOptions opts
+      stPragmaOptions `setTCLens` optPragmaOptions opts
       updateBenchmarkingStatus
 
 -- | Sets the command line options (both persistent and pragma options
@@ -70,101 +54,128 @@ setPragmaOptions opts = do
 -- An empty list of relative include directories (@'Left' []@) is
 -- interpreted as @["."]@.
 setCommandLineOptions :: CommandLineOptions -> TCM ()
-setCommandLineOptions = setCommandLineOptions' CurrentDir
+setCommandLineOptions opts = do
+  root <- liftIO (absolute =<< getCurrentDirectory)
+  setCommandLineOptions' root opts
 
-setCommandLineOptions' :: RelativeTo -> CommandLineOptions -> TCM ()
-setCommandLineOptions' relativeTo opts = do
-  z <- liftIO $ runOptM $ checkOpts opts
-  case z of
+setCommandLineOptions'
+  :: AbsolutePath
+     -- ^ The base directory of relative paths.
+  -> CommandLineOptions
+  -> TCM ()
+setCommandLineOptions' root opts = do
+  runOptM (checkOpts opts) >>= \case
     Left err   -> __IMPOSSIBLE__
     Right opts -> do
       incs <- case optAbsoluteIncludePaths opts of
         [] -> do
-          opts' <- setLibraryPaths relativeTo opts
+          opts' <- setLibraryPaths root opts
           let incs = optIncludePaths opts'
-          setIncludeDirs incs relativeTo
+          setIncludeDirs incs root
           getIncludeDirs
         incs -> return incs
-      modify $ Lens.setCommandLineOptions opts{ optAbsoluteIncludePaths = incs }
+      modifyTC $ Lens.setCommandLineOptions opts{ optAbsoluteIncludePaths = incs }
       setPragmaOptions (optPragmaOptions opts)
       updateBenchmarkingStatus
 
 libToTCM :: LibM a -> TCM a
 libToTCM m = do
-  z <- liftIO $ runExceptT m
+  cachedConfs <- useTC stProjectConfigs
+  cachedLibs  <- useTC stAgdaLibFiles
+
+  ((z, warns), (cachedConfs', cachedLibs')) <- liftIO $
+    (`runStateT` (cachedConfs, cachedLibs)) $ runWriterT $ runExceptT m
+
+  modifyTCLens stProjectConfigs $ const cachedConfs'
+  modifyTCLens stAgdaLibFiles   $ const cachedLibs'
+
+  unless (null warns) $ warnings $ map LibraryWarning warns
   case z of
     Left s  -> typeError $ GenericDocError s
     Right x -> return x
 
-setLibraryPaths :: RelativeTo -> CommandLineOptions -> TCM CommandLineOptions
-setLibraryPaths rel o = setLibraryIncludes =<< addDefaultLibraries rel o
+getAgdaLibFiles :: FilePath -> TCM [AgdaLibFile]
+getAgdaLibFiles root = do
+  useLibs <- optUseLibs <$> commandLineOptions
+  if | useLibs   -> libToTCM $ mkLibM [] $ getAgdaLibFiles' root
+     | otherwise -> return []
+
+getLibraryOptions :: FilePath -> TCM [OptionsPragma]
+getLibraryOptions root = map _libPragmas <$> getAgdaLibFiles root
+
+setLibraryPaths
+  :: AbsolutePath
+     -- ^ The base directory of relative paths.
+  -> CommandLineOptions
+  -> TCM CommandLineOptions
+setLibraryPaths root o =
+  setLibraryIncludes =<< addDefaultLibraries root o
 
 setLibraryIncludes :: CommandLineOptions -> TCM CommandLineOptions
-setLibraryIncludes o = do
+setLibraryIncludes o
+  | not (optUseLibs o) = pure o
+  | otherwise = do
     let libs = optLibraries o
     installed <- libToTCM $ getInstalledLibraries (optOverrideLibrariesFile o)
     paths     <- libToTCM $ libraryIncludePaths (optOverrideLibrariesFile o) installed libs
     return o{ optIncludePaths = paths ++ optIncludePaths o }
 
-addDefaultLibraries :: RelativeTo -> CommandLineOptions -> TCM CommandLineOptions
-addDefaultLibraries rel o
-  | or [ not $ null $ optLibraries o
-       , not $ optUseLibs o
-       , optShowVersion o ] = pure o
+addDefaultLibraries
+  :: AbsolutePath
+     -- ^ The base directory of relative paths.
+  -> CommandLineOptions
+  -> TCM CommandLineOptions
+addDefaultLibraries root o
+  | not (null $ optLibraries o) || not (optUseLibs o) = pure o
   | otherwise = do
-  root <- getProjectRoot rel
   (libs, incs) <- libToTCM $ getDefaultLibraries (filePath root) (optDefaultLibs o)
   return o{ optIncludePaths = incs ++ optIncludePaths o, optLibraries = libs }
+
+-- This function is only called when an interactor exists
+-- (i.e. when Agda actually does something).
+addTrustedExecutables
+  :: CommandLineOptions
+  -> TCM CommandLineOptions
+addTrustedExecutables o = do
+  trustedExes <- libToTCM $ getTrustedExecutables
+  -- Wen, 2020-06-03
+  -- Replace the map wholesale instead of computing the union because this function
+  -- should never be called more than once, and doing so either has the same result
+  -- or is a security risk.
+  return o{ optTrustedExecutables = trustedExes }
 
 setOptionsFromPragma :: OptionsPragma -> TCM ()
 setOptionsFromPragma ps = do
     opts <- commandLineOptions
-    z    <- liftIO $ runOptM (parsePragmaOptions ps opts)
-    case z of
+    runOptM (parsePragmaOptions ps opts) >>= \case
       Left err    -> typeError $ GenericError err
       Right opts' -> setPragmaOptions opts'
 
 -- | Disable display forms.
-enableDisplayForms :: TCM a -> TCM a
+enableDisplayForms :: MonadTCEnv m => m a -> m a
 enableDisplayForms =
-  local $ \e -> e { envDisplayFormsEnabled = True }
+  localTC $ \e -> e { envDisplayFormsEnabled = True }
 
 -- | Disable display forms.
-disableDisplayForms :: TCM a -> TCM a
+disableDisplayForms :: MonadTCEnv m => m a -> m a
 disableDisplayForms =
-  local $ \e -> e { envDisplayFormsEnabled = False }
+  localTC $ \e -> e { envDisplayFormsEnabled = False }
 
 -- | Check if display forms are enabled.
-displayFormsEnabled :: TCM Bool
-displayFormsEnabled = asks envDisplayFormsEnabled
+displayFormsEnabled :: MonadTCEnv m => m Bool
+displayFormsEnabled = asksTC envDisplayFormsEnabled
 
 -- | Gets the include directories.
 --
 -- Precondition: 'optAbsoluteIncludePaths' must be nonempty (i.e.
 -- 'setCommandLineOptions' must have run).
 
-getIncludeDirs :: TCM [AbsolutePath]
+getIncludeDirs :: HasOptions m => m [AbsolutePath]
 getIncludeDirs = do
   incs <- optAbsoluteIncludePaths <$> commandLineOptions
   case incs of
     [] -> __IMPOSSIBLE__
     _  -> return incs
-
--- | Which directory should form the base of relative include paths?
-
-data RelativeTo
-  = ProjectRoot AbsolutePath
-    -- ^ The root directory of the \"project\" containing the given
-    -- file. The file needs to be syntactically correct, with a module
-    -- name matching the file name.
-  | CurrentDir
-    -- ^ The current working directory.
-
-getProjectRoot :: RelativeTo -> TCM AbsolutePath
-getProjectRoot CurrentDir = liftIO (absolute =<< getCurrentDirectory)
-getProjectRoot (ProjectRoot f) = do
-  m <- moduleName' f
-  return (projectRoot f m)
 
 -- | Makes the given directories absolute and stores them as include
 -- directories.
@@ -174,14 +185,12 @@ getProjectRoot (ProjectRoot f) = do
 --
 -- An empty list is interpreted as @["."]@.
 
-setIncludeDirs :: [FilePath] -- ^ New include directories.
-               -> RelativeTo -- ^ How should relative paths be interpreted?
+setIncludeDirs :: [FilePath]    -- ^ New include directories.
+               -> AbsolutePath  -- ^ The base directory of relative paths.
                -> TCM ()
-setIncludeDirs incs relativeTo = do
+setIncludeDirs incs root = do
   -- save the previous include dirs
-  oldIncs <- gets Lens.getAbsoluteIncludePaths
-
-  root <- getProjectRoot relativeTo
+  oldIncs <- getsTC Lens.getAbsoluteIncludePaths
 
   -- Add the current dir if no include path is given
   incs <- return $ if null incs then ["."] else incs
@@ -189,19 +198,18 @@ setIncludeDirs incs relativeTo = do
   incs <- return $  map (mkAbsolute . (filePath root </>)) incs
 
   -- Andreas, 2013-10-30  Add default include dir
-  libdir <- liftIO $ defaultLibDir
       -- NB: This is an absolute file name, but
       -- Agda.Utils.FilePath wants to check absoluteness anyway.
-  let primdir = mkAbsolute $ libdir </> "prim"
+  primdir <- liftIO $ mkAbsolute <$> getPrimitiveLibDir
       -- We add the default dir at the end, since it is then
       -- printed last in error messages.
       -- Might also be useful to overwrite default imports...
   incs <- return $ incs ++ [primdir]
 
   reportSDoc "setIncludeDirs" 10 $ return $ vcat
-    [ text "Old include directories:"
+    [ "Old include directories:"
     , nest 2 $ vcat $ map pretty oldIncs
-    , text "New include directories:"
+    , "New include directories:"
     , nest 2 $ vcat $ map pretty incs
     ]
 
@@ -220,77 +228,35 @@ setIncludeDirs incs relativeTo = do
   -- "new-path/M.agda".
   when (oldIncs /= incs) $ do
     ho <- getInteractionOutputCallback
+    tcWarnings <- useTC stTCWarnings -- restore already generated warnings
+    projectConfs <- useTC stProjectConfigs  -- restore cached project configs & .agda-lib
+    agdaLibFiles <- useTC stAgdaLibFiles    -- files, since they use absolute paths
     resetAllState
+    setTCLens stTCWarnings tcWarnings
+    setTCLens stProjectConfigs projectConfs
+    setTCLens stAgdaLibFiles agdaLibFiles
     setInteractionOutputCallback ho
 
   Lens.putAbsoluteIncludePaths incs
 
-  -- Andreas, 2016-07-11 (reconstructing semantics):
-  --
-  -- Check that the module name of the project root
-  -- is still correct wrt. to the changed include path.
-  --
-  -- E.g. if the include path was "/" and file "/A/B" was named "module A.B",
-  -- and then the include path changes to "/A/", the module name
-  -- becomes invalid; correct would then be "module B".
+isPropEnabled :: HasOptions m => m Bool
+isPropEnabled = optProp <$> pragmaOptions
 
-  case relativeTo of
-    CurrentDir -> return ()
-    ProjectRoot f -> void $ moduleName f
-     -- Andreas, 2016-07-12 WAS:
-     -- do
-     --  m <- moduleName' f
-     --  checkModuleName m f Nothing
-
-
-setInputFile :: FilePath -> TCM ()
-setInputFile file =
-    do  opts <- commandLineOptions
-        setCommandLineOptions $
-          opts { optInputFile = Just file }
-
--- | Should only be run if 'hasInputFile'.
-getInputFile :: TCM AbsolutePath
-getInputFile = fromMaybeM __IMPOSSIBLE__ $
-  getInputFile'
-
--- | Return the 'optInputFile' as 'AbsolutePath', if any.
-getInputFile' :: TCM (Maybe AbsolutePath)
-getInputFile' = mapM (liftIO . absolute) =<< do
-  optInputFile <$> commandLineOptions
-
-hasInputFile :: TCM Bool
-hasInputFile = isJust <$> optInputFile <$> commandLineOptions
-
-proofIrrelevance :: TCM Bool
-proofIrrelevance = optProofIrrelevance <$> pragmaOptions
+isTwoLevelEnabled :: HasOptions m => m Bool
+isTwoLevelEnabled = collapseDefault . optTwoLevel <$> pragmaOptions
 
 {-# SPECIALIZE hasUniversePolymorphism :: TCM Bool #-}
 hasUniversePolymorphism :: HasOptions m => m Bool
 hasUniversePolymorphism = optUniversePolymorphism <$> pragmaOptions
 
-{-# SPECIALIZE sharedFun :: TCM (Term -> Term) #-}
-sharedFun :: HasOptions m => m (Term -> Term)
-sharedFun = do
-  sharing <- optSharing <$> commandLineOptions
-  return $ if sharing then shared_ else id
-
-{-# SPECIALIZE shared :: Term -> TCM Term #-}
-shared :: HasOptions m => Term -> m Term
-shared v = ($ v) <$> sharedFun
-
-{-# SPECIALIZE sharedType :: Type -> TCM Type #-}
-sharedType :: HasOptions m => Type -> m Type
-sharedType (El s v) = El s <$> shared v
-
-enableCaching :: TCM Bool
-enableCaching = optCaching <$> pragmaOptions
-
-showImplicitArguments :: TCM Bool
+showImplicitArguments :: HasOptions m => m Bool
 showImplicitArguments = optShowImplicit <$> pragmaOptions
 
-showIrrelevantArguments :: TCM Bool
+showIrrelevantArguments :: HasOptions m => m Bool
 showIrrelevantArguments = optShowIrrelevant <$> pragmaOptions
+
+showIdentitySubstitutions :: HasOptions m => m Bool
+showIdentitySubstitutions = optShowIdentitySubstitutions <$> pragmaOptions
 
 -- | Switch on printing of implicit and irrelevant arguments.
 --   E.g. for reification in with-function generation.
@@ -299,87 +265,40 @@ showIrrelevantArguments = optShowIrrelevant <$> pragmaOptions
 --   Thus, do not attempt to make persistent 'PragmaOptions'
 --   changes in a `withShowAllArguments` bracket.
 
-withShowAllArguments :: TCM a -> TCM a
+withShowAllArguments :: ReadTCState m => m a -> m a
 withShowAllArguments = withShowAllArguments' True
 
-withShowAllArguments' :: Bool -> TCM a -> TCM a
+withShowAllArguments' :: ReadTCState m => Bool -> m a -> m a
 withShowAllArguments' yes = withPragmaOptions $ \ opts ->
   opts { optShowImplicit = yes, optShowIrrelevant = yes }
 
 -- | Change 'PragmaOptions' for a computation and restore afterwards.
+withPragmaOptions :: ReadTCState m => (PragmaOptions -> PragmaOptions) -> m a -> m a
+withPragmaOptions = locallyTCState stPragmaOptions
 
-withPragmaOptions :: (PragmaOptions -> PragmaOptions) -> TCM a -> TCM a
-withPragmaOptions f cont = do
-  opts <- pragmaOptions
-  setPragmaOptions $ f opts
-  x <- cont
-  setPragmaOptions opts
-  return x
-
-
-ignoreInterfaces :: TCM Bool
-ignoreInterfaces = optIgnoreInterfaces <$> commandLineOptions
-
-positivityCheckEnabled :: TCM Bool
+positivityCheckEnabled :: HasOptions m => m Bool
 positivityCheckEnabled = not . optDisablePositivity <$> pragmaOptions
 
 {-# SPECIALIZE typeInType :: TCM Bool #-}
 typeInType :: HasOptions m => m Bool
 typeInType = not . optUniverseCheck <$> pragmaOptions
 
-etaEnabled :: TCM Bool
+etaEnabled :: HasOptions m => m Bool
 etaEnabled = optEta <$> pragmaOptions
 
-maxInstanceSearchDepth :: TCM Int
+maxInstanceSearchDepth :: HasOptions m => m Int
 maxInstanceSearchDepth = optInstanceSearchDepth <$> pragmaOptions
 
-------------------------------------------------------------------------
--- Verbosity
+maxInversionDepth :: HasOptions m => m Int
+maxInversionDepth = optInversionMaxDepth <$> pragmaOptions
 
--- Invariant (which we may or may not currently break): Debug
--- printouts use one of the following functions:
---
---   reportS
---   reportSLn
---   reportSDoc
+-- | Returns the 'Language' currently in effect.
 
--- | Retrieve the current verbosity level.
-{-# SPECIALIZE getVerbosity :: TCM (Trie String Int) #-}
-getVerbosity :: HasOptions m => m (Trie String Int)
-getVerbosity = optVerbose <$> pragmaOptions
-
-type VerboseKey = String
-
--- | Check whether a certain verbosity level is activated.
---
---   Precondition: The level must be non-negative.
-{-# SPECIALIZE hasVerbosity :: VerboseKey -> Int -> TCM Bool #-}
-hasVerbosity :: HasOptions m => VerboseKey -> Int -> m Bool
-hasVerbosity k n | n < 0     = __IMPOSSIBLE__
-                 | otherwise = do
-    t <- getVerbosity
-    let ks = wordsBy (`elem` ".:") k
-        m  = last $ 0 : Trie.lookupPath ks t
-    return (n <= m)
-
--- | Check whether a certain verbosity level is activated (exact match).
-
-{-# SPECIALIZE hasExactVerbosity :: VerboseKey -> Int -> TCM Bool #-}
-hasExactVerbosity :: HasOptions m => VerboseKey -> Int -> m Bool
-hasExactVerbosity k n =
-  (Just n ==) . Trie.lookup (wordsBy (`elem` ".:") k) <$> getVerbosity
-
--- | Run a computation if a certain verbosity level is activated (exact match).
-
-{-# SPECIALIZE whenExactVerbosity :: VerboseKey -> Int -> TCM () -> TCM () #-}
-whenExactVerbosity :: MonadTCM tcm => VerboseKey -> Int -> tcm () -> tcm ()
-whenExactVerbosity k n = whenM $ liftTCM $ hasExactVerbosity k n
-
--- | Run a computation if a certain verbosity level is activated.
---
---   Precondition: The level must be non-negative.
-{-# SPECIALIZE verboseS :: VerboseKey -> Int -> TCM () -> TCM () #-}
--- {-# SPECIALIZE verboseS :: MonadIO m => VerboseKey -> Int -> TCMT m () -> TCMT m () #-} -- RULE left-hand side too complicated to desugar
-{-# SPECIALIZE verboseS :: MonadTCM tcm => VerboseKey -> Int -> tcm () -> tcm () #-}
-verboseS :: HasOptions m => VerboseKey -> Int -> m () -> m ()
-verboseS k n action = whenM (hasVerbosity k n) action
+getLanguage :: HasOptions m => m Language
+getLanguage = do
+  opts <- pragmaOptions
+  return $
+    if not (collapseDefault (optWithoutK opts)) then WithK else
+    case optCubical opts of
+      Just variant -> Cubical variant
+      Nothing      -> WithoutK

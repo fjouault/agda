@@ -1,94 +1,117 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
-module Agda.TypeChecking.InstanceArguments where
+module Agda.TypeChecking.InstanceArguments
+  ( findInstance
+  , isInstanceConstraint
+  , shouldPostponeInstanceSearch
+  , postponeInstanceConstraints
+  ) where
 
-import Control.Applicative hiding (empty)
+import Control.Monad.Except
 import Control.Monad.Reader
-import Control.Monad.State
+import qualified Data.IntSet as IntSet
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.List as List
+import Data.Bifunctor
+import Data.Foldable (toList)
+import Data.Function (on)
+import Data.Monoid hiding ((<>))
+
+import Agda.Interaction.Options (optOverlappingInstances, optQualifiedInstances)
 
 import Agda.Syntax.Common
+import Agda.Syntax.Concrete.Name (isQualified)
+import Agda.Syntax.Position
 import Agda.Syntax.Internal as I
-import Agda.Syntax.Scope.Base (isNameInScope)
+import Agda.Syntax.Internal.MetaVars
+import Agda.Syntax.Scope.Base (isNameInScope, inverseScopeLookupName', AllowAmbiguousNames(..))
 
-import Agda.TypeChecking.Errors ()
+import Agda.TypeChecking.Errors () --instance only
 import Agda.TypeChecking.Implicit (implicitArgs)
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Records
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
-import Agda.TypeChecking.Free
 
 import {-# SOURCE #-} Agda.TypeChecking.Constraints
-import {-# SOURCE #-} Agda.TypeChecking.MetaVars
 import {-# SOURCE #-} Agda.TypeChecking.Conversion
 
-import Agda.Utils.Except ( MonadError(catchError, throwError) )
+import qualified Agda.Benchmarking as Benchmark
+import Agda.TypeChecking.Monad.Benchmark (billTo)
+
+import Agda.Utils.Either
 import Agda.Utils.Lens
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.Functor
 import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Null (empty)
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Compute a list of instance candidates.
---   'Nothing' if type is a meta, error if type is not eligible
---   for instance search.
-initialIFSCandidates :: Type -> TCM (Maybe [Candidate])
-initialIFSCandidates t = do
-  otn <- getOutputTypeName t
+--   'Nothing' if target type or any context type is a meta, error if
+--   type is not eligible for instance search.
+initialInstanceCandidates :: Type -> TCM (Either Blocker [Candidate])
+initialInstanceCandidates t = do
+  (_ , otn) <- getOutputTypeName t
   case otn of
     NoOutputTypeName -> typeError $ GenericError $
       "Instance search can only be used to find elements in a named type"
-    OutputTypeNameNotYetKnown -> return Nothing
-    OutputTypeVar    -> Just <$> getContextVars
-    OutputTypeName n -> Just <$> do (++) <$> getContextVars <*> getScopeDefs n
+    OutputTypeNameNotYetKnown b -> do
+      reportSDoc "tc.instance.cands" 30 $ "Instance type is not yet known. "
+      return (Left b)
+    OutputTypeVisiblePi -> typeError $ GenericError $
+      "Instance search cannot be used to find elements in an explicit function type"
+    OutputTypeVar    -> do
+      reportSDoc "tc.instance.cands" 30 $ "Instance type is a variable. "
+      runBlocked getContextVars
+    OutputTypeName n -> do
+      reportSDoc "tc.instance.cands" 30 $ "Found instance type head: " <+> prettyTCM n
+      runBlocked getContextVars >>= \case
+        Left b -> return $ Left b
+        Right ctxVars -> Right . (ctxVars ++) <$> getScopeDefs n
   where
     -- get a list of variables with their type, relative to current context
-    getContextVars :: TCM [Candidate]
+    getContextVars :: BlockT TCM [Candidate]
     getContextVars = do
       ctx <- getContext
-      reportSDoc "tc.instance.cands" 40 $ hang (text "Getting candidates from context") 2 (inTopContext $ prettyTCM ctx)
+      reportSDoc "tc.instance.cands" 40 $ hang "Getting candidates from context" 2 (inTopContext $ prettyTCM $ PrettyContext ctx)
           -- Context variables with their types lifted to live in the full context
       let varsAndRaisedTypes = [ (var i, raise (i + 1) t) | (i, t) <- zip [0..] ctx ]
-          vars = [ Candidate x t ExplicitStayExplicit (isOverlappable info)
+          vars = [ Candidate LocalCandidate x t (isOverlappable info)
                  | (x, Dom{domInfo = info, unDom = (_, t)}) <- varsAndRaisedTypes
                  , isInstance info
-                 , not (unusableRelevance info)
+                 , usableModality info
                  ]
 
       -- {{}}-fields of variables are also candidates
-      let cxtAndTypes = [ (x, t) | (x, Dom{unDom = (_, t)}) <- varsAndRaisedTypes ]
+      let cxtAndTypes = [ (LocalCandidate, x, t) | (x, Dom{unDom = (_, t)}) <- varsAndRaisedTypes ]
       fields <- concat <$> mapM instanceFields (reverse cxtAndTypes)
       reportSDoc "tc.instance.fields" 30 $
-        if null fields then text "no instance field candidates" else
-          text "instance field candidates" $$ do
+        if null fields then "no instance field candidates" else
+          "instance field candidates" $$ do
             nest 2 $ vcat
-              [ sep [ (if overlap then text "overlap" else empty) <+> prettyTCM v <+> text ":"
+              [ sep [ (if overlap then "overlap" else empty) <+> prettyTCM c <+> ":"
                     , nest 2 $ prettyTCM t
                     ]
-              | Candidate v t _ overlap <- fields
+              | c@(Candidate q v t overlap) <- fields
               ]
 
       -- get let bindings
-      env <- asks envLetBindings
-      env <- mapM (getOpen . snd) $ Map.toList env
-      let lets = [ Candidate v t ExplicitStayExplicit False
-                 | (v, Dom{domInfo = info, unDom = t}) <- env
+      env <- asksTC envLetBindings
+      env <- mapM (traverse getOpen) $ Map.toList env
+      let lets = [ Candidate LocalCandidate v t False
+                 | (_,(v, Dom{domInfo = info, unDom = t})) <- env
                  , isInstance info
-                 , not (unusableRelevance info)
+                 , usableModality info
                  ]
       return $ vars ++ fields ++ lets
 
+    etaExpand :: (MonadTCM m, PureTCM m)
+              => Bool -> Type -> m (Maybe (QName, Args))
     etaExpand etaOnce t =
       isEtaRecordType t >>= \case
         Nothing | etaOnce -> do
@@ -98,58 +121,80 @@ initialIFSCandidates t = do
               m <- currentModule
               -- Are we inside the record module? If so it's safe and desirable
               -- to eta-expand once (issue #2320).
-              if qnameToList r `List.isPrefixOf` mnameToList m
+              if qnameToList0 r `List.isPrefixOf` mnameToList m
                 then return (Just (r, vs))
                 else return Nothing
         r -> return r
 
+    instanceFields :: (CandidateKind,Term,Type) -> BlockT TCM [Candidate]
     instanceFields = instanceFields' True
-    instanceFields' etaOnce (v, t) =
-      caseMaybeM (etaExpand etaOnce =<< reduce t) (return []) $ \ (r, pars) -> do
-        (tel, args) <- forceEtaExpandRecord r pars v
+
+    instanceFields' :: Bool -> (CandidateKind,Term,Type) -> BlockT TCM [Candidate]
+    instanceFields' etaOnce (q, v, t) =
+      ifBlocked t (\ m _ -> patternViolation m) $ \ _ t -> do
+      caseMaybeM (etaExpand etaOnce t) (return []) $ \ (r, pars) -> do
+        (tel, args) <- lift $ forceEtaExpandRecord r pars v
         let types = map unDom $ applySubst (parallelS $ reverse $ map unArg args) (flattenTel tel)
         fmap concat $ forM (zip args types) $ \ (arg, t) ->
-          ([ Candidate (unArg arg) t ExplicitStayExplicit (isOverlappable arg)
+          ([ Candidate LocalCandidate (unArg arg) t (isOverlappable arg)
            | isInstance arg ] ++) <$>
-          instanceFields' False (unArg arg, t)
+          instanceFields' False (LocalCandidate, unArg arg, t)
 
     getScopeDefs :: QName -> TCM [Candidate]
     getScopeDefs n = do
       instanceDefs <- getInstanceDefs
-      rel          <- asks envRelevance
+      rel          <- asksTC getRelevance
       let qs = maybe [] Set.toList $ Map.lookup n instanceDefs
       catMaybes <$> mapM (candidate rel) qs
 
     candidate :: Relevance -> QName -> TCM (Maybe Candidate)
     candidate rel q = ifNotM (isNameInScope q <$> getScope) (return Nothing) $ do
+      -- Jesper, 2020-03-16: When using --no-qualified-instances,
+      -- filter out instances that are only in scope under a qualified
+      -- name.
+      filterQualified $ do
       -- Andreas, 2012-07-07:
       -- we try to get the info for q
       -- while opening a module, q may be in scope but not in the signature
       -- in this case, we just ignore q (issue 674)
       flip catchError handle $ do
         def <- getConstInfo q
-        if not (defRelevance def `moreRelevant` rel) then return Nothing else do
+        if not (getRelevance def `moreRelevant` rel) then return Nothing else do
           -- Andreas, 2017-01-14: instantiateDef is a bit of an overkill
           -- if we anyway get the freeVarsToApply
           -- WAS: t <- defType <$> instantiateDef def
           args <- freeVarsToApply q
           let t = defType def `piApply` args
+              rel = getRelevance $ defArgInfo def
           let v = case theDef def of
                -- drop parameters if it's a projection function...
-               Function{ funProjection = Just p } -> projDropParsApply p ProjSystem args
+               Function{ funProjection = Just p } -> projDropParsApply p ProjSystem rel args
                -- Andreas, 2014-08-19: constructors cannot be declared as
                -- instances (at least as of now).
                -- I do not understand why the Constructor case is not impossible.
                -- Ulf, 2014-08-20: constructors are always instances.
                Constructor{ conSrcCon = c }       -> Con c ConOSystem []
                _                                  -> Def q $ map Apply args
-          return $ Just $ Candidate v t ExplicitToInstance False
+          return $ Just $ Candidate (GlobalCandidate q) v t False
       where
         -- unbound constant throws an internal error
-        handle (TypeError _ (Closure {clValue = InternalError _})) = return Nothing
-        handle err                                                 = throwError err
+        handle (TypeError _ _ (Closure {clValue = InternalError _})) = return Nothing
+        handle err                                                   = throwError err
 
--- | @findInScope m (v,a)s@ tries to instantiate on of the types @a@s
+        filterQualified :: TCM (Maybe Candidate) -> TCM (Maybe Candidate)
+        filterQualified m = ifM (optQualifiedInstances <$> pragmaOptions) m $ do
+          qc <- inverseScopeLookupName' AmbiguousAnything q <$> getScope
+          let isQual = maybe True isQualified $ listToMaybe qc
+          reportSDoc "tc.instance.qualified" 30 $
+            if isQual then
+              "dropping qualified instance" <+> prettyTCM q
+            else
+              "keeping instance" <+> prettyTCM q <+>
+              "since it is in scope as" <+> prettyTCM qc
+          if isQual then return Nothing else m
+
+
+-- | @findInstance m (v,a)s@ tries to instantiate on of the types @a@s
 --   of the candidate terms @v@s to the type @t@ of the metavariable @m@.
 --   If successful, meta @m@ is solved with the instantiation of @v@.
 --   If unsuccessful, the constraint is regenerated, with possibly reduced
@@ -157,102 +202,106 @@ initialIFSCandidates t = do
 --   The list of candidates is equal to @Nothing@ when the type of the meta
 --   wasn't known when the constraint was generated. In that case, try to find
 --   its type again.
-findInScope :: MetaId -> Maybe [Candidate] -> TCM ()
-findInScope m Nothing = do
+findInstance :: MetaId -> Maybe [Candidate] -> TCM ()
+findInstance m Nothing = do
   -- Andreas, 2015-02-07: New metas should be created with range of the
   -- current instance meta, thus, we set the range.
   mv <- lookupMeta m
   setCurrentRange mv $ do
-    reportSLn "tc.instance" 20 $ "The type of the FindInScope constraint isn't known, trying to find it again."
+    reportSLn "tc.instance" 20 $ "The type of the FindInstance constraint isn't known, trying to find it again."
     t <- instantiate =<< getMetaTypeInContext m
-    reportSLn "tc.instance" 70 $ "findInScope 1: t: " ++ prettyShow t
+    reportSLn "tc.instance" 70 $ "findInstance 1: t: " ++ prettyShow t
 
     -- Issue #2577: If the target is a function type the arguments are
     -- potential candidates, so we add them to the context to make
-    -- initialIFSCandidates pick them up.
-    TelV tel t <- telView t
-    cands <- addContext' tel $ initialIFSCandidates t
+    -- initialInstanceCandidates pick them up.
+    TelV tel t <- telViewUpTo' (-1) notVisible t
+    cands <- addContext tel $ initialInstanceCandidates t
     case cands of
-      Nothing -> do
+      Left unblock -> do
         reportSLn "tc.instance" 20 "Can't figure out target of instance goal. Postponing constraint."
-        addConstraint $ FindInScope m Nothing Nothing
-      Just {} -> findInScope m cands
+        addConstraint unblock $ FindInstance m Nothing
+      Right cs -> findInstance m (Just cs)
 
-findInScope m (Just cands) =
-  whenJustM (findInScope' m cands) $ (\ (cands, b) -> addConstraint $ FindInScope m b $ Just cands)
+findInstance m (Just cands) =                          -- Note: if no blocking meta variable this will not unblock until the end of the mutual block
+  whenJustM (findInstance' m cands) $ (\ (cands, b) -> addConstraint b $ FindInstance m $ Just cands)
 
 -- | Result says whether we need to add constraint, and if so, the set of
 --   remaining candidates and an eventual blocking metavariable.
-findInScope' :: MetaId -> [Candidate] -> TCM (Maybe ([Candidate], Maybe MetaId))
-findInScope' m cands = ifM (isFrozen m) (do
+findInstance' :: MetaId -> [Candidate] -> TCM (Maybe ([Candidate], Blocker))
+findInstance' m cands = ifM (isFrozen m) (do
     reportSLn "tc.instance" 20 "Refusing to solve frozen instance meta."
-    return (Just (cands, Nothing))) $ do
-  -- Andreas, 2013-12-28 issue 1003:
-  -- If instance meta is already solved, simply discard the constraint.
-  -- Ulf, 2016-12-06 issue 2325: But only if *fully* instantiated.
-  ifM (isFullyInstantiatedMeta m) (Nothing <$ reportSLn "tc.instance" 20 "Instance meta already solved.") $ do
-    -- Andreas, 2015-02-07: New metas should be created with range of the
-    -- current instance meta, thus, we set the range.
-    mv <- lookupMeta m
-    setCurrentRange mv $ do
+    return (Just (cands, neverUnblock))) $ do
+  ifM shouldPostponeInstanceSearch (do
+    reportSLn "tc.instance" 20 "Postponing possibly recursive instance search."
+    return $ Just (cands, neverUnblock)) $ billTo [Benchmark.Typing, Benchmark.InstanceSearch] $ do
+  -- Andreas, 2015-02-07: New metas should be created with range of the
+  -- current instance meta, thus, we set the range.
+  mv <- lookupMeta m
+  setCurrentRange mv $ do
       reportSLn "tc.instance" 15 $
-        "findInScope 2: constraint: " ++ prettyShow m ++ "; candidates left: " ++ show (length cands)
+        "findInstance 2: constraint: " ++ prettyShow m ++ "; candidates left: " ++ show (length cands)
       reportSDoc "tc.instance" 60 $ nest 2 $ vcat
-        [ sep [ (if overlap then text "overlap" else empty) <+> prettyTCM v <+> text ":"
-              , nest 2 $ prettyTCM t ] | Candidate v t _ overlap <- cands ]
-      reportSDoc "tc.instance" 70 $ text "raw" $$ do
+        [ sep [ (if overlap then "overlap" else empty) <+> prettyTCM c <+> ":"
+              , nest 2 $ prettyTCM t ] | c@(Candidate q v t overlap) <- cands ]
+      reportSDoc "tc.instance" 70 $ "raw" $$ do
        nest 2 $ vcat
-        [ sep [ (if overlap then text "overlap" else empty) <+> pretty v <+> text ":"
-              , nest 2 $ pretty t ] | Candidate v t _ overlap <- cands ]
-      t <- normalise =<< getMetaTypeInContext m
-      reportSLn "tc.instance" 70 $ "findInScope 2: t: " ++ prettyShow t
+        [ sep [ (if overlap then "overlap" else empty) <+> prettyTCM c <+> ":"
+              , nest 2 $ pretty t ] | c@(Candidate q v t overlap) <- cands ]
+      t <- getMetaTypeInContext m
+      reportSLn "tc.instance" 70 $ "findInstance 2: t: " ++ prettyShow t
       insidePi t $ \ t -> do
-      reportSDoc "tc.instance" 15 $ text "findInScope 3: t =" <+> prettyTCM t
-      reportSLn "tc.instance" 70 $ "findInScope 3: t: " ++ prettyShow t
+      reportSDoc "tc.instance" 15 $ "findInstance 3: t =" <+> prettyTCM t
+      reportSLn "tc.instance" 70 $ "findInstance 3: t: " ++ prettyShow t
 
-      -- If one of the arguments of the typeclass is a meta which is not rigidly
-      -- constrained, then don’t do anything because it may loop.
-      let abortNonRigid m = do
-            reportSLn "tc.instance" 15 $
-              "aborting due to non-rigidly constrained meta " ++ show m
-            return $ Just (cands, Just m)
-      ifJustM (areThereNonRigidMetaArguments (unEl t)) abortNonRigid $ {-else-} do
+      mcands <-
+        -- Temporarily remove other instance constraints to avoid
+        -- redundant solution attempts
+        holdConstraints (const isInstanceProblemConstraint) $
+        checkCandidates m t cands
 
-        mcands <- checkCandidates m t cands
-        debugConstraints
-        case mcands of
+      debugConstraints
+      case mcands of
 
-          Just [] -> do
-            reportSDoc "tc.instance" 15 $
-              text "findInScope 5: not a single candidate found..."
-            typeError $ IFSNoCandidateInScope t
+        Just ([(_, err)], []) -> do
+          reportSDoc "tc.instance" 15 $
+            "findInstance 5: the only viable candidate failed..."
+          throwError err
+        Just (errs, []) -> do
+          if null errs then reportSDoc "tc.instance" 15 $ "findInstance 5: no viable candidate found..."
+                       else reportSDoc "tc.instance" 15 $ "findInstance 5: all viable candidates failed..."
+          -- #3676: Sort the candidates based on the size of the range for the errors and
+          --        set the range of the full error to the range of the most precise candidate
+          --        error.
+          let sortedErrs = List.sortBy (compare `on` precision) errs
+                where precision (_, err) = maybe infinity iLength $ rangeToInterval $ getRange err
+                      infinity = 1000000000
+          setCurrentRange (take 1 $ map snd sortedErrs) $
+            typeError $ InstanceNoCandidate t [ (candidateTerm c, err) | (c, err) <- sortedErrs ]
 
-          Just [Candidate term t' _ _] -> do
-            reportSDoc "tc.instance" 15 $ vcat
-              [ text "findInScope 5: solved by instance search using the only candidate"
-              , nest 2 $ prettyTCM term
-              , text "of type " <+> prettyTCM t'
-              , text "for type" <+> prettyTCM t
-              ]
+        Just (_, [c@(Candidate q term t' _)]) -> do
+          reportSDoc "tc.instance" 15 $ vcat
+            [ "findInstance 5: solved by instance search using the only candidate"
+            , nest 2 $ prettyTCM c <+> "=" <+> prettyTCM term
+            , "of type " <+> prettyTCM t'
+            , "for type" <+> prettyTCM t
+            ]
 
-            -- If we actually solved the constraints we should wake up any held
-            -- instance constraints, to make sure we don't forget about them.
-            wakeConstraints (return . const True)
-            solveAwakeConstraints' False
-            return Nothing  -- We’re done
+          -- If we actually solved the constraints we should wake up any held
+          -- instance constraints, to make sure we don't forget about them.
+          wakeupInstanceConstraints
+          return Nothing  -- We’re done
 
-          _ -> do
-            let cs = fromMaybe cands mcands -- keep the current candidates if Nothing
-            reportSDoc "tc.instance" 15 $
-              text ("findInScope 5: refined candidates: ") <+>
-              prettyTCM (List.map candidateTerm cs)
-            return (Just (cs, Nothing))
+        _ -> do
+          let cs = maybe cands snd mcands -- keep the current candidates if Nothing
+          reportSDoc "tc.instance" 15 $
+            text ("findInstance 5: refined candidates: ") <+>
+            prettyTCM (List.map candidateTerm cs)
+          return (Just (cs, neverUnblock))
 
--- | Precondition: type is spine reduced and ends in a Def or a Var.
 insidePi :: Type -> (Type -> TCM a) -> TCM a
-insidePi t ret =
-  case ignoreSharing $ unEl t of
-    Pi a b     -> addContext' (absName b, a) $ insidePi (absBody b) ret
+insidePi t ret = reduce (unEl t) >>= \case
+    Pi a b     -> addContext (absName b, a) $ insidePi (absBody b) ret
     Def{}      -> ret t
     Var{}      -> ret t
     Sort{}     -> __IMPOSSIBLE__
@@ -261,229 +310,143 @@ insidePi t ret =
     Lit{}      -> __IMPOSSIBLE__
     Level{}    -> __IMPOSSIBLE__
     MetaV{}    -> __IMPOSSIBLE__
-    Shared{}   -> __IMPOSSIBLE__
     DontCare{} -> __IMPOSSIBLE__
-
--- | A meta _M is rigidly constrained if there is a constraint _M us == D vs,
--- for inert D. Such metas can safely be instantiated by recursive instance
--- search, since the constraint limits the solution space.
-rigidlyConstrainedMetas :: TCM [MetaId]
-rigidlyConstrainedMetas = do
-  cs <- (++) <$> use stSleepingConstraints <*> use stAwakeConstraints
-  catMaybes <$> mapM rigidMetas cs
-  where
-    isRigid v = do
-      bv <- reduceB v
-      case ignoreSharing <$> bv of
-        Blocked{}    -> return False
-        NotBlocked _ v -> case v of
-          MetaV{}    -> return False
-          Def f _    -> return True
-          Con{}      -> return True
-          Lit{}      -> return True
-          Var{}      -> return True
-          Sort{}     -> return True
-          Pi{}       -> return True
-          Level{}    -> return False
-          DontCare{} -> return False
-          Lam{}      -> __IMPOSSIBLE__
-          Shared{}   -> __IMPOSSIBLE__
-    rigidMetas c =
-      case clValue $ theConstraint c of
-        ValueCmp _ _ u v ->
-          case (ignoreSharing u, ignoreSharing v) of
-            (MetaV m us, _) | isJust (allApplyElims us) -> ifM (isRigid v) (return $ Just m) (return Nothing)
-            (_, MetaV m vs) | isJust (allApplyElims vs) -> ifM (isRigid u) (return $ Just m) (return Nothing)
-            _              -> return Nothing
-        ValueCmpOnFace{} -> return Nothing -- applying the face could remove the meta
-        ElimCmp{}     -> return Nothing
-        TypeCmp{}     -> return Nothing
-        TelCmp{}      -> return Nothing
-        SortCmp{}     -> return Nothing
-        LevelCmp{}    -> return Nothing
-        UnBlock{}     -> return Nothing
-        Guarded{}     -> return Nothing  -- don't look inside Guarded, since the inner constraint might not fire
-        IsEmpty{}     -> return Nothing
-        CheckSizeLtSat{} -> return Nothing
-        FindInScope{} -> return Nothing
-
-isRigid :: MetaId -> TCM Bool
-isRigid i = do
-  rigid <- rigidlyConstrainedMetas
-  return (elem i rigid)
-
--- | Returns True if one of the arguments of @t@ is a meta which isn’t rigidly
---   constrained. Note that level metas are never considered rigidly constrained
---   (#1865).
-areThereNonRigidMetaArguments :: Term -> TCM (Maybe MetaId)
-areThereNonRigidMetaArguments t = case ignoreSharing t of
-    Def n args -> do
-      TelV tel _ <- telView . defType =<< getConstInfo n
-      let varOccs EmptyTel           = []
-          varOccs (ExtendTel a btel)
-            | getRelevance a == Irrelevant = WeaklyRigid : varOccs tel  -- #2171: ignore irrelevant arguments
-            | otherwise                    = occurrence 0 tel : varOccs tel
-            where tel = unAbs btel
-          rigid StronglyRigid = True
-          rigid Unguarded     = True
-          rigid WeaklyRigid   = True
-          rigid _             = False
-      reportSDoc "tc.instance.rigid" 70 $ text "class args:" <+> prettyTCM tel $$
-                                          nest 2 (text $ "used: " ++ show (varOccs tel))
-      areThereNonRigidMetaArgs [ arg | (o, arg) <- zip (varOccs tel) args, not $ rigid o ]
-    Var n args -> return Nothing  -- TODO check what’s the right thing to do, doing the same
-                                  -- thing as above makes some examples fail
-    Sort{}   -> __IMPOSSIBLE__
-    Con{}    -> __IMPOSSIBLE__
-    Lam{}    -> __IMPOSSIBLE__
-    Lit{}    -> __IMPOSSIBLE__
-    Level{}  -> __IMPOSSIBLE__
-    MetaV{}  -> __IMPOSSIBLE__
-    Pi{}     -> __IMPOSSIBLE__
-    Shared{} -> __IMPOSSIBLE__
-    DontCare{} -> __IMPOSSIBLE__
-  where
-    areThereNonRigidMetaArgs :: Elims -> TCM (Maybe MetaId)
-    areThereNonRigidMetaArgs []             = return Nothing
-    areThereNonRigidMetaArgs (Proj{}  : xs) = areThereNonRigidMetaArgs xs
-    areThereNonRigidMetaArgs (Apply x : xs) = do
-      ifJustM (isNonRigidMeta $ unArg x) (return . Just) (areThereNonRigidMetaArgs xs)
-    areThereNonRigidMetaArgs (IApply x y v : xs) = areThereNonRigidMetaArgs $ map (Apply . defaultArg) [x, y, v] ++ xs -- TODO Andrea HACK
-
-
-    isNonRigidMeta :: Term -> TCM (Maybe MetaId)
-    isNonRigidMeta v =
-      case ignoreSharing v of
-        Def _ es  -> areThereNonRigidMetaArgs es
-        Var _ es  -> areThereNonRigidMetaArgs es
-        Con _ _ vs-> areThereNonRigidMetaArgs (map Apply vs)
-        MetaV i _ -> ifM (isRigid i) (return Nothing) $ do
-          -- Ignore unconstrained level and size metas (#1865)
-          mlvl <- getBuiltinDefName builtinLevel
-          (msz, mszlt) <- getBuiltinSize
-          let ok = catMaybes [ mlvl, msz ]  -- , mszlt ]  -- ?! Andreas, 2016-12-22
-            -- @Ulf: are SIZELT metas excluded on purpose?
-            -- How to you know the level/size meta is unconstrained?
-          o <- getOutputTypeName . jMetaType . mvJudgement =<< lookupMeta i
-          case o of
-            OutputTypeName l | elem l ok -> return Nothing
-            _ -> return $ Just i
-        Lam _ t   -> isNonRigidMeta (unAbs t)
-        _         -> return Nothing
+    Dummy s _  -> __IMPOSSIBLE_VERBOSE__ s
 
 -- | Apply the computation to every argument in turn by reseting the state every
 --   time. Return the list of the arguments giving the result True.
 --
 --   If the resulting list contains exactly one element, then the state is the
 --   same as the one obtained after running the corresponding computation. In
---   all the other cases, the state is reseted.
-filterResetingState :: MetaId -> [Candidate] -> (Candidate -> TCM YesNoMaybe) -> TCM [Candidate]
-filterResetingState m cands f = disableDestructiveUpdate $ do
+--   all the other cases, the state is reset.
+--
+--   Also returns the candidates that pass type checking but fails constraints,
+--   so that the error messages can be reported if there are no successful
+--   candidates.
+filterResetingState :: MetaId -> [Candidate] -> (Candidate -> TCM YesNoMaybe) -> TCM ([(Candidate, TCErr)], [Candidate])
+filterResetingState m cands f = do
   ctxArgs  <- getContextArgs
   let ctxElims = map Apply ctxArgs
       tryC c = do
         ok <- f c
         v  <- instantiateFull (MetaV m ctxElims)
-        a  <- instantiateFull =<< (`piApplyM` ctxArgs) =<< getMetaType m
-        return (ok, v, a)
+        return (ok, v)
   result <- mapM (\c -> do bs <- localTCStateSaving (tryC c); return (c, bs)) cands
 
   -- Check that there aren't any hard failures
-  case [ err | (_, ((HellNo err, _, _), _)) <- result ] of
+  case [ err | (_, ((HellNo err, _), _)) <- result ] of
     err : _ -> throwError err
     []      -> return ()
 
-  let result' = [ (c, v, a, s) | (c, ((r, v, a), s)) <- result, not (isNo r) ]
-      noMaybes = null [ Maybe | (_, ((Maybe, _, _), _)) <- result ]
-            -- It's not safe to compare maybes for equality because they might
-            -- not have instantiated at all.
-  result <- if noMaybes then dropSameCandidates m result' else return result'
-  case result of
-    [(c, _, _, s)] -> [c] <$ put s
-    _              -> return [ c | (c, _, _, _) <- result ]
+  -- c : Candidate
+  -- r : YesNoMaybe
+  -- v : Term         (fully instantiated)
+  -- a : Type         (fully instantiated)
+  -- s : TCState
+  let result' = [ (c, v, s) | (c, ((r, v), s)) <- result, not (isNo r) ]
+  result'' <- dropSameCandidates m result'
+  case result'' of
+    [(c, _, s)] -> ([], [c]) <$ putTC s
+    _           -> do
+      let bad  = [ (c, err) | (c, ((NoBecause err, _), _)) <- result ]
+          good = [ c | (c, _, _) <- result'' ]
+      return (bad, good)
 
 -- Drop all candidates which are judgmentally equal to the first one.
 -- This is sufficient to reduce the list to a singleton should all be equal.
-dropSameCandidates :: MetaId -> [(Candidate, Term, Type, a)] -> TCM [(Candidate, Term, Type, a)]
+dropSameCandidates :: MetaId -> [(Candidate, Term, a)] -> TCM [(Candidate, Term, a)]
 dropSameCandidates m cands0 = verboseBracket "tc.instance" 30 "dropSameCandidates" $ do
-  metas <- Set.fromList . Map.keys <$> getMetaStore
-  let freshMetas x = not $ Set.null $ Set.difference (Set.fromList $ allMetas x) metas
+  metas <- getMetaVariableSet
+  -- Does `it` have any metas in the initial meta variable store?
+  let freshMetas = getAny . allMetas (Any . (`IntSet.notMember` metas) . metaId)
 
   -- Take overlappable candidates into account
   let cands =
-        case List.partition (\ (c, _, _, _) -> candidateOverlappable c) cands0 of
+        case List.partition (\ (c, _, _) -> candidateOverlappable c) cands0 of
           (cand : _, []) -> [cand]  -- only overlappable candidates: pick the first one
           _              -> cands0  -- otherwise require equality
 
   reportSDoc "tc.instance" 50 $ vcat
-    [ text "valid candidates:"
-    , nest 2 $ vcat [ if freshMetas (v, a) then text "(redacted)" else
-                      sep [ prettyTCM v <+> text ":", nest 2 $ prettyTCM a ]
-                    | (_, v, a, _) <- cands ] ]
+    [ "valid candidates:"
+    , nest 2 $ vcat [ if freshMetas v then "(redacted)" else
+                      sep [ prettyTCM v ]
+                    | (_, v, _) <- cands ] ]
   rel <- getMetaRelevance <$> lookupMeta m
   case cands of
     []            -> return cands
     cvd : _ | isIrrelevant rel -> do
-      reportSLn "tc.instance" 30 "Meta is irrelevant so any candidate will do."
+      reportSLn "tc.instance" 30 "dropSameCandidates: Meta is irrelevant so any candidate will do."
       return [cvd]
-    cvd@(_, v, a, _) : vas -> do
-        if freshMetas (v, a)
-          then return (cvd : vas)
-          else (cvd :) <$> dropWhileM equal vas
+    (_, MetaV m' _, _) : _ | m == m' -> do  -- We didn't instantiate, so can't compare
+      reportSLn "tc.instance" 30 "dropSameCandidates: Meta was not instantiated so we don't filter equal candidates yet"
+      return cands
+    cvd@(_, v, _) : vas
+      | freshMetas v -> do
+          reportSLn "tc.instance" 30 "dropSameCandidates: Solution of instance meta has fresh metas so we don't filter equal candidates yet"
+          return (cvd : vas)
+      | otherwise -> (cvd :) <$> dropWhileM equal vas
       where
-        equal (_, v', a', _)
-            | freshMetas (v', a') = return False  -- If there are fresh metas we can't compare
-            | otherwise           =
-          verboseBracket "tc.instance" 30 "comparingCandidates" $ do
-          reportSDoc "tc.instance" 30 $ sep [ prettyTCM v <+> text "==", nest 2 $ prettyTCM v' ]
-          localTCState $ dontAssignMetas $ ifNoConstraints_ (equalType a a' >> equalTerm a v v')
+        equal :: (Candidate, Term, a) -> TCM Bool
+        equal (_, v', _)
+            | freshMetas v' = return False  -- If there are fresh metas we can't compare
+            | otherwise     =
+          verboseBracket "tc.instance" 30 "dropSameCandidates: " $ do
+          reportSDoc "tc.instance" 30 $ sep [ prettyTCM v <+> "==", nest 2 $ prettyTCM v' ]
+          a <- uncurry piApplyM =<< ((,) <$> getMetaType m <*> getContextArgs)
+          localTCState $ dontAssignMetas $ ifNoConstraints_ (equalTerm a v v')
                              {- then -} (return True)
                              {- else -} (\ _ -> return False)
                              `catchError` (\ _ -> return False)
 
-data YesNoMaybe = Yes | No | Maybe | HellNo TCErr
+data YesNoMaybe = Yes | No | NoBecause TCErr | Maybe | HellNo TCErr
   deriving (Show)
 
 isNo :: YesNoMaybe -> Bool
-isNo No = True
-isNo _  = False
+isNo No          = True
+isNo NoBecause{} = True
+isNo HellNo{}    = True
+isNo _           = False
 
 -- | Given a meta @m@ of type @t@ and a list of candidates @cands@,
--- @checkCandidates m t cands@ returns a refined list of valid candidates.
-checkCandidates :: MetaId -> Type -> [Candidate] -> TCM (Maybe [Candidate])
-checkCandidates m t cands = disableDestructiveUpdate $
+-- @checkCandidates m t cands@ returns a refined list of valid candidates and
+-- candidates that failed some constraints.
+checkCandidates :: MetaId -> Type -> [Candidate] -> TCM (Maybe ([(Candidate, TCErr)], [Candidate]))
+checkCandidates m t cands =
   verboseBracket "tc.instance.candidates" 20 ("checkCandidates " ++ prettyShow m) $
-  ifM (anyMetaTypes cands) (return Nothing) $
-  holdConstraints (\ _ -> isIFSConstraint . clValue . theConstraint) $ Just <$> do
-    reportSDoc "tc.instance.candidates" 20 $ nest 2 $ text "target:" <+> prettyTCM t
+  ifM (anyMetaTypes cands) (return Nothing) $ Just <$> do
+    reportSDoc "tc.instance.candidates" 20 $ nest 2 $ "target:" <+> prettyTCM t
     reportSDoc "tc.instance.candidates" 20 $ nest 2 $ vcat
-      [ text "candidates"
-      , vcat [ text "-" <+> (if overlap then text "overlap" else empty) <+> prettyTCM v <+> text ":" <+> prettyTCM t
-             | Candidate v t _ overlap <- cands ] ]
+      [ "candidates"
+      , vcat [ "-" <+> (if overlap then "overlap" else empty) <+> prettyTCM c <+> ":" <+> prettyTCM t
+             | c@(Candidate q v t overlap) <- cands ] ]
     cands' <- filterResetingState m cands (checkCandidateForMeta m t)
     reportSDoc "tc.instance.candidates" 20 $ nest 2 $ vcat
-      [ text "valid candidates"
-      , vcat [ text "-" <+> (if overlap then text "overlap" else empty) <+> prettyTCM v <+> text ":" <+> prettyTCM t
-             | Candidate v t _ overlap <- cands' ] ]
+      [ "valid candidates"
+      , vcat [ "-" <+> (if overlap then "overlap" else empty) <+> prettyTCM c <+> ":" <+> prettyTCM t
+             | c@(Candidate q v t overlap) <- snd cands' ] ]
+    reportSDoc "tc.instance.candidates" 60 $ nest 2 $ vcat
+      [ "valid candidates"
+      , vcat [ "-" <+> (if overlap then "overlap" else empty) <+> prettyTCM v <+> ":" <+> prettyTCM t
+             | c@(Candidate q v t overlap) <- snd cands' ] ]
     return cands'
   where
     anyMetaTypes :: [Candidate] -> TCM Bool
     anyMetaTypes [] = return False
-    anyMetaTypes (Candidate _ a _ _ : cands) = do
+    anyMetaTypes (Candidate _ _ a _ : cands) = do
       a <- instantiate a
-      case ignoreSharing $ unEl a of
+      case unEl a of
         MetaV{} -> return True
         _       -> anyMetaTypes cands
 
     checkDepth :: Term -> Type -> TCM YesNoMaybe -> TCM YesNoMaybe
-    checkDepth c a k = locally eInstanceDepth succ $ do
-      d        <- view eInstanceDepth
+    checkDepth c a k = locallyTC eInstanceDepth succ $ do
+      d        <- viewTC eInstanceDepth
       maxDepth <- maxInstanceSearchDepth
       when (d > maxDepth) $ typeError $ InstanceSearchDepthExhausted c a maxDepth
       k
 
     checkCandidateForMeta :: MetaId -> Type -> Candidate -> TCM YesNoMaybe
-    checkCandidateForMeta m t (Candidate term t' eti _) = checkDepth term t' $ do
+    checkCandidateForMeta m t (Candidate q term t' _) = checkDepth term t' $ do
       -- Andreas, 2015-02-07: New metas should be created with range of the
       -- current instance meta, thus, we set the range.
       mv <- lookupMeta m
@@ -493,63 +456,80 @@ checkCandidates m t cands = disableDestructiveUpdate $
           liftTCM $ runCandidateCheck $ do
             reportSLn "tc.instance" 70 $ "  t: " ++ prettyShow t ++ "\n  t':" ++ prettyShow t' ++ "\n  term: " ++ prettyShow term ++ "."
             reportSDoc "tc.instance" 20 $ vcat
-              [ text "checkCandidateForMeta"
-              , text "t    =" <+> prettyTCM t
-              , text "t'   =" <+> prettyTCM t'
-              , text "term =" <+> prettyTCM term
+              [ "checkCandidateForMeta"
+              , "t    =" <+> prettyTCM t
+              , "t'   =" <+> prettyTCM t'
+              , "term =" <+> prettyTCM term
               ]
 
             -- Apply hidden and instance arguments (recursive inst. search!).
-            (args, t'') <- implicitArgs (-1) (\h -> notVisible h || eti == ExplicitToInstance) t'
+            (args, t'') <- implicitArgs (-1) (\h -> notVisible h) t'
 
             reportSDoc "tc.instance" 20 $
-              text "instance search: checking" <+> prettyTCM t''
-              <+> text "<=" <+> prettyTCM t
+              "instance search: checking" <+> prettyTCM t''
+              <+> "<=" <+> prettyTCM t
             reportSDoc "tc.instance" 70 $ vcat
-              [ text "instance search: checking (raw)"
+              [ "instance search: checking (raw)"
               , nest 4 $ pretty t''
-              , nest 2 $ text "<="
+              , nest 2 $ "<="
               , nest 4 $ pretty t
               ]
             v <- (`applyDroppingParameters` args) =<< reduce term
             reportSDoc "tc.instance" 15 $ vcat
-              [ text "instance search: attempting"
-              , nest 2 $ prettyTCM m <+> text ":=" <+> prettyTCM v
+              [ "instance search: attempting"
+              , nest 2 $ prettyTCM m <+> ":=" <+> prettyTCM v
               ]
             reportSDoc "tc.instance" 70 $ nest 2 $
-              text "candidate v = " <+> pretty v
+              "candidate v = " <+> pretty v
             -- if constraints remain, we abort, but keep the candidate
             -- Jesper, 05-12-2014: When we abort, we should add a constraint to
             -- instantiate the meta at a later time (see issue 1377).
             ctxElims <- map Apply <$> getContextArgs
-            guardConstraint (ValueCmp CmpEq t'' (MetaV m ctxElims) v) $ leqType t'' t
+            guardConstraint (ValueCmp CmpEq (AsTermsOf t'') (MetaV m ctxElims) v) $ leqType t'' t
             -- make a pass over constraints, to detect cases where some are made
-            -- unsolvable by the assignment, but don't do this for FindInScope's
-            -- to prevent loops. We currently also ignore UnBlock constraints
-            -- to be on the safe side.
+            -- unsolvable by the assignment, but don't do this for FindInstance's
+            -- to prevent loops.
             debugConstraints
-            solveAwakeConstraints' True
 
-            verboseS "tc.instance" 15 $ do
-              sol <- instantiateFull (MetaV m ctxElims)
-              case sol of
-                MetaV m' _ | m == m' ->
-                  reportSDoc "tc.instance" 15 $
-                    sep [ text "instance search: maybe solution for" <+> prettyTCM m <> text ":"
-                        , nest 2 $ prettyTCM v ]
-                _ ->
-                  reportSDoc "tc.instance" 15 $
-                    sep [ text "instance search: found solution for" <+> prettyTCM m <> text ":"
-                        , nest 2 $ prettyTCM sol ]
+            let debugSolution = verboseS "tc.instance" 15 $ do
+                  sol <- instantiateFull (MetaV m ctxElims)
+                  case sol of
+                    MetaV m' _ | m == m' ->
+                      reportSDoc "tc.instance" 15 $
+                        sep [ ("instance search: maybe solution for" <+> prettyTCM m) <> ":"
+                            , nest 2 $ prettyTCM v ]
+                    _ ->
+                      reportSDoc "tc.instance" 15 $
+                        sep [ ("instance search: found solution for" <+> prettyTCM m) <> ":"
+                            , nest 2 $ prettyTCM sol ]
+
+            do solveAwakeConstraints' True
+               Yes <$ debugSolution
+              `catchError` (return . NoBecause)
+
         where
           runCandidateCheck check =
             flip catchError handle $
-            ifNoConstraints_ check
-              (return Yes)
-              (\ _ -> Maybe <$ reportSLn "tc.instance" 50 "assignment inconclusive")
+            nowConsideringInstance $
+            ifNoConstraints check
+              (\ r -> case r of
+                  Yes           -> r <$ debugSuccess
+                  NoBecause why -> r <$ debugConstraintFail why
+                  _             -> __IMPOSSIBLE__
+              )
+              (\ _ r -> case r of
+                  Yes           -> Maybe <$ debugInconclusive
+                  NoBecause why -> r <$ debugConstraintFail why
+                  _             -> __IMPOSSIBLE__
+              )
+
+          debugSuccess            = reportSLn "tc.instance" 50 "assignment successful" :: TCM ()
+          debugInconclusive       = reportSLn "tc.instance" 50 "assignment inconclusive" :: TCM ()
+          debugConstraintFail why = reportSDoc "tc.instance" 50 $ "candidate failed constraints:" <+> prettyTCM why
+          debugTypeFail err       = reportSDoc "tc.instance" 50 $ "candidate failed type check:" <+> prettyTCM err
 
           hardFailure :: TCErr -> Bool
-          hardFailure (TypeError _ err) =
+          hardFailure (TypeError _ _ err) =
             case clValue err of
               InstanceSearchDepthExhausted{} -> True
               _                              -> False
@@ -558,15 +538,33 @@ checkCandidates m t cands = disableDestructiveUpdate $
           handle :: TCErr -> TCM YesNoMaybe
           handle err
             | hardFailure err = return $ HellNo err
-            | otherwise       = do
-              reportSDoc "tc.instance" 50 $
-                text "assignment failed:" <+> prettyTCM err
-              return No
+            | otherwise       = No <$ debugTypeFail err
 
-isIFSConstraint :: Constraint -> Bool
-isIFSConstraint FindInScope{} = True
-isIFSConstraint UnBlock{}     = True -- otherwise test/fail/Issue723 loops
-isIFSConstraint _             = False
+isInstanceConstraint :: Constraint -> Bool
+isInstanceConstraint FindInstance{} = True
+isInstanceConstraint _              = False
+
+shouldPostponeInstanceSearch :: (ReadTCState m, HasOptions m) => m Bool
+shouldPostponeInstanceSearch =
+  and2M ((^. stConsideringInstance) <$> getTCState)
+        (not . optOverlappingInstances <$> pragmaOptions)
+  `or2M` ((^. stPostponeInstanceSearch) <$> getTCState)
+
+nowConsideringInstance :: (ReadTCState m) => m a -> m a
+nowConsideringInstance = locallyTCState stConsideringInstance $ const True
+
+isInstanceProblemConstraint :: ProblemConstraint -> Bool
+isInstanceProblemConstraint = isInstanceConstraint . clValue . theConstraint
+
+wakeupInstanceConstraints :: TCM ()
+wakeupInstanceConstraints =
+  unlessM shouldPostponeInstanceSearch $ do
+    wakeConstraints (wakeUpWhen_ isInstanceProblemConstraint)
+    solveSomeAwakeConstraints isInstanceProblemConstraint False
+
+postponeInstanceConstraints :: TCM a -> TCM a
+postponeInstanceConstraints m =
+  locallyTCState stPostponeInstanceSearch (const True) m <* wakeupInstanceConstraints
 
 -- | To preserve the invariant that a constructor is not applied to its
 --   parameter arguments, we explicitly check whether function term
@@ -577,11 +575,11 @@ isIFSConstraint _             = False
 applyDroppingParameters :: Term -> Args -> TCM Term
 applyDroppingParameters t vs = do
   let fallback = return $ t `apply` vs
-  case ignoreSharing t of
+  case t of
     Con c ci [] -> do
       def <- theDef <$> getConInfo c
       case def of
-        Constructor {conPars = n} -> return $ Con c ci (drop n vs)
+        Constructor {conPars = n} -> return $ Con c ci (map Apply $ drop n vs)
         _ -> __IMPOSSIBLE__
     Def f [] -> do
       mp <- isProjection f

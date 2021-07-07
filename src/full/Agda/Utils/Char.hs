@@ -1,53 +1,36 @@
+
+-- |
+-- Agda strings uses Data.Text [1], which can only represent unicode scalar values [2], excluding
+-- the surrogate code points [3] (@U+D800..U+DFFF@). To allow @primStringFromList@ to be injective
+-- we make sure character values also exclude surrogate code points, mapping them to the replacement
+-- character @U+FFFD@.
+--
+-- See #4999 for more information.
+--
+-- [1] https://hackage.haskell.org/package/text-1.2.4.0/docs/Data-Text.html#g:2
+-- [2] https://www.unicode.org/glossary/#unicode_scalar_value
+-- [3] https://www.unicode.org/glossary/#surrogate_code_point
+
 module Agda.Utils.Char where
 
 import Data.Char
 
--- | Convert a character in @'0'..'9'@ into the corresponding digit @0..9@.
+-- | The unicode replacement character � .
+replacementChar :: Char
+replacementChar = '\xFFFD'
 
-decDigit :: Char -> Int
-decDigit c = ord c - ord '0'
+-- | Is a character a surrogate code point.
+isSurrogateCodePoint :: Char -> Bool
+isSurrogateCodePoint c = generalCategory c == Surrogate
 
--- | Convert a character in @'0'..'9','A'..'F','a'..'f'@
---   into the corresponding digit @0..15@.
+-- | Map surrogate code points to the unicode replacement character.
+replaceSurrogateCodePoint :: Char -> Char
+replaceSurrogateCodePoint c
+  | isSurrogateCodePoint c = replacementChar
+  | otherwise              = c
 
-hexDigit :: Char -> Int
-hexDigit c | isDigit c  = decDigit c
-           | otherwise  = ord (toLower c) - ord 'a' + 10
+-- | Total function to convert an integer to a character. Maps surrogate code points
+--   to the replacement character @U+FFFD@.
+integerToChar :: Integer -> Char
+integerToChar = replaceSurrogateCodePoint . toEnum . fromIntegral . (`mod` 0x110000)
 
--- | Convert a character in @'0'..'7'@ into the corresponding digit @0..7@.
-
-octDigit :: Char -> Int
-octDigit = decDigit
-
-------------------------------------------------------------------------
--- * Unicode exploration
-------------------------------------------------------------------------
-
--- | Unicode characters are divided into letters, numbers, marks,
--- punctuation, symbols, separators (including spaces) and others
--- (including control characters).
---
--- These are the tests that 'Data.Char' offers:
-data UnicodeTest
-  = IsControl | IsSpace
-  | IsLower | IsUpper | IsAlpha | IsAlphaNum | IsPrint
-  | IsDigit | IsOctDigit | IsHexDigit
-  | IsLetter | IsMark | IsNumber | IsPunctuation | IsSymbol | IsSeparator
-  deriving (Eq, Ord, Show)
-
--- | Test names paired with their implementation.
-unicodeTests :: [(UnicodeTest, Char -> Bool)]
-unicodeTests =
-  [ (IsControl, isControl), (IsSpace, isSpace)
-  , (IsLower, isLower), (IsUpper, isUpper), (IsAlpha, isAlpha)
-  , (IsAlphaNum, isAlphaNum)
-  , (IsPrint, isPrint)
-  , (IsDigit, isDigit), (IsOctDigit, isOctDigit), (IsHexDigit, isHexDigit)
-  , (IsLetter, isLetter), (IsMark, isMark)
-  , (IsNumber, isNumber), (IsPunctuation, isPunctuation), (IsSymbol, isSymbol)
-  , (IsSeparator, isSeparator)
-  ]
-
--- | Find out which tests a character satisfies.
-testChar :: Char -> [UnicodeTest]
-testChar c = map fst $ filter (($ c) . snd) unicodeTests

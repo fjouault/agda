@@ -1,25 +1,26 @@
 module Issue784.Values where
 
 open import Data.Bool using (Bool; true; false; not)
-open import Data.String public using (String; _≟_)
+open import Data.String public using (String)
+open import Data.String.Properties public using (_≟_)
 
 open import Function public
-open import Data.List using (List; []; _∷_; _++_; [_]; filter) renaming (map to mapL)
-open import Data.List.Any public using (Any; here; there) renaming (map to mapA; any to anyA)
+open import Data.List using (List; []; _∷_; _++_; [_]; boolFilter) renaming (map to mapL)
+open import Data.List.Relation.Unary.Any public using (Any; here; there) renaming (map to mapA; any to anyA)
 open import Data.Product public using (Σ; Σ-syntax; proj₁; proj₂; _,_; _×_) renaming (map to mapΣ)
 open import Data.Unit public using (⊤)
 open import Data.Unit.NonEta public using (Unit; unit)
 open import Data.Empty public using (⊥; ⊥-elim)
-open import Relation.Binary.Core public
-open import Relation.Nullary public
+open import Relation.Binary.Core hiding (_⇔_) public
+open import Relation.Nullary hiding (Irrelevant) public
 import Level
 
 open import Relation.Binary.PropositionalEquality public hiding ([_]) renaming (cong to ≡-cong; cong₂ to ≡-cong₂)
 open import Relation.Binary.PropositionalEquality.Core public renaming (sym to ≡-sym; trans to ≡-trans)
-
+{-
 ≢-sym : ∀ {ℓ} {A : Set ℓ} {x y : A} → x ≢ y → y ≢ x
 ≢-sym x≢y = x≢y ∘ ≡-sym
-
+-}
 ≡-elim : ∀ {ℓ} {X Y : Set ℓ} → X ≡ Y → X → Y
 ≡-elim refl p = p
 
@@ -99,18 +100,18 @@ _∪_ = _++_
 infixl 6 _∩_
 
 _∩_ : Names → Names → Names
-x ∩ y = filter (_∋!_ y) x
+x ∩ y = boolFilter (_∋!_ y) x
 
 infixl 6 _∖_ _∖∖_
 
 _∖_ : Names → Names → Names
-_∖_ x y = filter (not ∘ _∋!_ y) x
+_∖_ x y = boolFilter (not ∘ _∋!_ y) x
 
 _∖∖_ : ∀ {ℓ} {A : Set ℓ} → List (Named A) → Names → List (Named A)
-_∖∖_ l n = filter (not ∘ _∋!_ n ∘ proj₁) l
+_∖∖_ l n = boolFilter (not ∘ _∋!_ n ∘ proj₁) l
 
 filter-∈ : ∀ {ℓ} {A : Set ℓ} → List (Named A) → Names → List (Named A)
-filter-∈ l n = filter (_∋!_ n ∘ proj₁) l
+filter-∈ l n = boolFilter (_∋!_ n ∘ proj₁) l
 
 infixr 5 _∷_
 

@@ -1,28 +1,24 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE BangPatterns #-}
-
 -- | Lenses for 'TCState' and more.
 
 module Agda.TypeChecking.Monad.State where
 
-import Control.Arrow (first)
-import Control.Applicative
+
 import qualified Control.Exception as E
-import Control.Monad.Reader (asks)
-import Control.Monad.State (put, get, gets, modify, modify')
-import Control.Monad.Trans (liftIO)
+
+import Control.Monad.State (void)
+import Control.Monad.Trans (MonadIO, liftIO)
 
 import Data.Maybe
-import Data.Map (Map)
+
 import qualified Data.Map as Map
-import Data.Monoid
+
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Traversable (traverse)
+import qualified Data.HashMap.Strict as HMap
 
 import Agda.Benchmarking
 
--- import {-# SOURCE #-} Agda.Interaction.Response
 import Agda.Interaction.Response
   (InteractionOutputCallback, Response)
 
@@ -36,28 +32,25 @@ import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Warnings
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Debug
-import {-# SOURCE #-} Agda.TypeChecking.Monad.Options
+
+import Agda.TypeChecking.Monad.Debug (reportSDoc, reportSLn, verboseS)
 import Agda.TypeChecking.Positivity.Occurrence
 import Agda.TypeChecking.CompiledClause
 
 import Agda.Utils.Hash
-import qualified Agda.Utils.HashMap as HMap
 import Agda.Utils.Lens
 import Agda.Utils.Monad (bracket_)
-import Agda.Utils.NonemptyList
 import Agda.Utils.Pretty
 import Agda.Utils.Tuple
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | Resets the non-persistent part of the type checking state.
 
 resetState :: TCM ()
 resetState = do
-    pers <- gets stPersistentState
-    put $ initState { stPersistentState = pers }
+    pers <- getsTC stPersistentState
+    putTC $ initState { stPersistentState = pers }
 
 -- | Resets all of the type checking state.
 --
@@ -66,33 +59,53 @@ resetState = do
 resetAllState :: TCM ()
 resetAllState = do
     b <- getBenchmark
-    backends <- use stBackends
-    put $ updatePersistentState (\ s -> s { stBenchmark = b }) initState
-    stBackends .= backends
--- resetAllState = put initState
+    backends <- useTC stBackends
+    putTC $ updatePersistentState (\ s -> s { stBenchmark = b }) initState
+    stBackends `setTCLens` backends
+-- resetAllState = putTC initState
 
 -- | Restore 'TCState' after performing subcomputation.
 --
 --   In contrast to 'Agda.Utils.Monad.localState', the 'Benchmark'
 --   info from the subcomputation is saved.
 localTCState :: TCM a -> TCM a
-localTCState = disableDestructiveUpdate . bracket_ get (\ s -> do
+localTCState = bracket_ getTC (\ s -> do
    b <- getBenchmark
-   put s
+   putTC s
    modifyBenchmark $ const b)
 
 -- | Same as 'localTCState' but also returns the state in which we were just
 --   before reverting it.
 localTCStateSaving :: TCM a -> TCM (a, TCState)
 localTCStateSaving compute = do
-  oldState <- get
+  oldState <- getTC
   result <- compute
-  newState <- get
+  newState <- getTC
   do
     b <- getBenchmark
-    put oldState
+    putTC oldState
     modifyBenchmark $ const b
   return (result, newState)
+
+-- | Same as 'localTCState' but keep all warnings.
+localTCStateSavingWarnings :: TCM a -> TCM a
+localTCStateSavingWarnings compute = do
+  (result, newState) <- localTCStateSaving compute
+  modifyTC $ over stTCWarnings $ const $ newState ^. stTCWarnings
+  return result
+
+data SpeculateResult = SpeculateAbort | SpeculateCommit
+
+-- | Allow rolling back the state changes of a TCM computation.
+speculateTCState :: TCM (a, SpeculateResult) -> TCM a
+speculateTCState m = do
+  ((x, res), newState) <- localTCStateSaving m
+  case res of
+    SpeculateAbort  -> return x
+    SpeculateCommit -> x <$ putTC newState
+
+speculateTCState_ :: TCM SpeculateResult -> TCM ()
+speculateTCState_ m = void $ speculateTCState $ ((),) <$> m
 
 -- | A fresh TCM instance.
 --
@@ -104,19 +117,19 @@ localTCStateSaving compute = do
 
 freshTCM :: TCM a -> TCM (Either TCErr a)
 freshTCM m = do
-  ps <- use lensPersistentState
+  ps <- useTC lensPersistentState
   let s = set lensPersistentState ps initState
   r <- liftIO $ (Right <$> runTCM initEnv s m) `E.catch` (return . Left)
   case r of
     Right (a, s) -> do
-      lensPersistentState .= s ^. lensPersistentState
+      setTCLens lensPersistentState $ s ^. lensPersistentState
       return $ Right a
     Left err -> do
       case err of
         TypeError { tcErrState = s } ->
-          lensPersistentState .= s ^. lensPersistentState
+          setTCLens lensPersistentState $ s ^. lensPersistentState
         IOException s _ _ ->
-          lensPersistentState .= s ^. lensPersistentState
+          setTCLens lensPersistentState $ s ^. lensPersistentState
         _ -> return ()
       return $ Left err
 
@@ -133,7 +146,7 @@ updatePersistentState
 updatePersistentState f s = s { stPersistentState = f (stPersistentState s) }
 
 modifyPersistentState :: (PersistentTCState -> PersistentTCState) -> TCM ()
-modifyPersistentState = modify . updatePersistentState
+modifyPersistentState = modifyTC . updatePersistentState
 
 -- | Lens for 'stAccumStatistics'.
 
@@ -149,33 +162,35 @@ lensAccumStatistics =  lensPersistentState . lensAccumStatisticsP
 ---------------------------------------------------------------------------
 
 -- | Get the current scope.
-getScope :: TCM ScopeInfo
-getScope = use stScope
+getScope :: ReadTCState m => m ScopeInfo
+getScope = useR stScope
 
 -- | Set the current scope.
 setScope :: ScopeInfo -> TCM ()
 setScope scope = modifyScope (const scope)
 
 -- | Modify the current scope without updating the inverse maps.
-modifyScope_ :: (ScopeInfo -> ScopeInfo) -> TCM ()
-modifyScope_ f = stScope %= f
+modifyScope_ :: MonadTCState m => (ScopeInfo -> ScopeInfo) -> m ()
+modifyScope_ f = stScope `modifyTCLens` f
 
 -- | Modify the current scope.
-modifyScope :: (ScopeInfo -> ScopeInfo) -> TCM ()
+modifyScope :: MonadTCState m => (ScopeInfo -> ScopeInfo) -> m ()
 modifyScope f = modifyScope_ (recomputeInverseScopeMaps . f)
 
+-- | Get a part of the current scope.
+useScope :: ReadTCState m => Lens' a ScopeInfo -> m a
+useScope l = useR $ stScope . l
+
+-- | Run a computation in a modified scope.
+locallyScope :: ReadTCState m => Lens' a ScopeInfo -> (a -> a) -> m b -> m b
+locallyScope l = locallyTCState $ stScope . l
+
 -- | Run a computation in a local scope.
-withScope :: ScopeInfo -> TCM a -> TCM (a, ScopeInfo)
-withScope s m = do
-  s' <- getScope
-  setScope s
-  x   <- m
-  s'' <- getScope
-  setScope s'
-  return (x, s'')
+withScope :: ReadTCState m => ScopeInfo -> m a -> m (a, ScopeInfo)
+withScope s m = locallyTCState stScope (recomputeInverseScopeMaps . const s) $ (,) <$> m <*> getScope
 
 -- | Same as 'withScope', but discard the scope from the computation.
-withScope_ :: ScopeInfo -> TCM a -> TCM a
+withScope_ :: ReadTCState m => ScopeInfo -> m a -> m a
 withScope_ s m = fst <$> withScope s m
 
 -- | Discard any changes to the scope by a computation.
@@ -187,10 +202,15 @@ localScope m = do
   return x
 
 -- | Scope error.
-notInScope :: C.QName -> TCM a
-notInScope x = do
+notInScopeError :: C.QName -> TCM a
+notInScopeError x = do
   printScope "unbound" 5 ""
   typeError $ NotInScope [x]
+
+notInScopeWarning :: C.QName -> TCM ()
+notInScopeWarning x = do
+  printScope "unbound" 5 ""
+  warning $ NotInScopeW [x]
 
 -- | Debug print the scope.
 printScope :: String -> Int -> String -> TCM ()
@@ -204,29 +224,29 @@ printScope tag v s = verboseS ("scope." ++ tag) v $ do
 
 -- ** Lens for 'stSignature' and 'stImports'
 
-modifySignature :: (Signature -> Signature) -> TCM ()
-modifySignature f = stSignature %= f
+modifySignature :: MonadTCState m => (Signature -> Signature) -> m ()
+modifySignature f = stSignature `modifyTCLens` f
 
-modifyImportedSignature :: (Signature -> Signature) -> TCM ()
-modifyImportedSignature f = stImports %= f
+modifyImportedSignature :: MonadTCState m => (Signature -> Signature) -> m ()
+modifyImportedSignature f = stImports `modifyTCLens` f
 
-getSignature :: TCM Signature
-getSignature = use stSignature
+getSignature :: ReadTCState m => m Signature
+getSignature = useR stSignature
 
 -- | Update a possibly imported definition. Warning: changes made to imported
 --   definitions (during type checking) will not persist outside the current
 --   module. This function is currently used to update the compiled
 --   representation of a function during compilation.
-modifyGlobalDefinition :: QName -> (Definition -> Definition) -> TCM ()
+modifyGlobalDefinition :: MonadTCState m => QName -> (Definition -> Definition) -> m ()
 modifyGlobalDefinition q f = do
   modifySignature         $ updateDefinition q f
   modifyImportedSignature $ updateDefinition q f
 
-setSignature :: Signature -> TCM ()
+setSignature :: MonadTCState m => Signature -> m ()
 setSignature sig = modifySignature $ const sig
 
 -- | Run some computation in a different signature, restore original signature.
-withSignature :: Signature -> TCM a -> TCM a
+withSignature :: (ReadTCState m, MonadTCState m) => Signature -> m a -> m a
 withSignature sig m = do
   sig0 <- getSignature
   setSignature sig
@@ -237,14 +257,23 @@ withSignature sig m = do
 -- ** Modifiers for rewrite rules
 addRewriteRulesFor :: QName -> RewriteRules -> [QName] -> Signature -> Signature
 addRewriteRulesFor f rews matchables =
-    (over sigRewriteRules $ HMap.insertWith mappend f rews)
-  . (updateDefinition f $ updateTheDef setNotInjective)
-  . (foldr (.) id $ map (\g -> updateDefinition g setMatchable) matchables)
+    over sigRewriteRules (HMap.insertWith mappend f rews)
+  . updateDefinition f (updateTheDef setNotInjective . setCopatternLHS)
+  . (setMatchableSymbols f matchables)
     where
       setNotInjective def@Function{} = def { funInv = NotInjective }
       setNotInjective def            = def
 
-      setMatchable def = def { defMatchable = True }
+      setCopatternLHS =
+        updateDefCopatternLHS (|| any hasProjectionPattern rews)
+
+      hasProjectionPattern rew = any (isJust . isProjElim) $ rewPats rew
+
+setMatchableSymbols :: QName -> [QName] -> Signature -> Signature
+setMatchableSymbols f matchables =
+  foldr ((.) . (\g -> updateDefinition g setMatchable)) id matchables
+    where
+      setMatchable def = def { defMatchable = Set.insert f $ defMatchable def }
 
 -- ** Modifiers for parts of the signature
 
@@ -279,13 +308,19 @@ updateFunClauses :: ([Clause] -> [Clause]) -> (Defn -> Defn)
 updateFunClauses f def@Function{ funClauses = cs} = def { funClauses = f cs }
 updateFunClauses f _                              = __IMPOSSIBLE__
 
+updateCovering :: ([Clause] -> [Clause]) -> (Defn -> Defn)
+updateCovering f def@Function{ funCovering = cs} = def { funCovering = f cs }
+updateCovering f _                               = __IMPOSSIBLE__
+
 updateCompiledClauses :: (Maybe CompiledClauses -> Maybe CompiledClauses) -> (Defn -> Defn)
 updateCompiledClauses f def@Function{ funCompiled = cc} = def { funCompiled = f cc }
 updateCompiledClauses f _                              = __IMPOSSIBLE__
 
-updateFunCopatternLHS :: (Bool -> Bool) -> Defn -> Defn
-updateFunCopatternLHS f def@Function{ funCopatternLHS = b } = def { funCopatternLHS = f b }
-updateFunCopatternLHS f _ = __IMPOSSIBLE__
+updateDefCopatternLHS :: (Bool -> Bool) -> Definition -> Definition
+updateDefCopatternLHS f def@Defn{ defCopatternLHS = b } = def { defCopatternLHS = f b }
+
+updateDefBlocked :: (Blocked_ -> Blocked_) -> Definition -> Definition
+updateDefBlocked f def@Defn{ defBlocked = b } = def { defBlocked = f b }
 
 ---------------------------------------------------------------------------
 -- * Top level module
@@ -298,17 +333,22 @@ updateFunCopatternLHS f _ = __IMPOSSIBLE__
 -- implementation of 'setTopLevelModule' should be changed.
 
 setTopLevelModule :: C.QName -> TCM ()
-setTopLevelModule x = stFreshNameId .= NameId 0 (hashString $ prettyShow x)
+setTopLevelModule x = stFreshNameId `setTCLens` NameId 0 (ModuleNameHash $ hashString $ prettyShow x)
 
 -- | Use a different top-level module for a computation. Used when generating
 --   names for imported modules.
 withTopLevelModule :: C.QName -> TCM a -> TCM a
 withTopLevelModule x m = do
-  next <- use stFreshNameId
+  next <- useTC stFreshNameId
   setTopLevelModule x
   y <- m
-  stFreshNameId .= next
+  stFreshNameId `setTCLens` next
   return y
+
+currentModuleNameHash :: ReadTCState m => m ModuleNameHash
+currentModuleNameHash = do
+  NameId _ h <- useTC stFreshNameId
+  return h
 
 ---------------------------------------------------------------------------
 -- * Foreign code
@@ -316,48 +356,20 @@ withTopLevelModule x m = do
 
 addForeignCode :: BackendName -> String -> TCM ()
 addForeignCode backend code = do
-  r <- asks envRange  -- can't use TypeChecking.Monad.Trace.getCurrentRange without cycle
-  stForeignCode . key backend %= Just . (ForeignCode r code :) . fromMaybe []
-
----------------------------------------------------------------------------
--- * Temporary: Haskell imports
---   These will go away when we remove the IMPORT and HASKELL pragmas in
---   favour of the FOREIGN pragma.
----------------------------------------------------------------------------
-
-addDeprecatedForeignCode :: String -> BackendName -> String -> TCM ()
-addDeprecatedForeignCode old backend code = do
-  warning $ DeprecationWarning (unwords ["The", old, "pragma"])
-                               foreignPragma "2.6"
-  addForeignCode backend code
-  where
-    spc | length (lines code) > 1 = "\n"
-        | otherwise               = " "
-    foreignPragma =
-      "{-# FOREIGN " ++ backend ++ spc ++ code ++ spc ++ "#-}"
-
--- | Tell the compiler to import the given Haskell module.
-addHaskellImport :: String -> TCM ()
-addHaskellImport i = addDeprecatedForeignCode "IMPORT" ghcBackendName $ "import qualified " ++ i
-
--- | Tell the compiler to import the given Haskell module.
-addHaskellImportUHC :: String -> TCM ()
-addHaskellImportUHC i = addDeprecatedForeignCode "IMPORT_UHC" ghcBackendName $ "__IMPORT__ " ++ i
-
-addInlineHaskell :: String -> TCM ()
-addInlineHaskell s = addDeprecatedForeignCode "HASKELL" ghcBackendName s
+  r <- asksTC envRange  -- can't use TypeChecking.Monad.Trace.getCurrentRange without cycle
+  modifyTCLens (stForeignCode . key backend) $ Just . (ForeignCode r code :) . fromMaybe []
 
 ---------------------------------------------------------------------------
 -- * Interaction output callback
 ---------------------------------------------------------------------------
 
-getInteractionOutputCallback :: TCM InteractionOutputCallback
+getInteractionOutputCallback :: ReadTCState m => m InteractionOutputCallback
 getInteractionOutputCallback
-  = gets $ stInteractionOutputCallback . stPersistentState
+  = getsTC $ stInteractionOutputCallback . stPersistentState
 
 appInteractionOutputCallback :: Response -> TCM ()
 appInteractionOutputCallback r
-  = getInteractionOutputCallback >>= \ cb -> liftIO $ cb r
+  = getInteractionOutputCallback >>= \ cb -> cb r
 
 setInteractionOutputCallback :: InteractionOutputCallback -> TCM ()
 setInteractionOutputCallback cb
@@ -367,21 +379,21 @@ setInteractionOutputCallback cb
 -- * Pattern synonyms
 ---------------------------------------------------------------------------
 
-getPatternSyns :: TCM PatternSynDefns
-getPatternSyns = use stPatternSyns
+getPatternSyns :: ReadTCState m => m PatternSynDefns
+getPatternSyns = useR stPatternSyns
 
 setPatternSyns :: PatternSynDefns -> TCM ()
 setPatternSyns m = modifyPatternSyns (const m)
 
 -- | Lens for 'stPatternSyns'.
 modifyPatternSyns :: (PatternSynDefns -> PatternSynDefns) -> TCM ()
-modifyPatternSyns f = stPatternSyns %= f
+modifyPatternSyns f = stPatternSyns `modifyTCLens` f
 
-getPatternSynImports :: TCM PatternSynDefns
-getPatternSynImports = use stPatternSynImports
+getPatternSynImports :: ReadTCState m => m PatternSynDefns
+getPatternSynImports = useR stPatternSynImports
 
 -- | Get both local and imported pattern synonyms
-getAllPatternSyns :: TCM PatternSynDefns
+getAllPatternSyns :: ReadTCState m => m PatternSynDefns
 getAllPatternSyns = Map.union <$> getPatternSyns <*> getPatternSynImports
 
 lookupPatternSyn :: AmbiguousQName -> TCM PatternSynDefn
@@ -389,7 +401,7 @@ lookupPatternSyn (AmbQ xs) = do
   defs <- traverse lookupSinglePatternSyn xs
   case mergePatternSynDefs defs of
     Just def   -> return def
-    Nothing    -> typeError $ CannotResolveAmbiguousPatternSynonym (zipNe xs defs)
+    Nothing    -> typeError $ CannotResolveAmbiguousPatternSynonym (NonEmpty.zip xs defs)
 
 lookupSinglePatternSyn :: QName -> TCM PatternSynDefn
 lookupSinglePatternSyn x = do
@@ -400,7 +412,7 @@ lookupSinglePatternSyn x = do
             si <- getPatternSynImports
             case Map.lookup x si of
                 Just d  -> return d
-                Nothing -> notInScope $ qnameToConcrete x
+                Nothing -> notInScopeError $ qnameToConcrete x
 
 ---------------------------------------------------------------------------
 -- * Benchmark
@@ -416,11 +428,11 @@ updateBenchmark f = updatePersistentState $ \ s -> s { stBenchmark = f (stBenchm
 
 -- | Lens getter for 'Benchmark' from 'TCM'.
 getBenchmark :: TCM Benchmark
-getBenchmark = gets $ theBenchmark
+getBenchmark = getsTC $ theBenchmark
 
 -- | Lens modify for 'Benchmark'.
 modifyBenchmark :: (Benchmark -> Benchmark) -> TCM ()
-modifyBenchmark = modify' . updateBenchmark
+modifyBenchmark = modifyTC' . updateBenchmark
 
 ---------------------------------------------------------------------------
 -- * Instance definitions
@@ -432,19 +444,19 @@ addImportedInstances sig = do
   let itable = Map.fromListWith Set.union
                [ (c, Set.singleton i)
                | (i, Defn{ defInstance = Just c }) <- HMap.toList $ sig ^. sigDefinitions ]
-  stImportedInstanceDefs %= Map.unionWith Set.union itable
+  stImportedInstanceDefs `modifyTCLens` Map.unionWith Set.union itable
 
 -- | Lens for 'stInstanceDefs'.
 updateInstanceDefs :: (TempInstanceTable -> TempInstanceTable) -> (TCState -> TCState)
 updateInstanceDefs = over stInstanceDefs
 
 modifyInstanceDefs :: (TempInstanceTable -> TempInstanceTable) -> TCM ()
-modifyInstanceDefs = modify . updateInstanceDefs
+modifyInstanceDefs = modifyTC . updateInstanceDefs
 
 getAllInstanceDefs :: TCM TempInstanceTable
 getAllInstanceDefs = do
-  (table,xs) <- use stInstanceDefs
-  itable <- use stImportedInstanceDefs
+  (table,xs) <- useTC stInstanceDefs
+  itable <- useTC stImportedInstanceDefs
   let !table' = Map.unionWith Set.union itable table
   return (table', xs)
 

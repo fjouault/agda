@@ -1,35 +1,24 @@
-{-# LANGUAGE CPP #-}
 -- | Eliminates case defaults by adding an alternative for all possible
 -- constructors. Literal cases are preserved as-is.
 module Agda.Compiler.Treeless.EliminateDefaults where
 
-import Control.Applicative
 import Control.Monad
 import qualified Data.List as List
-import Data.Maybe
 
-import Agda.Syntax.Abstract.Name (QName)
 import Agda.Syntax.Treeless
-import Agda.Syntax.Literal
-import qualified Agda.Syntax.Internal as I
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
-import Agda.TypeChecking.Primitive
 import Agda.TypeChecking.Substitute
 
-import Agda.Compiler.Treeless.Subst
-
-import Agda.Utils.Impossible
-
-#include "undefined.h"
+import Agda.Compiler.Treeless.Subst () --instance only
 
 eliminateCaseDefaults :: TTerm -> TCM TTerm
 eliminateCaseDefaults = tr
   where
     tr :: TTerm -> TCM TTerm
-    tr t = case t of
-      TCase sc ct@(CTData qn) def alts | not (isUnreachable def) -> do
+    tr = \case
+      TCase sc ct@CaseInfo{caseType = CTData _ qn} def alts
+        | not (isUnreachable def) -> do
         dtCons <- defConstructors . theDef <$> getConstInfo qn
         let missingCons = dtCons List.\\ map aCon alts
         def <- tr def
@@ -42,24 +31,23 @@ eliminateCaseDefaults = tr
         return $ TLet def $ TCase (sc + 1) ct tUnreachable alts'
       TCase sc ct def alts -> TCase sc ct <$> tr def <*> mapM trAlt alts
 
-      TVar{}    -> tt
-      TDef{}    -> tt
-      TCon{}    -> tt
-      TPrim{}   -> tt
-      TLit{}    -> tt
-      TUnit{}   -> tt
-      TSort{}   -> tt
-      TErased{} -> tt
-      TError{}  -> tt
+      t@TVar{}    -> return t
+      t@TDef{}    -> return t
+      t@TCon{}    -> return t
+      t@TPrim{}   -> return t
+      t@TLit{}    -> return t
+      t@TUnit{}   -> return t
+      t@TSort{}   -> return t
+      t@TErased{} -> return t
+      t@TError{}  -> return t
 
+      TCoerce a               -> TCoerce <$> tr a
       TLam b                  -> TLam <$> tr b
       TApp a bs               -> TApp <$> tr a <*> mapM tr bs
       TLet e b                -> TLet <$> tr e <*> tr b
 
-      where tt = return t
-
     trAlt :: TAlt -> TCM TAlt
-    trAlt a = case a of
+    trAlt = \case
       TAGuard g b -> TAGuard <$> tr g <*> tr b
       TACon q a b -> TACon q a <$> tr b
       TALit l b   -> TALit l <$> tr b

@@ -16,44 +16,46 @@ default : ac \
           malformed-interfaces \
           malonzo \
           minmax \
+          other-examples \
           path \
           polydep \
           regexp-talk \
           relocatable-interfaces \
           simplelib \
+          uptodate \
           view \
-          test
 
 agda = $(AGDA_BIN)
 
-run_agda = $(agda) -v0 --vim --ignore-interfaces --no-default-libraries
+run_agda = $(agda) -v0 --vim --ignore-interfaces --no-libraries
 
-test_files = AIM5/Hedberg/SET.agda \
-             AIM5/yoshiki/SET.agda \
-             Binary.agda \
-             DTP08/conor/Talk.agda \
-             DTP08/ulf/Talk.agda \
-             ISWIM.agda \
-             Lookup.agda \
-             Miller/Pat.agda \
-             Monad.agda  \
-             ParenDepTac.agda \
-             Setoid.agda \
-             SimpleTypes.agda \
-             syntax/Literate.lagda \
-             Termination/Acc.agda \
-             Termination/Mutual.agda \
-             Termination/Nat.agda \
-             Termination/Ord.agda \
-             Termination/simplified-comb.agda \
-             Termination/StreamEating.agda \
-             Termination/StructuralOrder.agda \
-             Termination/TerminationTwoConstructors.agda \
-             Termination/Tuple.agda \
-             TT.agda \
-             Vec.agda
+other_files = AIM5/Hedberg/SET.agda \
+              AIM5/yoshiki/SET.agda \
+              Binary.agda \
+              DoNotation.agda \
+              DTP08/conor/Talk.agda \
+              DTP08/ulf/Talk.agda \
+              ISWIM.agda \
+              Lookup.agda \
+              Miller/Pat.agda \
+              Monad.agda  \
+              ParenDepTac.agda \
+              Setoid.agda \
+              SimpleTypes.agda \
+              syntax/Literate.lagda \
+              Termination/Acc.agda \
+              Termination/Mutual.agda \
+              Termination/Nat.agda \
+              Termination/Ord.agda \
+              Termination/simplified-comb.agda \
+              Termination/StreamEating.agda \
+              Termination/StructuralOrder.agda \
+              Termination/TerminationTwoConstructors.agda \
+              Termination/Tuple.agda \
+              TT.agda \
+              Vec.agda
 
-tests = $(patsubst %,%.test,$(test_files))
+other_examples = $(patsubst %,%.other,$(other_files))
 
 echo = $(shell which echo)
 ifeq ("$(echo)","")
@@ -148,12 +150,12 @@ highlighting : syntax/highlighting/Test*agda
 .PHONY : malonzo
 malonzo : compiler/main.agda
 	@$(echo) "Testing the MAlonzo backend"
-	@$(agda) --ignore-interfaces --compile --compile-dir=compiler -icompiler $<
+	@$(agda) --ignore-interfaces --compile --compile-dir=compiler -icompiler --no-libraries $<
 	@./compiler/main
 				# Compilation works also if the code has already been type
 				# checked.
 	@rm -rf compiler/main compiler/MAlonzo
-	@$(agda) --compile --compile-dir=compiler -icompiler $<
+	@$(agda) --compile --compile-dir=compiler -icompiler --no-libraries $<
 	@./compiler/main
 	@$(echo) "ok"
 
@@ -161,25 +163,35 @@ malonzo : compiler/main.agda
 relocatable-interfaces : relocatable/originals/*.agda
 	-@rm -rf relocatable/copies
 	@$(echo) "Testing that interface files are relocatable"
-	@$(agda) --ignore-interfaces -irelocatable/originals relocatable/originals/C.agda
+	@$(agda) --ignore-interfaces -irelocatable/originals --no-libraries relocatable/originals/C.agda
 	@cp -pR relocatable/originals relocatable/copies
 	@echo "" >> relocatable/copies/B.agda
 				# Type checking succeeds...
-	@$(agda) -irelocatable/copies relocatable/copies/C.agda > relocatable/copies/output
+	@$(agda) -v2 -irelocatable/copies --no-libraries relocatable/copies/C.agda > relocatable/copies/output
 	@cat relocatable/copies/output
 				# ...and skips one of the modules (A).
-	@[ `grep "^ *Loading" relocatable/copies/output | wc -l` = 1 ]
+	@[ `grep "^ *Checking A" relocatable/copies/output | wc -l` = 0 ]
+	@[ `grep "^ *Checking B" relocatable/copies/output | wc -l` = 1 ]
+	@[ `grep "^ *Checking C" relocatable/copies/output | wc -l` = 1 ]
 	@rm -rf relocatable/copies
+
+.PHONY : uptodate
+uptodate : uptodate/*.agda
+	@$(echo) "Testing that already imported modules are up-to-date" # despite having DOS line-endings
+	@$(agda) -v5 --ignore-interfaces -iuptodate --no-libraries uptodate/A.agda > uptodate/output
+	@cat uptodate/output
+	@[ `grep "C is up-to-date" uptodate/output | wc -l` = 1 ]
+	@rm -f uptodate/output
 
 .PHONY : malformed-interfaces
 malformed-interfaces : malformed/Empty.agda
 	@$(echo) "Testing that Agda can handle at least some malformed interface files."
 	@echo > malformed/Empty.agdai
-	@$(agda) -imalformed malformed/Empty.agda
+	@$(agda) -imalformed --no-libraries malformed/Empty.agda
 	-@openssl rand -out malformed/Empty.agdai 1024 2> /dev/null
-	@$(agda) -imalformed malformed/Empty.agda
+	@$(agda) -imalformed --no-libraries malformed/Empty.agda
 	@echo apa >> malformed/Empty.agdai
-	@$(agda) -imalformed malformed/Empty.agda
+	@$(agda) -imalformed --no-libraries malformed/Empty.agda
 
 .PHONY : html1
 html1 : AIM6/RegExp/talk/Everything.agda
@@ -197,9 +209,10 @@ html2 : AIM6/RegExp/talk/Everything.agda
 	@rm -rf HTML
 	@$(echo) "ok"
 
-test : $(tests)
+.PHONY : other-examples
+other-examples : $(other_examples)
 
-$(tests) : %.test : %
+$(other_examples) : %.other : %
 	@$(echo) -n "Testing $<... "
 	@$(echo) :q | $(run_agda) -i$(dir $<) $<
 	@$(echo) "ok"

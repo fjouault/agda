@@ -5,8 +5,6 @@ data List (A : Set) : Set where
   _∷_ : A → List A → List A
 
 {-# BUILTIN LIST List #-}
-{-# BUILTIN NIL  []   #-}
-{-# BUILTIN CONS _∷_  #-}
 
 data _≡_ {A : Set} (x : A) : A → Set where
   refl : x ≡ x

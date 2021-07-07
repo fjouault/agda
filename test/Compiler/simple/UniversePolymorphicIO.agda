@@ -33,12 +33,10 @@ postulate
 
 {-# COMPILE GHC putStrLn = Data.Text.IO.putStrLn #-}
 
-data List A : Set where
+data List (A : Set) : Set where
   [] : List A
   _∷_ : A → List A → List A
 
 {-# BUILTIN LIST List #-}
-{-# BUILTIN NIL [] #-}
-{-# BUILTIN CONS _∷_ #-}
 
 main = putStrLn "ok" >>= λ _ → return lzero

@@ -1,411 +1,13 @@
-# Adapted from https://github.com/hvr/multi-ghc-travis
+# Liang-Ting Chen 2019-09-07:
+# Switched to Build Stages
 
 # NB: don't set `language: haskell` here.
 language: c
 
-# Request Ubuntu Trusty (14.04 LTS).
-dist: trusty
+os: linux
 
-# Explicitly request sudo-enabled virtual environments [Issue #1992].
-sudo: required
-
-cache:
-  directories:
-  - $HOME/.stack
-
-##############################################################################
-# Required Ubuntu packages
-
-# The LaTeX/HTML test-suite requires:
-# * `kpsewhich` (included in texlive-binaries)
-
-# The test of the documentation, i.e. `make-doc-html` and
-# `make-user-pdf`, requires:
-#  * ecrm1000 fonts (included in texlive-fonts-recommended)
-#  * latex (included in texlive-latex-base)
-#  * lm fonts (include in lmodern)
-#  * utf8x.def (included in texlive-latex-extra)
-#  * dvipng (included in dvipng)
-#  * xelatex (included in texlive-xetex)
-
-##############################################################################
-# Tests
-
-# We use the word 'test' in a broad sense (e.g. it includes the Agda
-# test suite, the benchmark suite, the compilation with a specific set
-# of dependencies, the testing of other programs like `hTags`, etc.)
-
-# Travis runs the builds on this order.
-
-matrix:
-  include:
-    # (2017-10-01) GHC 8.2.2 RC1 was released.
-    - env: TEST=MAIN GHC_VER=8.2.2 BUILD=CABAL CABAL_VER=2.0
-      addons:
-        apt:
-          packages:
-            - cabal-install-2.0
-            - ghc-8.2.2
-            - texlive-binaries
-          sources:
-            - hvr-ghc
-
-    - env: TEST=MAIN GHC_VER=8.2.1 BUILD=CABAL CABAL_VER=2.0
-      addons:
-        apt:
-          packages:
-            - cabal-install-2.0
-            - ghc-8.2.1
-            - texlive-binaries
-          sources:
-            - hvr-ghc
-
-    - env: TEST=MAIN GHC_VER=8.0.2 BUILD=CABAL CABAL_VER=1.24
-      addons:
-        apt:
-          packages:
-            - cabal-install-1.24
-            - ghc-8.0.2
-            - texlive-binaries
-          sources:
-            - hvr-ghc
-
-    - env: TEST=MAIN GHC_VER=7.10.3 BUILD=CABAL CABAL_VER=1.22
-      addons:
-        apt:
-          packages:
-            - cabal-install-1.22
-            - ghc-7.10.3
-            - texlive-binaries
-          sources:
-            - hvr-ghc
-
-    - env: TEST=MAIN GHC_VER=7.8.4 BUILD=CABAL CABAL_VER=1.18
-      addons:
-        apt:
-          packages:
-            - cabal-install-1.18
-            - ghc-7.8.4
-            - texlive-binaries
-          sources:
-            - hvr-ghc
-
-    - env: TEST=STACKAGE GHC_VER=8.0.2 BUILD=STACK ARGS="--stack-yaml stack-8.0.2.yaml --system-ghc" MANUAL_INSTALL_BUILD_TOOLS=NO
-      addons:
-        apt:
-          packages:
-            - ghc-8.0.2
-          sources:
-            - hvr-ghc
-
-    - env: TEST=STACKAGE GHC_VER=7.10.3 BUILD=STACK ARGS="--stack-yaml stack-7.10.3.yaml --system-ghc" MANUAL_INSTALL_BUILD_TOOLS=YES
-      addons:
-        apt:
-          packages:
-            - ghc-7.10.3
-          sources:
-            - hvr-ghc
-
-    - env: TEST=STACKAGE GHC_VER=7.8.4 BUILD=STACK ARGS="--stack-yaml stack-7.8.4.yaml --system-ghc" MANUAL_INSTALL_BUILD_TOOLS=YES
-      addons:
-        apt:
-          packages:
-            - ghc-7.8.4
-          sources:
-            - hvr-ghc
-
-    # Since `stack haddock` compiles Agda but `cabal haddock` does
-    # not, this test is faster using `BUILD=CABAL` [Issue #2188].
-    - env: TEST=HADDOCK GHC_VER=8.2.1 BUILD=CABAL CABAL_VER=2.0
-      addons:
-        apt:
-          packages:
-            - cabal-install-2.0
-            - ghc-8.2.1
-          sources:
-            - hvr-ghc
-
-    - env: TEST=DOC BUILD=NOTHING
-      language: python
-      python: "3.4"
-      addons:
-        apt:
-          packages:
-            - dvipng
-            - lmodern
-            - texlive-fonts-recommended
-            - texlive-latex-base
-            - texlive-latex-extra
-            - texlive-xetex
-
-  # Builds are loooong, we want to send an email as fast as possible.
-  fast_finish: true
-  allow_failures:
-  - env: TEST=MAIN GHC_VER=8.2.2 BUILD=CABAL CABAL_VER=2.0
-
-##############################################################################
-before_install:
-
-  - if [[ $TEST = "MAIN" || $TEST = "HADDOCK" ]]; then
-       export PATH=/opt/ghc/$GHC_VER/bin:/opt/cabal/$CABAL_VER/bin:$PATH;
-    elif [[ $TEST = "STACKAGE" ]]; then
-         export PATH=/opt/ghc/$GHC_VER/bin:$PATH;
-    fi
-
-  - if [[ $BUILD = "STACK" ]]; then
-       mkdir -p ~/.local/bin &&
-       travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack' &&
-       export PATH=$HOME/.local/bin:$PATH;
-    fi
-
-##############################################################################
-install:
-  # How much memory we have.
-  - vmstat -s
-
-  # Asking for the shell.
-  - echo $SHELL
-
-  # Node is pre-installed.
-  - node --version
-
-  # The container environment reports a wrong number of cores. We use
-  # a `sed` script (from https://github.com/hvr/multi-ghc-travis) for
-  # commenting out `jobs: $ncpus` in the Cabal configuration file.
-
-  # The version installed of cpphs should match the lower version
-  # required in Agda.cabal [Issue #2315].
-
-  - if [[ $BUILD = "CABAL" ]]; then
-       cabal --version &&
-       ghc --version &&
-       haddock --version &&
-       emacs --version &&
-       export PARALLEL_TESTS=2 &&
-       travis_retry cabal update &&
-       sed -i 's/^jobs:/-- jobs:/' $HOME/.cabal/config &&
-       cat $HOME/.cabal/config &&
-       if [[ $CABAL_VER = "1.18" ]]; then
-          travis_retry cabal fetch cabal-install &&
-          cabal install cabal-install;
-       fi &&
-       export PATH=$HOME/.cabal/bin:$PATH &&
-       cabal --version &&
-       travis_retry cabal update &&
-       travis_retry cabal fetch alex happy cpphs-1.20.8 &&
-       cabal install alex happy cpphs-1.20.8 &&
-       alex --version &&
-       happy --version &&
-       cpphs --version;
-    fi
-
-  - if [[ $BUILD = "STACK" ]]; then
-       ghc --version &&
-       haddock --version &&
-       emacs --version &&
-       stack --version;
-    fi
-
-##############################################################################
-# Installing the dependencies
-
-# N.B. that `cabal install` doesn't set up the number of jobs by default
-# (cabal-install 1.22.4.0). See https://github.com/haskell/cabal/issues/2628.
-
-# TODO (2016-02-21): Split the long lines (`\` doesn't work).
-
-# We have to manually install `alex`, `cpphs` and possibly `happy`
-# for older snapshots because `stack` seems to have trouble installing
-# build tools for those snapshots.  Note that the version of `cpphs`
-# is currently specified in the yaml files.
-#
-# See https://github.com/commercialhaskell/stack/issues/595.
-
-# N.B. that we use the `--force-reinstalls` option [Issue 1520].
-
-# We are using `make CABAL_OPTS...` because we are including the
-# options to `cabal install` set up in the `Makefile`.
-  - if [[ $TEST = "MAIN" || $TEST = "HADDOCK" ]]; then
-       travis_retry cabal fetch `cabal install --dependencies-only --force-reinstalls --dry-run | sed 1,2d | sed "s|(latest[^)]*)||g"` &&
-       make CABAL_OPTS='--only-dependencies --force-reinstalls' install-bin;
-    elif [[ $TEST = "STACKAGE" ]]; then
-       if [[ $MANUAL_INSTALL_BUILD_TOOLS = "YES" ]]; then
-           stack install $ARGS --no-terminal alex cpphs happy;
-       fi;
-       stack build $ARGS --no-terminal --only-dependencies;
-    fi
-
-##############################################################################
-# Installing Agda
-
-  - export BUILD_DIR=$HOME/dist
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR CABAL_OPTS=-v2 install-bin;
-    fi
-
-##############################################################################
-# Getting the standard library
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make up-to-date-std-lib;
-    fi
-
-##############################################################################
-# Installing Sphinx
-
-# Required for testing the documentation.
-
-# Note that the `--user` option put the Sphinx binaries in
-# `$HOME/.local/bin`.
-
-  - if [[ $TEST = "DOC" ]]; then
-       pip install -r doc/user-manual/requirements.txt &&
-       export PATH=$HOME/.local/bin:$PATH;
-    fi
-
-##############################################################################
-# Installing a recent version of Node (see Issue #2192)
-
-  - if [[ $TEST = "MAIN" ]]; then
-       export AGDA_HOME=`pwd` &&
-       export NODE_VERSION=v0.12.16 &&
-       export NODE_DIR=node-${NODE_VERSION}-linux-x64 &&
-       export NODE_TARBALL=${NODE_DIR}.tar.xz &&
-       cd $HOME &&
-       travis_retry wget https://nodejs.org/download/release/${NODE_VERSION}/${NODE_TARBALL} &&
-       tar xJf ${NODE_TARBALL} &&
-       export PATH=${HOME}/${NODE_DIR}/bin:$PATH &&
-       cd $AGDA_HOME &&
-       node --version;
-    fi
-
-##############################################################################
-# Some tests
-
-# ASR (2016-09-17). Running the following tests, which use stack, here
-# instead of in the `script` section is faster because Agda's
-# dependencies are not installed again.
-
-##############################################################################
-# We test on Stackage the default and non-default Agda flags.
-
-# Default flags: `cpphs` instead of `cpp`, `debug` off and
-# `enable-cluster-counting` off.
-
-# Issues related to the flags: `cpp` instead of `cpphs` [Issue #1647]
-# and the `debug` flag [Issue #2070]
-
-# N.B. that this test is not include in the Makefile tests.
-
-  - if [[ $TEST = "STACKAGE" ]]; then
-       stack build $ARGS --no-terminal &&
-       stack build $ARGS --no-terminal --flag Agda:-cpphs --flag Agda:debug --flag Agda:enable-cluster-counting;
-    fi
-
-##############################################################################
-script:
-
-##############################################################################
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make check-whitespace;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}" BUILD_DIR=$BUILD_DIR succeed;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}" BUILD_DIR=$BUILD_DIR fail;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR interaction;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR interactive;
-    fi
-
-# We don't run LaTeX/XeLaTeX/LuaLaTeX on Travis (see Issues #1022 and
-# #1675), but we still compare the generated tex/html files with the
-# golden files.
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}" BUILD_DIR=$BUILD_DIR DONT_RUN_LATEX="Y" latex-html-test;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR examples;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR library-test;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR api-test;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}" BUILD_DIR=$BUILD_DIR user-manual-test;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR PARALLEL_TESTS=$PARALLEL_TESTS internal-tests;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR benchmark-without-logs;
-    fi
-
-# 2016-04-15: The option `AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}"` doesn't work
-# with the `compiler-test`.
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="" BUILD_DIR=$BUILD_DIR compiler-test;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS}" BUILD_DIR=$BUILD_DIR lib-succeed;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR lib-interaction;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make BUILD_DIR=$BUILD_DIR TAGS;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       cabal install shelltestrunner &&
-       make test-size-solver;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make testing-emacs-mode;
-    fi
-
-  - if [[ $TEST = "MAIN" ]]; then
-       make install-agda-bisect;
-    fi
-
-##############################################################################
-# Testing Haddock [Issue 1773]
-
-  - if [[ $TEST = "HADDOCK" ]]; then
-       make BUILD_DIR=$BUILD_DIR haddock;
-    fi
-
-##############################################################################
-# Testing the documentation
-
-  - if [[ $TEST = "DOC" ]]; then
-       sphinx-build --version &&
-       make doc-html;
-    fi
+# Request Ubuntu Bionic (18.04 LTS).  20.04 is not yet available
+dist: bionic
 
 ##############################################################################
 # Every master and maintenance branches >= 2.5 or >= maint-2.4 must
@@ -414,7 +16,95 @@ script:
 
 branches:
   only:
+    - monoid
     - master
+    - future
     - maint-2.4
     - stable-2.5
-    - release-2.5.1
+    - /^release-.*/
+    # Test all issue* and future-.* branches. Saves you opening a PR.
+    - /^issue.*/
+    - /^future-.*/
+
+##############################################################################
+# The submodules are needed by tests using the standard library and the cubical
+# library, but also needed for stack to find fix-whitespace. Even if it doesn't
+# need it, stack expects it to be there.
+#
+git:
+  submodules: true
+
+##############################################################################
+# Stages:
+#
+
+stages:
+  - name: complete
+    if: (branch =~ /^release-.*/) OR (tag IS present) OR (commit_message =~ complete\s+tests)
+
+jobs:
+  # Builds are loooong, we want to send an email as fast as possible.
+  fast_finish: true
+
+  include:
+    - &complete-job
+      stage: complete
+      env: GHC_VER=9.0.1 CABAL_VER=3.4
+      before_install:
+        - sudo -E apt-add-repository -y "ppa:hvr/ghc" &&
+          travis_apt_get_update &&
+          sudo -E apt-get -yq --no-install-suggests --no-install-recommends install ghc-${GHC_VER} cabal-install-${CABAL_VER} &&
+          sudo -E apt-get -yq --no-install-suggests --no-install-recommends install texlive-binaries
+
+        - export PATH=/opt/ghc/$GHC_VER/bin:/opt/cabal/$CABAL_VER/bin:$PATH &&
+          export PATH=$HOME/.local/bin:$PATH &&
+          export BUILD_DIR=$HOME/dist &&
+          export PARALLEL_TESTS=2 &&
+          export PATH=$HOME/.cabal/bin:$PATH &&
+          export PATH=$HOME/texlive/bin/x86_64-linux:$PATH
+      install:
+        - .travis/cabal_install
+      ##############################################################################
+      script:
+        - make BUILD_DIR=$BUILD_DIR common
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR succeed
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR fail
+        - make BUILD_DIR=$BUILD_DIR interaction
+        - make BUILD_DIR=$BUILD_DIR interactive
+        # We don't run LaTeX/XeLaTeX/LuaLaTeX on Travis (see Issues #1022 and
+        # #1675), but we still compare the generated tex/html files with the
+        # golden files.
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR DONT_RUN_LATEX="Y" latex-html-test
+        - make BUILD_DIR=$BUILD_DIR examples
+        - make BUILD_DIR=$BUILD_DIR std-lib-test
+        - make BUILD_DIR=$BUILD_DIR cubical-test
+        - make BUILD_DIR=$BUILD_DIR api-test
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR user-manual-test
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR internal-tests
+        - make BUILD_DIR=$BUILD_DIR benchmark-without-logs
+        - make BUILD_DIR=$BUILD_DIR benchmark-summary
+
+        ##################################################################################
+        # Andreas, 2019-08-20: disable compiler test on ghc 8.0 since it takes too long,
+        # making the whole travis run fail.
+        # Ulf, 2019-08-29: only disable the std-lib compiler test
+        # Liang-Ting, 2019-12-02: the maximum heap size has been increased, and std-lib compiler test is working again on GHC 8.0
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR compiler-test
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR std-lib-compiler-test
+        - make AGDA_TESTS_OPTIONS="-j${PARALLEL_TESTS} --hide-successes" TASTY_ANSI_TRICKS=false BUILD_DIR=$BUILD_DIR std-lib-succeed
+        - make BUILD_DIR=$BUILD_DIR std-lib-interaction
+        - make BUILD_DIR=$BUILD_DIR TAGS
+        - make BUILD_DIR="dist" test-size-solver
+        - make BUILD_DIR=$BUILD_DIR testing-emacs-mode
+        - make install-agda-bisect
+
+    - <<: *complete-job
+      env: GHC_VER=8.10.5 CABAL_VER=3.2
+    - <<: *complete-job
+      env: GHC_VER=8.8.4 CABAL_VER=3.2
+    - <<: *complete-job
+      env: GHC_VER=8.6.5 CABAL_VER=2.4
+    - <<: *complete-job
+      env: GHC_VER=8.4.4 CABAL_VER=2.2
+    - <<: *complete-job
+      env: GHC_VER=8.2.2 CABAL_VER=2.0

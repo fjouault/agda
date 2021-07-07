@@ -1,5 +1,7 @@
 -- Andreas, May - July 2016, implementing postfix projections
 
+{-# OPTIONS --guardedness #-}
+
 module Issue1963 where
 
 module Prod where
@@ -19,6 +21,7 @@ module Stream where
 
   record Stream (A : Set) : Set where
     coinductive
+    pattern  -- 2020-04-19, issue #4560, ignored for coinductive records.
     field head : A
           tail : Stream A
 
