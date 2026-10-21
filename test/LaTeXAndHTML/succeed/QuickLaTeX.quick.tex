@@ -5,9 +5,18 @@
 \begin{document}
 
 \begin{code}%
-\>[0]\AgdaSymbol{\{{-}\#}\AgdaSpace{}%
-\AgdaKeyword{BUILTIN} SIZE \AgdaPostulate{Size}\AgdaSpace{}%
-\AgdaSymbol{\#{-}\}}\<%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{OPTIONS}\AgdaSpace{}%
+\AgdaPragma{--sized-types}\AgdaSpace{}%
+\AgdaSymbol{\#-\}}\<%
+\\
+%
+\\[\AgdaEmptyExtraSkip]%
+\>[0]\AgdaSymbol{\{-\#}\AgdaSpace{}%
+\AgdaKeyword{BUILTIN}\AgdaSpace{}%
+\AgdaKeyword{SIZE}\AgdaSpace{}%
+\AgdaPostulate{Size}\AgdaSpace{}%
+\AgdaSymbol{\#-\}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
@@ -15,14 +24,14 @@
 \AgdaRecord{Sigma}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{B}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{→}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{)}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{)}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
@@ -30,7 +39,7 @@
 \\
 %
 \>[2]\AgdaKeyword{constructor}\AgdaSpace{}%
-\AgdaInductiveConstructor{c}\<%
+\AgdaCoinductiveConstructor{c}\<%
 \\
 %
 \>[2]\AgdaKeyword{field}\<%
@@ -44,14 +53,14 @@
 \>[4]\AgdaField{proj₂}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaBound{B}\AgdaSpace{}%
-\AgdaBound{proj₁}\<%
+\AgdaField{proj₁}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
 \>[0]\AgdaKeyword{data}\AgdaSpace{}%
 \AgdaDatatype{D}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0][@{}l@{\AgdaIndent{0}}]%
@@ -65,12 +74,12 @@
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaSymbol{\{}\AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{\}}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{\}}\AgdaSpace{}%
 \AgdaSymbol{\{}\AgdaBound{B}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaBound{A}\AgdaSpace{}%
 \AgdaSymbol{→}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSymbol{\}}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSymbol{\}}\AgdaSpace{}%
 \AgdaSymbol{(}\AgdaBound{x}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
 \AgdaBound{A}\AgdaSymbol{)}\AgdaSpace{}%
@@ -84,7 +93,7 @@
 \\
 \>[0]\AgdaFunction{f}\AgdaSpace{}%
 \AgdaSymbol{=}\AgdaSpace{}%
-\AgdaInductiveConstructor{c}\<%
+\AgdaCoinductiveConstructor{c}\<%
 \end{code}
 
 \end{document}

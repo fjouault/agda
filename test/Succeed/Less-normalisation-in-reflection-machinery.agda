@@ -9,9 +9,6 @@ open import Common.Product
 Loop : Set
 Loop = Loop
 
-postulate
-  loop : Loop
-
 data Box (A : Set) : Set where
   box : A → Box A
 
@@ -23,14 +20,8 @@ Boxed-loop = Box Boxed-loop
 postulate
   boxed-loop : Boxed-loop
 
-test₁ : Boxed-loop
-test₁ = quoteGoal g in boxed-loop
-
 test₂ : Term
 test₂ = quoteTerm Loop
-
-test₃ : Loop → List (Arg Term)
-test₃ _ = quoteContext
 
 macro
 
@@ -39,15 +30,6 @@ macro
 
 test₄ : Set
 test₄ = m₄ Loop
-
-macro
-
-  m₅ : Term → TC ⊤
-  m₅ hole = bindTC (inferType (def (quote loop) [])) λ A →
-            unify hole A
-
-test₅ : Set
-test₅ = m₅
 
 macro
 
@@ -80,7 +62,7 @@ macro
     bindTC (reduce V) λ V →
     unify hole V
     where
-    varg = arg (arg-info visible relevant)
+    varg = arg (arg-info visible (modality relevant quantity-ω))
     V    = def (quote Vec) (varg (def (quote Boxed-loop) []) ∷
                             varg (lit (nat 1)) ∷
                             [])

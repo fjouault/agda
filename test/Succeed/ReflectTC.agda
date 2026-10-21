@@ -4,6 +4,7 @@ module _ where
 open import Common.Reflection
 open import Common.Prelude hiding (_>>=_)
 open import Common.Equality
+open import Agda.Builtin.Sigma
 
 -- Some helpers --
 
@@ -32,7 +33,8 @@ visibleArity : QName → TC Nat
 visibleArity q = getType q >>= λ t → returnTC (typeArity t)
   where
     typeArity : Type → Nat
-    typeArity (pi (arg (argInfo visible _) _) (abs _ b)) = suc (typeArity b)
+    typeArity (pi (arg (argInfo visible _) _) (abs _ b)) =
+      suc (typeArity b)
     typeArity (pi _ (abs _ b)) = typeArity b
     typeArity _ = 0
 
@@ -40,7 +42,10 @@ newMeta! : TC Term
 newMeta! = newMeta unknown
 
 absurdLam : Term
-absurdLam = extLam (absurdClause (arg (argInfo visible relevant) absurd ∷ []) ∷ []) []
+absurdLam = extLam (absurdClause
+                      (("()" , vArg unknown) ∷ [])
+                      (vArg (absurd 0) ∷ [])
+                   ∷ []) []
 
 -- Simple assumption tactic --
 
@@ -78,7 +83,7 @@ tryConstructors n []       hole = typeError (strErr "No matching constructor ter
 tryConstructors n (c ∷ cs) hole =
   visibleArity c >>= λ ar →
   catchTC (replicateTC ar newMeta! >>= λ vs →
-           unify hole (con c (map (arg (argInfo visible relevant)) vs)) >>= λ _ →
+           unify hole (con c (map vArg vs)) >>= λ _ →
            mapTC!r (quotegoal (constructors-tac n)) vs)
           (tryConstructors n cs hole)
 

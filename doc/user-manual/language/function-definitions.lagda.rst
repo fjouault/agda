@@ -1,5 +1,6 @@
 ..
   ::
+  {-# OPTIONS --rewriting --sized-types #-}
   module language.function-definitions where
 
   open import language.built-ins
@@ -47,7 +48,7 @@ where ``f`` is a new identifier, ``pᵢ`` and ``qᵢ`` are patterns of type ``A�
 and ``d`` and ``e`` are expressions.
 
 The declaration above gives the identifier ``f`` the type
-``(x₁ : A₁) → … → (x₁ : A₁) → B`` and ``f`` is defined by the defining
+``(x₁ : A₁) → … → (xₙ : Aₙ) → B`` and ``f`` is defined by the defining
 equations. Patterns are matched from top to bottom, i.e., the first pattern
 that matches the actual parameters is the one that is used.
 
@@ -58,7 +59,7 @@ By default, Agda checks the following properties of a function definition:
 - No variable should occur more than once on the left-hand side of a single
   clause.
 - The patterns of all clauses should together cover all possible inputs of
-  the function.
+  the function, see :ref:`coverage-checking`.
 - The function should be terminating on all possible inputs, see
   :ref:`termination-checking`.
 
@@ -76,6 +77,10 @@ Dot patterns
 A dot pattern (also called *inaccessible pattern*) can be used when
 the only type-correct value of the argument is determined by the
 patterns given for the other arguments.
+A dot pattern is not matched against to determine the result of a
+function call.  Instead it serves as checked documentation of the only
+possible value at the respective position, as determined by the other
+patterns.
 The syntax for a dot pattern is ``.t``.
 
 As an example, consider the datatype ``Square`` defined as follows
@@ -99,9 +104,12 @@ In general, when matching on an argument of type ``D i₁ … iₙ`` with a cons
 ``c : (x₁ : A₁) → … → (xₘ : Aₘ) → D j₁ … jₙ``, Agda will attempt to unify
 ``i₁ … iₙ`` with ``j₁ … jₙ``. When the unification algorithm instantiates a
 variable ``x`` with value ``t``, the corresponding argument of the function
-can be replaced by a dot pattern ``.t``. Using a dot pattern is optional, but
-can help readability. The following are also legal definitions of
-``root``:
+can be replaced by a dot pattern ``.t``.
+
+Using a dot pattern can help readability, but is not necessary; a dot
+pattern can always be replaced by an underscore or a fresh pattern
+variable without changing the function definition.  The following are
+also legal definitions of ``root``:
 
 Since Agda 2.4.2.4::
 
@@ -120,6 +128,31 @@ function and is thus equivalent to
 
   root₃ : (n : Nat) → Square n → Nat
   root₃ _ (sq m) = let n = m * m in m
+
+A dot pattern need not be a valid ordinary pattern at all (as in the
+case of ``m * m`` above).  If it happens to be a valid ordinary
+pattern, then sometimes the dot can be removed without changing the
+function definition.
+
+Other times, removing the dot yields a valid definition but with
+different definitional behavior.  For instance, in the following
+definition:
+
+::
+
+  data Fin : Nat → Set where
+    fzero : {n : Nat} → Fin (suc n)
+    fsuc : {n : Nat} → Fin n → Fin (suc n)
+
+  foo : (n : Nat) (k : Fin n) → Nat
+  foo .(suc zero) (fzero {zero})     = zero
+  foo .(suc (suc n)) (fzero {suc n}) = zero
+  foo .(suc _) (fsuc k)              = zero
+
+removing the dots in ``foo`` changes the case tree so that it splits
+on the first argument first.  This results in the third equation not
+holding definitionally (and thus the definition being flagged under
+the option :ref:`--exact-split <catchall-pragma>`).
 
 .. _absurd-patterns:
 
@@ -204,7 +237,7 @@ equation holds, you would not be able to write ``refl``:
     refl : x ≡ x
 
   -- Does not work!
-  lemma : (m : Nat) → max m zero ≡ zero
+  lemma : (m : Nat) → max m zero ≡ m
   lemma = refl
 
 Clauses which do not hold definitionally are usually (but not always)
@@ -212,18 +245,19 @@ the result of writing clauses by hand instead of using Agda's case
 split tactic. These clauses are :ref:`highlighted <highlight>` by
 Emacs.
 
-The ``--exact-split`` :ref:`command-line and pragma option
-<command-line-pragmas>` causes Agda to raise an error whenever a
+.. _catchall-pragma:
+
+The :option:`--exact-split` flag causes Agda to raise a warning whenever a
 clause in a definition by pattern matching cannot be made to hold
 definitionally. Specific clauses can be excluded from this check by
 means of the ``{-# CATCHALL #-}`` pragma.
 
-For instance, the above definition of ``max`` will be rejected when
-using the ``--exact-split`` flag because its second clause does not to
+For instance, the above definition of ``max`` will be flagged when
+using the :option:`--exact-split` flag because its second clause does not to
 hold definitionally.
 
-When using the ``--exact-split`` flag, catch-all clauses have to be
-marked as such, for instance: ::
+When using the :option:`--exact-split` flag, catch-all clauses have to
+be marked as such, for instance: ::
 
   eq : Nat → Nat → Bool
   eq zero    zero    = true
@@ -231,8 +265,10 @@ marked as such, for instance: ::
   {-# CATCHALL #-}
   eq _       _       = false
 
-The ``--no-exact-split`` :ref:`command-line and pragma option
-<command-line-pragmas>` can be used to override a global
-``--exact-split`` in a file, by adding a pragma
+The :option:`--no-exact-split` flag can be used to override a global
+:option:`--exact-split` in a file, by adding a pragma
 ``{-# OPTIONS --no-exact-split #-}``. This option is enabled by
 default.
+
+Since version 2.8.0, Agda warns about superfluous CATCHALL pragmas,
+flagging a :option:`UselessPragma`.

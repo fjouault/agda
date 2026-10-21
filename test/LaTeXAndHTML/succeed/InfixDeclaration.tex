@@ -12,21 +12,21 @@
 \\[\AgdaEmptyExtraSkip]%
 \>[0]\AgdaKeyword{infix}\AgdaSpace{}%
 \AgdaNumber{5}\AgdaSpace{}%
-\AgdaOperator{\AgdaDatatype{\_>>\_}}\AgdaSpace{}%
-\AgdaOperator{\AgdaDatatype{\_<<\_}}\<%
+\AgdaOperator{\AgdaDatatype{\AgdaUnderscore{}>>\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaOperator{\AgdaDatatype{\AgdaUnderscore{}<<\AgdaUnderscore{}}}\<%
 \\
 %
 \\[\AgdaEmptyExtraSkip]%
 \>[0]\AgdaKeyword{data}\AgdaSpace{}%
-\AgdaOperator{\AgdaDatatype{\_>>\_}}\AgdaSpace{}%
+\AgdaOperator{\AgdaDatatype{\AgdaUnderscore{}>>\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0]\AgdaKeyword{data}\AgdaSpace{}%
-\AgdaOperator{\AgdaDatatype{\_<<\_}}\AgdaSpace{}%
+\AgdaOperator{\AgdaDatatype{\AgdaUnderscore{}<<\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\AgdaSpace{}%
+\AgdaPrimitive{Set}\AgdaSpace{}%
 \AgdaKeyword{where}\<%
 \\
 \>[0]\<%
@@ -48,19 +48,39 @@ In the following, we declare the fixity of two operators.
 \>[0][@{}l@{\AgdaIndent{1}}]%
 \>[2]\AgdaKeyword{infix}\AgdaSpace{}%
 \AgdaNumber{5}\AgdaSpace{}%
-\AgdaOperator{\AgdaPostulate{\_+\_}}\AgdaSpace{}%
-\AgdaOperator{\AgdaPostulate{\_*\_}}\<%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}+\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}*\AgdaUnderscore{}}}\<%
 \end{code}
 
-A fixity declaration can preceed the actual declaration of the names.
+A fixity declaration can precede the actual declaration of the names.
 
 \begin{code}%
 %
 \>[2]\AgdaKeyword{postulate}\AgdaSpace{}%
-\AgdaOperator{\AgdaPostulate{\_+\_}}\AgdaSpace{}%
-\AgdaOperator{\AgdaPostulate{\_*\_}}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}+\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}*\AgdaUnderscore{}}}\AgdaSpace{}%
 \AgdaSymbol{:}\AgdaSpace{}%
-\AgdaPrimitiveType{Set}\<%
+\AgdaPrimitive{Set}\<%
 \end{code}
+
+Fixity declarations can also occur when renaming during import.
+
+\begin{code}%
+\>[0]\AgdaKeyword{open}\AgdaSpace{}%
+\AgdaModule{SurroundingText}\AgdaSpace{}%
+\AgdaKeyword{renaming}\AgdaSpace{}%
+\AgdaSymbol{(}\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}+\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaSymbol{to}\AgdaSpace{}%
+\AgdaKeyword{infixl}\AgdaSpace{}%
+\AgdaNumber{5}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}+\AgdaUnderscore{}}}\AgdaSymbol{;}%
+\>[53]\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}*\AgdaUnderscore{}}}\AgdaSpace{}%
+\AgdaSymbol{to}\AgdaSpace{}%
+\AgdaKeyword{infixl}\AgdaSpace{}%
+\AgdaNumber{10}\AgdaSpace{}%
+\AgdaOperator{\AgdaPostulate{\AgdaUnderscore{}\&\AgdaUnderscore{}}}\AgdaSymbol{)}\<%
+\end{code}
+
+
 
 \end{document}

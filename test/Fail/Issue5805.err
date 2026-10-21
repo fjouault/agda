@@ -1,0 +1,11 @@
+error: [UnsolvedConstraints]
+Failed to solve the following constraints:
+  (ff≡f : (f ∘ f) ≡ f) →
+  ?1 (ff≡f = ff≡f) (λ x → f (f x)) ≡ ?1 (ff≡f = ff≡f) f →
+  Set is a well-formed type
+    (blocked on _A_56)
+when checking that the type
+(ff≡f : (_53 ∘ _53) ≡ _53) →
+?1 (ff≡f = ff≡f) (λ x → _53 (_53 x)) ≡ ?1 (ff≡f = ff≡f) _53 → Set
+of the generated with function is well-formed
+(https://agda.readthedocs.io/en/v2.10.0/language/with-abstraction.html#ill-typed-with-abstractions)

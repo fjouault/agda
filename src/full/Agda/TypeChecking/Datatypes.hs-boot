@@ -1,9 +1,10 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.Datatypes where
 
-import Agda.TypeChecking.Monad.Base
-import Agda.TypeChecking.Monad.Signature
-import Agda.Syntax.Internal
+import Agda.TypeChecking.Monad.Signature ( HasConstInfo, SigError )
+import Agda.Syntax.Internal ( QName, ConHead )
+import Agda.Utils.CallStack ( HasCallStack )
 
-getConHead         :: QName -> TCM (Either SigError ConHead)
-getConstructorData :: HasConstInfo m => QName -> m QName
+getConHead         :: (HasCallStack, HasConstInfo m) => QName -> m (Either SigError ConHead)
+getConstructorData :: (HasCallStack, HasConstInfo m) => QName -> m QName

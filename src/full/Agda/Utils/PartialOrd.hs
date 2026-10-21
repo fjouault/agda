@@ -1,11 +1,10 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Utils.PartialOrd where
 
-import Data.Functor
 import Data.Maybe
-import Data.Semigroup
 import Data.Set (Set)
-import qualified Data.Set as Set
+import Data.Set qualified as Set
 
 -- import Agda.Utils.List
 

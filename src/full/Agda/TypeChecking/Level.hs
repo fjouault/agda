@@ -1,25 +1,26 @@
-{-# LANGUAGE CPP #-}
 
 module Agda.TypeChecking.Level where
 
-import Control.Applicative
 import Data.Maybe
 import qualified Data.List as List
-import Data.Traversable (Traversable,traverse)
+import Data.Traversable (Traversable)
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
+
+import Agda.TypeChecking.Free
+
+import Agda.Utils.ExpandCase
+
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Reduce
-import Agda.TypeChecking.Reduce.Monad ()
-import Agda.TypeChecking.Monad.Builtin
 
-import Agda.Utils.Except ( MonadError(catchError) )
+import Agda.Utils.List1 ( List1, pattern (:|) )
 import Agda.Utils.Maybe ( caseMaybeM, allJustM )
 import Agda.Utils.Monad ( tryMaybe )
+import Agda.Utils.Singleton
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 data LevelKit = LevelKit
@@ -33,44 +34,79 @@ data LevelKit = LevelKit
   , zeroName :: QName
   }
 
--- | Get the 'primLevel' as a 'Type'.
-levelType :: TCM Type
-levelType = El (mkType 0) <$> primLevel
+{-# SPECIALIZE levelType :: TCM Type #-}
+-- | Get the 'primLevel' as a 'Type'.  Aborts if any of the level BUILTINs is undefined.
+levelType :: (HasBuiltins m, MonadTCError m) => m Type
+levelType =
+  El LevelUniv . lvlType <$> requireLevels
+  -- Andreas, 2022-10-11, issue #6168
+  -- It seems superfluous to require all level builtins here,
+  -- but since we are in MonadTCError here, this is our chance to make sure
+  -- that all level builtins are defined.
+  -- Otherwise, we might run into an __IMPOSSIBLE__ later,
+  -- e.g. if only BUILTIN LEVEL was defined by reallyUnLevelView requires all builtins.
 
-levelSucFunction :: TCM (Term -> Term)
-levelSucFunction = apply1 <$> primLevelSuc
+{-# SPECIALIZE levelType' :: TCM Type #-}
+-- | Get the 'primLevel' as a 'Type'.  Unsafe, crashes if the BUILTIN LEVEL is undefined.
+levelType' :: (HasBuiltins m) => m Type
+levelType' =
+  El LevelUniv . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevel
+
+{-# SPECIALIZE isLevelType :: Type -> TCM Bool #-}
+isLevelType :: PureTCM m => Type -> m Bool
+isLevelType a = reduce (unEl a) >>= \case
+  Def f [] -> do
+    lvl <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevel
+    return $ f == lvl
+  _ -> return False
 
 {-# SPECIALIZE builtinLevelKit :: TCM LevelKit #-}
 {-# SPECIALIZE builtinLevelKit :: ReduceM LevelKit #-}
 builtinLevelKit :: (HasBuiltins m) => m LevelKit
 builtinLevelKit = do
-    level@(Def l []) <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevel
-    zero@(Def z [])  <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelZero
-    suc@(Def s [])   <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelSuc
-    max@(Def m [])   <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelMax
+    level <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevel
+    zero  <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelZero
+    suc   <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelSuc
+    max   <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelMax
     return $ LevelKit
-      { lvlType  = level
-      , lvlSuc   = \ a -> suc `apply1` a
-      , lvlMax   = \ a b -> max `applys` [a, b]
-      , lvlZero  = zero
-      , typeName = l
-      , sucName  = s
-      , maxName  = m
-      , zeroName = z
+      { lvlType  = Def level []
+      , lvlSuc   = \ a -> Def suc [] `apply1` a
+      , lvlMax   = \ a b -> Def max [] `applys` [a, b]
+      , lvlZero  = Def zero []
+      , typeName = level
+      , sucName  = suc
+      , maxName  = max
+      , zeroName = zero
       }
 
+{-# SPECIALIZE requireLevels :: TCM LevelKit #-}
 -- | Raises an error if no level kit is available.
-requireLevels :: TCM LevelKit
-requireLevels = builtinLevelKit
+requireLevels :: (HasBuiltins m, MonadTCError m) => m LevelKit
+requireLevels = do
+    level <- getBuiltinName_ builtinLevel
+    zero  <- getBuiltinName_ builtinLevelZero
+    suc   <- getBuiltinName_ builtinLevelSuc
+    max   <- getBuiltinName_ builtinLevelMax
+    return $ LevelKit
+      { lvlType  = Def level []
+      , lvlSuc   = \ a -> Def suc [] `apply1` a
+      , lvlMax   = \ a b -> Def max [] `applys` [a, b]
+      , lvlZero  = Def zero []
+      , typeName = level
+      , sucName  = suc
+      , maxName  = max
+      , zeroName = zero
+      }
 
 -- | Checks whether level kit is fully available.
-haveLevels :: TCM Bool
+haveLevels :: HasBuiltins m => m Bool
 haveLevels = caseMaybeM (allJustM $ map getBuiltin' levelBuiltins)
     (return False)
     (\ _bs -> return True)
   where
   levelBuiltins =
-    [ builtinLevel
+    [ builtinLevelUniv
+    , builtinLevel
     , builtinLevelZero
     , builtinLevelSuc
     , builtinLevelMax
@@ -80,93 +116,147 @@ haveLevels = caseMaybeM (allJustM $ map getBuiltin' levelBuiltins)
 {-# SPECIALIZE unLevel :: Term -> ReduceM Term #-}
 unLevel :: (HasBuiltins m) => Term -> m Term
 unLevel (Level l)  = reallyUnLevelView l
-unLevel (Shared p) = unLevel (derefPtr p)
 unLevel v = return v
 
 {-# SPECIALIZE reallyUnLevelView :: Level -> TCM Term #-}
 {-# SPECIALIZE reallyUnLevelView :: Level -> ReduceM Term #-}
 reallyUnLevelView :: (HasBuiltins m) => Level -> m Term
-reallyUnLevelView nv = do
-  suc <- fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelSuc
-  zer <- fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelZero
-  case nv of
-    Max []              -> return zer
-    Max [Plus 0 a]      -> return $ unLevelAtom a
-    Max [a]             -> do
-      return $ unPlusV zer (apply1 suc) a
-    _ -> (`unlevelWithKit` nv) <$> builtinLevelKit
+reallyUnLevelView nv = (`unlevelWithKit` nv) <$> builtinLevelKit
 
 unlevelWithKit :: LevelKit -> Level -> Term
-unlevelWithKit LevelKit{ lvlZero = zer, lvlSuc = suc, lvlMax = max } (Max as) =
-  case map (unPlusV zer suc) as of
-    [a] -> a
-    []  -> zer
-    as  -> foldr1 max as
+unlevelWithKit LevelKit{ lvlZero = zer, lvlSuc = suc, lvlMax } = \case
+  Max m []  -> unConstV zer suc m
+  Max 0 [a] -> unPlusV suc a
+  Max m as  -> foldl1 lvlMax $ [ unConstV zer suc m | m > 0 ] ++ map (unPlusV suc) as
 
-unPlusV :: Term -> (Term -> Term) -> PlusLevel -> Term
-unPlusV zer suc (ClosedLevel n) = foldr (.) id (List.genericReplicate n suc) zer
-unPlusV _   suc (Plus n a)      = foldr (.) id (List.genericReplicate n suc) (unLevelAtom a)
+unConstV :: Term -> (Term -> Term) -> Integer -> Term
+unConstV zer suc n = foldr ($) zer (List.genericReplicate n suc)
 
-maybePrimCon :: TCM Term -> TCM (Maybe ConHead)
-maybePrimCon prim = tryMaybe $ do
-    Con c ci [] <- prim
-    return c
+unPlusV :: (Term -> Term) -> PlusLevel -> Term
+unPlusV suc (Plus n a) = foldr ($) a (List.genericReplicate n suc)
 
-maybePrimDef :: TCM Term -> TCM (Maybe QName)
-maybePrimDef prim = tryMaybe $ do
-    Def f [] <- prim
-    return f
-
-levelView :: Term -> TCM Level
+{-# SPECIALIZE levelView :: Term -> TCM Level #-}
+levelView :: PureTCM m => Term -> m Level
 levelView a = do
   reportSLn "tc.level.view" 50 $ "{ levelView " ++ show a
-  v <- runReduceM $ levelView' a
+  v <- levelView' a
   reportSLn "tc.level.view" 50 $ "  view: " ++ show v ++ "}"
   return v
 
-levelView' :: Term -> ReduceM Level
+{-# SPECIALIZE levelView' :: Term -> TCM Level #-}
+levelView' :: PureTCM m => Term -> m Level
 levelView' a = do
-  Def lzero [] <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelZero
-  Def lsuc  [] <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelSuc
-  Def lmax  [] <- ignoreSharing . fromMaybe __IMPOSSIBLE__ <$> getBuiltin' builtinLevelMax
+  lzero <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelZero
+  lsuc  <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelSuc
+  lmax  <- fromMaybe __IMPOSSIBLE__ <$> getBuiltinName' builtinLevelMax
   let view a = do
-        a <- reduce' a
-        case ignoreSharing a of
+        ba <- reduceB a
+        case ignoreBlocking ba of
           Level l -> return l
           Def s [Apply arg]
-            | s == lsuc  -> inc <$> view (unArg arg)
+            | s == lsuc  -> levelSuc <$> view (unArg arg)
           Def z []
-            | z == lzero -> return $ closed 0
+            | z == lzero -> return $ ClosedLevel 0
           Def m [Apply arg1, Apply arg2]
             | m == lmax  -> levelLub <$> view (unArg arg1) <*> view (unArg arg2)
-          _              -> mkAtom a
-  v <- view a
-  return v
+          l              -> return $ atomicLevel l
+  view a
+
+-- | Given a level @l@, find the maximum constant @n@ such that @l = n + l'@
+levelPlusView :: Level -> (Integer, Level)
+levelPlusView (Max 0 []) = (0 , Max 0 [])
+levelPlusView (Max 0 as@(_:_)) = (minN , Max 0 (map sub as))
   where
-    mkAtom a = do
-      b <- reduceB' a
-      return $ case ignoreSharing <$> b of
-        NotBlocked _ (MetaV m as) -> atom $ MetaLevel m as
-        NotBlocked r _            -> atom $ NeutralLevel r $ ignoreBlocking b
-        Blocked m _               -> atom $ BlockedLevel m $ ignoreBlocking b
+    minN = minimum [ n | Plus n _ <- as ]
+    sub (Plus n a) = Plus (n - minN) a
+levelPlusView (Max n as) = (minN , Max (n - minN) (map sub as))
+  where
+    minN = minimum $ n : [ n' | Plus n' _ <- as ]
+    sub (Plus n' a) = Plus (n' - minN) a
 
-    atom a = Max [Plus 0 a]
+-- | Given a level @l@, find the biggest constant @n@ such that @n <= l@
+levelLowerBound :: Level -> Integer
+levelLowerBound (Max m as) = maximum $ m : [n | Plus n _ <- as]
 
-    closed n = Max [ClosedLevel n | n > 0]
-
-    inc (Max as) = Max $ map inc' as
-      where
-        inc' (ClosedLevel n) = ClosedLevel $ n + 1
-        inc' (Plus n a)    = Plus (n + 1) a
-
-levelLub :: Level -> Level -> Level
-levelLub (Max as) (Max bs) = levelMax $ as ++ bs
-
+-- | Given a constant @n@ and a level @l@, find the level @l'@ such
+--   that @l = n + l'@ (or Nothing if there is no such level).
+--   Operates on levels in canonical form.
 subLevel :: Integer -> Level -> Maybe Level
-subLevel n (Max ls) = Max <$> traverse sub ls
+subLevel n (Max m ls) = Max <$> m' <*> traverse subPlus ls
   where
-    sub :: PlusLevel -> Maybe PlusLevel
-    sub (ClosedLevel j) | j >= n    = Just $ ClosedLevel $ j - n
-                        | otherwise = Nothing
-    sub (Plus j l)      | j >= n    = Just $ Plus (j - n) l
-                        | otherwise = Nothing
+    m' :: Maybe Integer
+    m' | m == 0, not (null ls) = Just 0
+       | otherwise             = sub m
+
+    -- General purpose function.
+    nonNeg :: Integer -> Maybe Integer
+    nonNeg j | j >= 0 = Just j
+             | otherwise = Nothing
+
+    sub :: Integer -> Maybe Integer
+    sub = nonNeg . subtract n
+
+    subPlus :: PlusLevel -> Maybe PlusLevel
+    subPlus (Plus j l) = Plus <$> sub j <*> Just l
+
+-- | Given two levels @a@ and @b@, try to decompose the first one as
+-- @a = a' ⊔ b@ (for the minimal value of @a'@).
+levelMaxDiff :: Level -> Level -> Maybe Level
+levelMaxDiff (Max m as) (Max n bs) = Max <$> diffC m n <*> diffP as bs
+  where
+    diffC :: Integer -> Integer -> Maybe Integer
+    diffC m n
+      | m == n    = Just 0
+      | m > n     = Just m
+      | otherwise = Nothing
+
+    diffP :: [PlusLevel] -> [PlusLevel] -> Maybe [PlusLevel]
+    diffP as     []     = Just as
+    diffP []     bs     = Nothing
+    diffP (a@(Plus m x) : as) (b@(Plus n y) : bs)
+      | x == y = if
+        | m == n    -> diffP as bs
+        | m > n     -> (Plus m x:) <$> diffP as bs
+        | otherwise -> Nothing
+      | otherwise = (a:) <$> diffP as (b:bs)
+
+-- | A @SingleLevel@ is a @Level@ that cannot be further decomposed as
+--   a maximum @a ⊔ b@.
+data SingleLevel' t = SingleClosed Integer | SinglePlus (PlusLevel' t)
+  deriving (Show, Functor, Foldable, Traversable)
+
+type SingleLevel = SingleLevel' Term
+
+deriving instance Eq SingleLevel
+
+unSingleLevel :: SingleLevel' t -> Level' t
+unSingleLevel (SingleClosed m) = Max m []
+unSingleLevel (SinglePlus a)   = Max 0 [a]
+
+-- | Return the maximum of the given @SingleLevel@s
+unSingleLevels :: [SingleLevel] -> Level
+unSingleLevels ls = levelMax n as
+  where
+    n = maximum $ 0 : [m | SingleClosed m <- ls]
+    as = [a | SinglePlus a <- ls]
+
+levelMaxView :: Level' t -> List1 (SingleLevel' t)
+levelMaxView (Max n [])     = singleton $ SingleClosed n
+levelMaxView (Max 0 (a:as)) = SinglePlus a :| map SinglePlus as
+levelMaxView (Max n as)     = SingleClosed n :| map SinglePlus as
+
+singleLevelView :: Level' t -> Maybe (SingleLevel' t)
+singleLevelView l = case levelMaxView l of
+  s :| [] -> Just s
+  _       -> Nothing
+
+instance Subst t => Subst (SingleLevel' t) where
+  type SubstArg (SingleLevel' t) = SubstArg t
+
+  applySubst sub (SingleClosed m) = SingleClosed m
+  applySubst sub (SinglePlus a)   = SinglePlus $ applySubst sub a
+
+instance Free t => Free (SingleLevel' t) where
+  freeVars l = expand \ret -> case l of
+    SingleClosed m -> ret mempty
+    SinglePlus a   -> ret $ freeVars a

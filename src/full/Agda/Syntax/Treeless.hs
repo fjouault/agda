@@ -1,4 +1,7 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+{-# OPTIONS_GHC -Wunused-matches #-}
+
+{-# LANGUAGE PatternSynonyms #-}
 
 -- | The treeless syntax is intended to be used as input for the compiler backends.
 -- It is more low-level than Internal syntax and is not used for type checking.
@@ -11,27 +14,71 @@ module Agda.Syntax.Treeless
     , module Agda.Syntax.Treeless
     ) where
 
-import Control.Arrow (first, second)
+import Control.DeepSeq
 
-import Data.Map (Map)
-import Data.Data (Data)
-import Data.Typeable (Typeable)
+import Data.Word
+
+import GHC.Generics (Generic)
 
 import Agda.Syntax.Position
+import Agda.Syntax.Internal (TermSize(..))
 import Agda.Syntax.Literal
+import Agda.Syntax.Common
 import Agda.Syntax.Abstract.Name
+
+import Agda.Utils.Tuple (first, second)
 
 data Compiled = Compiled
   { cTreeless :: TTerm
-  , cArgUsage :: [Bool] }
-  deriving (Typeable, Data, Show, Eq, Ord)
+  , cArgUsage :: Maybe [ArgUsage]
+      -- ^ 'Nothing' if treeless usage analysis has not run yet.
+  }
+  deriving (Show, Eq, Ord, Generic)
+
+-- | Usage status of function arguments in treeless code.
+data ArgUsage
+  = ArgUsed
+  | ArgUnused
+  deriving (Show, Eq, Ord, Generic)
+
+-- | Strictness.
+data Strictness
+  = NonStrict
+  | Strict
+  deriving (Show, Eq, Ord, Generic)
+
+-- | The treeless compiler can behave differently depending on the target
+--   language evaluation strategy. For instance, more aggressive erasure for
+--   lazy targets.
+data EvaluationStrategy
+  = LazyEvaluation !Strictness
+    -- ^ Lazy evaluation. If the argument is 'Strict', then
+    -- applications of inductive (or non-recursive) constructors are
+    -- strict.
+  | EagerEvaluation
+    -- ^ Strict evaluation.
+  deriving (Show, Eq, Ord, Generic)
+
+-- | The default strictness.
+
+defaultStrictness :: EvaluationStrategy -> Strictness
+defaultStrictness EagerEvaluation    = Strict
+defaultStrictness (LazyEvaluation _) = NonStrict
+
+-- | The default strictness for constructors of the given kind.
+
+defaultConstructorStrictness ::
+  EvaluationStrategy -> Induction -> Strictness
+defaultConstructorStrictness _                  CoInductive = NonStrict
+defaultConstructorStrictness EagerEvaluation    Inductive   = Strict
+defaultConstructorStrictness (LazyEvaluation s) Inductive   = s
 
 type Args = [TTerm]
 
 -- this currently assumes that TApp is translated in a lazy/cbn fashion.
 -- The AST should also support strict translation.
 --
--- All local variables are using de Bruijn indices.
+-- | Treeless Term. All local variables are using de Bruijn indices.
 data TTerm = TVar Int
            | TPrim TPrim
            | TDef QName
@@ -39,12 +86,13 @@ data TTerm = TVar Int
            | TLam TTerm
            | TLit Literal
            | TCon QName
-           | TLet TTerm TTerm
-           -- ^ introduces a new local binding. The bound term
-           -- MUST only be evaluated if it is used inside the body.
-           -- Sharing may happen, but is optional.
-           -- It is also perfectly valid to just inline the bound term in the body.
-           | TCase Int CaseType TTerm [TAlt]
+           | TLet Strictness TTerm TTerm
+           -- ^ Introduces a new (non-recursive) local binding. It can
+           -- be strict or non-strict. Non-strict bindings should not
+           -- be made more strict, this could lead to crashes. Sharing
+           -- may happen, but is optional. It is also perfectly valid
+           -- to just inline the bound term in the body.
+           | TCase Int CaseInfo TTerm [TAlt]
            -- ^ Case scrutinee (always variable), case type, default value, alternatives
            -- First, all TACon alternatives are tried; then all TAGuard alternatives
            -- in top to bottom order.
@@ -52,9 +100,10 @@ data TTerm = TVar Int
            | TUnit -- used for levels right now
            | TSort
            | TErased
+           | TCoerce TTerm  -- ^ Used by the GHC backend
            | TError TError
            -- ^ A runtime error, something bad has happened.
-  deriving (Typeable, Data, Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Generic)
 
 -- | Compiler-related primitives. This are NOT the same thing as primitives
 -- in Agda's surface or internal syntax!
@@ -67,40 +116,58 @@ data TTerm = TVar Int
 -- Q    | QName
 -- S    | String
 data TPrim
-  = PAdd
-  | PSub
-  | PMul
-  | PQuot
-  | PRem
+  = PAdd | PAdd64
+  | PSub | PSub64
+  | PMul | PMul64
+  | PQuot | PQuot64
+  | PRem  | PRem64
   | PGeq
-  | PLt
-  | PEqI
+  | PLt   | PLt64
+  | PEqI  | PEq64
   | PEqF
   | PEqS
   | PEqC
   | PEqQ
   | PIf
   | PSeq
-  deriving (Typeable, Data, Show, Eq, Ord)
+  | PITo64 | P64ToI
+  deriving (Show, Eq, Ord, Generic)
 
 isPrimEq :: TPrim -> Bool
-isPrimEq p = p `elem` [PEqI, PEqF, PEqS, PEqC, PEqQ]
+isPrimEq p = p `elem` [PEqI, PEqF, PEqS, PEqC, PEqQ, PEq64]
+
+-- | Strip leading coercions and indicate whether there were some.
+coerceView :: TTerm -> (Bool, TTerm)
+coerceView = \case
+  TCoerce t -> (True,) $ snd $ coerceView t
+  t         -> (False, t)
 
 mkTApp :: TTerm -> Args -> TTerm
 mkTApp x           [] = x
 mkTApp (TApp x as) bs = TApp x (as ++ bs)
 mkTApp x           as = TApp x as
 
-tAppView :: TTerm -> [TTerm]
-tAppView = view
-  where
-    view t = case t of
-      TApp a bs -> view a ++ bs
-      _         -> [t]
+tAppView :: TTerm -> (TTerm, [TTerm])
+tAppView = \case
+  TApp a bs -> second (++ bs) $ tAppView a
+  t         -> (t, [])
 
-tLetView :: TTerm -> ([TTerm], TTerm)
-tLetView (TLet e b) = first (e :) $ tLetView b
-tLetView e          = ([], e)
+-- | Expose the format @coerce f args@.
+--
+--   We fuse coercions, even if interleaving with applications.
+--   We assume that coercion is powerful enough to satisfy
+--   @
+--      coerce (coerce f a) b = coerce f a b
+--   @
+coerceAppView :: TTerm -> ((Bool, TTerm), [TTerm])
+coerceAppView = \case
+  TCoerce t -> first ((True,) . snd) $ coerceAppView t
+  TApp a bs -> second (++ bs) $ coerceAppView a
+  t         -> ((False, t), [])
+
+tLetView :: TTerm -> ([(Strictness, TTerm)], TTerm)
+tLetView (TLet s e b) = first ((s, e) :) $ tLetView b
+tLetView e            = ([], e)
 
 tLamView :: TTerm -> (Int, TTerm)
 tLamView = go 0
@@ -111,15 +178,19 @@ mkTLam :: Int -> TTerm -> TTerm
 mkTLam n b = foldr ($) b $ replicate n TLam
 
 -- | Introduces a new binding
-mkLet :: TTerm -> TTerm -> TTerm
-mkLet x body = TLet x body
+mkLet :: Strictness -> TTerm -> TTerm -> TTerm
+mkLet = TLet
 
 tInt :: Integer -> TTerm
-tInt = TLit . LitNat noRange
+tInt = TLit . LitNat
 
 intView :: TTerm -> Maybe Integer
-intView (TLit (LitNat _ x)) = Just x
+intView (TLit (LitNat x)) = Just x
 intView _ = Nothing
+
+word64View :: TTerm -> Maybe Word64
+word64View (TLit (LitWord64 x)) = Just x
+word64View _ = Nothing
 
 tPlusK :: Integer -> TTerm -> TTerm
 tPlusK 0 n = n
@@ -140,7 +211,13 @@ negPlusKView (TApp (TPrim PSub) [k, n]) | Just k <- intView k = Just (-k, n)
 negPlusKView _ = Nothing
 
 tOp :: TPrim -> TTerm -> TTerm -> TTerm
-tOp op a b = TApp (TPrim op) [a, b]
+tOp op a b = TPOp op a b
+
+pattern TPOp :: TPrim -> TTerm -> TTerm -> TTerm
+pattern TPOp op a b = TApp (TPrim op) [a, b]
+
+pattern TPFn :: TPrim -> TTerm -> TTerm
+pattern TPFn op a = TApp (TPrim op) [a]
 
 tUnreachable :: TTerm
 tUnreachable = TError TUnreachable
@@ -149,14 +226,25 @@ tIfThenElse :: TTerm -> TTerm -> TTerm -> TTerm
 tIfThenElse c i e = TApp (TPrim PIf) [c, i, e]
 
 data CaseType
-  = CTData QName -- case on datatype
+  = CTData QName
+    -- Case on datatype.
   | CTNat
   | CTInt
   | CTChar
   | CTString
   | CTFloat
   | CTQName
-  deriving (Typeable, Data, Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Generic)
+
+data CaseInfo = CaseInfo
+  { caseLazy :: Bool
+  , caseInduction :: !Induction
+    -- ^ Is the matched type inductive (or non-recursive), or is it
+    -- coinductive?
+  , caseErased :: Erased
+    -- ^ Is this a match on an erased argument?
+  , caseType :: CaseType }
+  deriving (Show, Eq, Ord, Generic)
 
 data TAlt
   = TACon    { aCon  :: QName, aArity :: Int, aBody :: TTerm }
@@ -165,8 +253,11 @@ data TAlt
   -- (pushes all existing variables aArity steps further away)
   | TAGuard  { aGuard :: TTerm, aBody :: TTerm }
   -- ^ Binds no variables
+  --
+  -- The guard must only use the variable that the case expression
+  -- matches on.
   | TALit    { aLit :: Literal,   aBody:: TTerm }
-  deriving (Typeable, Data, Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Generic)
 
 data TError
   = TUnreachable
@@ -174,7 +265,11 @@ data TError
   -- Runtime behaviour of unreachable code is undefined, but preferably
   -- the program will exit with an error message. The compiler is free
   -- to assume that this code is unreachable and to remove it.
-  deriving (Typeable, Data, Show, Eq, Ord)
+  | TMeta String
+  -- ^ Code which could not be obtained because of a hole in the program.
+  -- This should throw a runtime error.
+  -- The string gives some information about the meta variable that got compiled.
+  deriving (Show, Eq, Ord, Generic)
 
 
 class Unreachable a where
@@ -186,9 +281,75 @@ instance Unreachable TAlt where
 
 instance Unreachable TTerm where
   isUnreachable (TError TUnreachable{}) = True
-  isUnreachable (TLet _ b) = isUnreachable b
+  isUnreachable (TLet _ _ b) = isUnreachable b
   isUnreachable _ = False
 
 instance KillRange Compiled where
   killRange c = c -- bogus, but not used anyway
 
+
+-- * Utilities for ArgUsage
+---------------------------------------------------------------------------
+
+-- | @filterUsed used args@ drops those @args@ which are labelled
+-- @ArgUnused@ in list @used@.
+--
+-- Specification:
+--
+-- @
+--   filterUsed used args = [ a | (a, ArgUsed) <- zip args $ used ++ repeat ArgUsed ]
+-- @
+--
+-- Examples:
+--
+-- @
+--   filterUsed []                 == id
+--   filterUsed (repeat ArgUsed)   == id
+--   filterUsed (repeat ArgUnused) == const []
+-- @
+filterUsed :: [ArgUsage] -> [a] -> [a]
+filterUsed = curry $ \case
+  ([], args) -> args
+  (_ , [])   -> []
+  (ArgUsed   : used, a : args) -> a : filterUsed used args
+  (ArgUnused : used, _ : args) ->     filterUsed used args
+
+-- TermSize instances
+------------------------------------------------------------------------
+
+instance TermSize TTerm where
+  tsize = \case
+    TVar _         -> 1
+    TPrim _        -> 1
+    TDef _         -> 1
+    TLit _         -> 1
+    TCon _         -> 1
+    TUnit          -> 1
+    TSort          -> 1
+    TErased        -> 1
+    TError _       -> 1
+    TApp t ts      -> tsize t + tsize ts
+    TLam t         -> 1 + tsize t
+    TLet _ t1 t2   -> 1 + tsize t1 + tsize t2
+    TCase _ _ t bs -> 1 + tsize t + tsize bs
+    TCoerce t      -> 1 + tsize t
+
+instance TermSize TAlt where
+  tsize = \case
+    TACon _ _ t   -> tsize t
+    TAGuard t1 t2 -> tsize t1 + tsize t2
+    TALit _ t     -> tsize t
+
+-- NFData instances
+---------------------------------------------------------------------------
+
+instance NFData Compiled
+instance NFData ArgUsage
+instance NFData Strictness
+instance NFData EvaluationStrategy
+instance NFData TTerm
+instance NFData TPrim
+instance NFData CaseType
+instance NFData CaseInfo
+instance NFData TAlt
+instance NFData TError

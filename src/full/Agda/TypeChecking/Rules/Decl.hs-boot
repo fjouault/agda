@@ -1,10 +1,16 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.Rules.Decl where
 
-import Agda.Syntax.Info        (ModuleInfo)
-import Agda.Syntax.Abstract    (QName, Declaration, ModuleName, ModuleApplication, ScopeCopyInfo)
-import Agda.TypeChecking.Monad (TCM)
+import Agda.Syntax.Info (ModuleInfo)
+import Agda.Syntax.Abstract
+import Agda.Syntax.Common
+import Agda.TypeChecking.Monad.Base (TCM)
 
 checkDecls :: [Declaration] -> TCM ()
 checkDecl  :: Declaration -> TCM ()
-checkSectionApplication :: ModuleInfo -> ModuleName -> ModuleApplication -> ScopeCopyInfo -> TCM ()
+checkSig   :: KindOfName -> DefInfo -> Erased -> QName ->
+              GeneralizeTelescope -> Expr -> TCM ()
+checkSectionApplication ::
+  ModuleInfo -> Erased -> ModuleName -> ModuleApplication ->
+  ScopeCopyInfo -> ImportDirective -> TCM ()

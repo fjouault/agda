@@ -1,14 +1,17 @@
 -- Source: https://raw.githubusercontent.com/gallais/potpourri/master/agda/poc/dimensions/dimensions.agda
 -- Author: Original by gallais, modified for test suite by P. Hausmann
+-- (Later edited by others.)
+
+{-# OPTIONS --guardedness #-}
 
 module dimensions where
 
-open import Data.Nat     as ℕ using (ℕ)
+open import Data.Nat     as ℕ using (ℕ; NonZero)
 open import Data.Nat.LCM
-open import Data.Nat.DivMod
+open import Data.Nat.DivMod hiding (_/_)
 open import Data.Integer as ℤ using (ℤ ; +_)
 
-open import Data.Unit using (⊤ ; tt)
+open import Data.Unit.Polymorphic using (⊤)
 open import Function
 open import Relation.Nullary.Decidable
 
@@ -50,11 +53,11 @@ sec   = record { kilogram = + 0
                ; meter    = + 0
                ; second   = + 1 }
 
-≠0-mult : ∀ (m n : ℕ) (hm : False (m ℕ.≟ 0)) (hn : False (n ℕ.≟ 0)) →
-        False (m ℕ.* n ℕ.≟ 0)
+≠0-mult :
+  (m n : ℕ) (hm : NonZero m) (hn : NonZero n) → NonZero (m ℕ.* n)
 ≠0-mult ℕ.zero    n         () hn
 ≠0-mult m         0         hm ()
-≠0-mult (ℕ.suc m) (ℕ.suc n) hm hn = tt
+≠0-mult (ℕ.suc m) (ℕ.suc n) hm hn = _
 
 
 ------------------------------------------------
@@ -67,12 +70,12 @@ module Unit where
   infix 1 _,_#_
 
   data unit : Set where
-    _,_#_ : (n : ℕ) (hn : False (n ℕ.≟ 0)) (d : dimension) → unit
+    _,_#_ : (n : ℕ) (hn : NonZero n) (d : dimension) → unit
 
   coeff : (u : unit) → ℕ
   coeff (k , _ # _) = k
 
-  coeff≠0 : (u : unit) → False (coeff u ℕ.≟ 0)
+  coeff≠0 : (u : unit) → NonZero (coeff u)
   coeff≠0 (k , hk # _) = hk
 
   _*_ : (u v : unit) → unit
@@ -80,9 +83,10 @@ module Unit where
     ( k ℕ.* l ) , (≠0-mult k l hk hl) # (d Dimension.* e)
 
   _/_ : (u v : unit)
-        {≠0 : False (((coeff u) div (coeff v)) {coeff≠0 v} ℕ.≟ 0)} →
+        ⦃ ≠0 : NonZero (((coeff u) div (coeff v)) ⦃ coeff≠0 v ⦄) ⦄ →
         unit
-  _/_ (k , hk # d) (l , hl # e) {≠0} = (k div l) {hl} , ≠0 # (d Dimension./ e)
+  _/_ (k , hk # d) (l , hl # e) ⦃ ≠0 ⦄ =
+    (k div l) ⦃ hl ⦄ , ≠0 # (d Dimension./ e)
 
 open Unit using (unit ; _,_#_ ; coeff ; coeff≠0)
 
@@ -106,7 +110,7 @@ module Values where
   _+_ : ∀ {k hk l hl m hm} {d : dimension} (v₁ : [ k , hk # d ])
         (v₂ : [ l , hl # d ]) → [ m , hm # d ]
   _+_ {k} {hk} {l} {hl} {m} {hm} ⟨ v₁ ∶ ._ ⟩ ⟨ v₂ ∶ ._ ⟩ =
-      ⟨ ((k ℕ.* v₁ ℕ.+ l ℕ.* v₂) div m) {hm} ∶ _ ⟩
+      ⟨ ((k ℕ.* v₁ ℕ.+ l ℕ.* v₂) div m) ⦃ hm ⦄ ∶ _ ⟩
 
   _:+_ : ∀ {k hk l hl} {d : dimension} (v₁ : [ k , hk # d ])
          (v₂ : [ l , hl # d ]) → [ 1 , _ # d ]
@@ -116,7 +120,7 @@ module Values where
         (vd : [ k , hk #  d ]) (ve : [ l , hl # e ]) →
         [ m , hm # (d Dimension.* e) ]
   _*_ {k} {hk} {l} {hl} {m} {hm} ⟨ vd ∶ ._ ⟩ ⟨ ve ∶ ._ ⟩ =
-      ⟨ ((k ℕ.* vd ℕ.* l ℕ.* ve) div m) {hm} ∶ _ ⟩
+      ⟨ ((k ℕ.* vd ℕ.* l ℕ.* ve) div m) ⦃ hm ⦄ ∶ _ ⟩
 
   _:*_ : ∀ {k hk l hl} {d e : dimension}
          (vd : [ k , hk #  d ]) (ve : [ l , hl # e ]) →
@@ -125,12 +129,13 @@ module Values where
 
   _/_ :  ∀ {k hk l hl m hm} {d e : dimension}
         (vd : [ k , hk #  d ]) (ve : [ l , hl # e ])
-        {≠0 : False (val ve ℕ.≟ 0)} → [ m , hm # (d Dimension./ e) ]
+        {≠0 : NonZero (val ve)} → [ m , hm # (d Dimension./ e) ]
   _/_ {k} {hk} {l} {hl} {m} {hm} ⟨ vd ∶ ._ ⟩ ⟨ ve ∶ ._ ⟩ {≠0} =
-      ⟨ ((k ℕ.* vd) div (l ℕ.* ve ℕ.* m)) {≠0-mult _ _ (≠0-mult _ _ hl ≠0) hm} ∶ _ ⟩
+      ⟨ ((k ℕ.* vd) div (l ℕ.* ve ℕ.* m))
+          ⦃ ≠0-mult _ _ (≠0-mult _ _ hl ≠0) hm ⦄ ∶ _ ⟩
 
   ↑ : ∀ {k hk l hl d} → [ k , hk # d ] → [ l , hl # d ]
-  ↑ {k} {hk} {l} {hl} ⟨ v ∶ ._ ⟩ = ⟨ ((k ℕ.* v) div l) {hl} ∶ _ ⟩
+  ↑ {k} {hk} {l} {hl} ⟨ v ∶ ._ ⟩ = ⟨ ((k ℕ.* v) div l) ⦃ hl ⦄ ∶ _ ⟩
 
 open Values
 
@@ -141,24 +146,24 @@ open Values
 
 infix 5 _**_
 
-_**_ : (k : ℕ) {hk : False $ k ℕ.≟ 0} (d : dimension) → unit
+_**_ : (k : ℕ) {hk : NonZero k} (d : dimension) → unit
 _**_ k {hk} d = k , hk # d
 
-centi : (u : unit) {≠0 : False (coeff u div 100 ℕ.≟ 0)} → unit
+centi : (u : unit) {≠0 : NonZero (coeff u div 100)} → unit
 centi (k , hk # d) {≠0} = _ , ≠0 # d
-deci : (u : unit) {≠0 : False (coeff u div 10 ℕ.≟ 0)} → unit
+deci : (u : unit) {≠0 : NonZero (coeff u div 10)} → unit
 deci  (k , hk # d) {≠0} = _ , ≠0 # d
 deca hecto kilo : unit → unit
-deca  (k , hk # d) = 10   ℕ.* k , ≠0-mult 10   k tt hk # d
-hecto (k , hk # d) = 100  ℕ.* k , ≠0-mult 100  k tt hk # d
-kilo  (k , hk # d) = 1000 ℕ.* k , ≠0-mult 1000 k tt hk # d
+deca  (k , hk # d) = 10   ℕ.* k , ≠0-mult 10   k _ hk # d
+hecto (k , hk # d) = 100  ℕ.* k , ≠0-mult 100  k _ hk # d
+kilo  (k , hk # d) = 1000 ℕ.* k , ≠0-mult 1000 k _ hk # d
 
 cst : unit
 cst =
   let dcst = record { kilogram = + 0
                     ; meter    = + 0
                     ; second   = + 0 }
-  in 1 , tt # dcst
+  in 1 , _ # dcst
 
 infix 3 κ_
 
@@ -248,19 +253,16 @@ throw  ℕ.zero   dt p = p V.∷ V.[]
 throw (ℕ.suc n) dt p = p V.∷ throw n dt (newton dt p)
 
 -- the display function generating the output
-open import Data.List       as L using (List)
 open import Data.String     renaming (_++_ to _+s+_)
-open import Data.Product
 open import IO
-import IO.Primitive
-open import Coinduction
-open import Data.Colist
+import IO.Primitive.Core as Prim
+open import Codata.Musical.Colist
 open import Data.Nat.Show as Nat
+open import Level using (0ℓ)
 
-printPoint : point → IO ⊤
+printPoint : point → IO {0ℓ} ⊤
 printPoint p = putStrLn ((Nat.show (val (x p))) +s+ ";" +s+ Nat.show (val (y p)))
 
-main : IO.Primitive.IO ⊤
-main = run (♯ (mapM printPoint (Data.Colist.fromList trace)) >> (♯ (return tt)))
+main : Prim.IO ⊤
+main = run (Colist.mapM printPoint (Codata.Musical.Colist.fromList trace) >> pure _)
   where trace = V.toList $ throw 15 ⟨ 1 ∶ s ⟩ base
-

@@ -1,4 +1,7 @@
-Issue998d.agda:7,9-10
-ℓ != ℓ of type Level
-(because one is a variable and one a defined identifier)
+Issue998d.agda:7.9-10: error: [UnequalTypes]
+The types
+  Set ℓ
+and
+  Set Issue998d.ℓ
+are not equal
 when checking that the expression A has type Set ℓ

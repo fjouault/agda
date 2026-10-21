@@ -1,5 +1,5 @@
+{-# OPTIONS --cubical-compatible --level-universe --safe #-}
+
 module Common.Maybe where
 
-data Maybe {a} (A : Set a) : Set a where
-  nothing : Maybe A
-  just    : A → Maybe A
+open import Agda.Builtin.Maybe public

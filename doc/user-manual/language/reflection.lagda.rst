@@ -1,13 +1,53 @@
 ..
   ::
+  {-# OPTIONS --allow-unsolved-metas #-}
+
   module language.reflection where
 
-  open import language.built-ins
+  open import Agda.Builtin.Sigma
+  open import Agda.Builtin.Unit
+  open import Agda.Builtin.Nat
+  open import Agda.Builtin.List
+  open import Agda.Builtin.Float
+  open import Agda.Builtin.Bool
+  open import Agda.Builtin.Char
+  open import Agda.Builtin.String
+  open import Agda.Builtin.Word
+  open import Agda.Builtin.Equality
+  open import Agda.Primitive
+
+  data ⊥ : Set where
+
+  pattern [_] x = x ∷ []
 
   ¬_ : ∀ {u} → Set u → Set u
   ¬ x  = x → ⊥
 
   infixl 2 ¬_
+
+  data Associativity : Set where
+    left-assoc  : Associativity
+    right-assoc : Associativity
+    non-assoc   : Associativity
+
+  data Precedence : Set where
+    related   : Float → Precedence
+    unrelated : Precedence
+
+  data Fixity : Set where
+    fixity : Associativity → Precedence → Fixity
+
+  {-# BUILTIN ASSOC      Associativity #-}
+  {-# BUILTIN ASSOCLEFT  left-assoc    #-}
+  {-# BUILTIN ASSOCRIGHT right-assoc   #-}
+  {-# BUILTIN ASSOCNON   non-assoc     #-}
+
+  {-# BUILTIN PRECEDENCE    Precedence #-}
+  {-# BUILTIN PRECRELATED   related    #-}
+  {-# BUILTIN PRECUNRELATED unrelated  #-}
+
+  {-# BUILTIN FIXITY       Fixity #-}
+  {-# BUILTIN FIXITYFIXITY fixity #-}
 
 .. _reflection:
 
@@ -22,7 +62,7 @@ Names
 ~~~~~
 
 The built-in ``QNAME`` type represents quoted names and comes equipped with
-equality, ordering and a show function.
+equality, ordering, and a show function.
 
 ::
 
@@ -33,6 +73,28 @@ equality, ordering and a show function.
     primQNameEquality : Name → Name → Bool
     primQNameLess     : Name → Name → Bool
     primShowQName     : Name → String
+
+The fixity of a name can also be retrived.
+
+::
+
+  primitive
+    primQNameFixity    : Name → Fixity
+
+To define a decidable propositional equality with the option
+:option:`--safe`, one can use the conversion to a pair of built-in
+64-bit machine words
+
+::
+
+  primitive
+    primQNameToWord64s : Name → Σ Word64 (λ _ → Word64)
+
+with the injectivity proof in the ``Properties`` module.::
+
+  primitive
+    primQNameToWord64sInjective : ∀ a b → primQNameToWord64s a ≡ primQNameToWord64s b → a ≡ b
+
 
 Name literals are created using the ``quote`` keyword and can appear both in
 terms and in patterns
@@ -52,7 +114,7 @@ Metavariables
 ~~~~~~~~~~~~~
 
 Metavariables are represented by the built-in ``AGDAMETA`` type. They have
-primitive equality, ordering and show::
+primitive equality, ordering, show, and conversion to Nat::
 
   postulate Meta : Set
   {-# BUILTIN AGDAMETA Meta #-}
@@ -61,8 +123,18 @@ primitive equality, ordering and show::
     primMetaEquality : Meta → Meta → Bool
     primMetaLess     : Meta → Meta → Bool
     primShowMeta     : Meta → String
+    primMetaToNat    : Meta → Nat
 
-Builtin metavariables show up in reflected terms.
+Builtin metavariables show up in reflected terms. In ``Properties``, there is a proof of injectivity
+of ``primMetaToNat``
+
+::
+
+  primitive
+    primMetaToNatInjective : ∀ a b → primMetaToNat a ≡ primMetaToNat b → a ≡ b
+
+which can be used to define a decidable propositional equality with
+the option :option:`--safe`.
 
 Literals
 ~~~~~~~~
@@ -73,6 +145,7 @@ has the following shape::
 
   data Literal : Set where
     nat    : (n : Nat)    → Literal
+    word64 : (n : Word64) → Literal
     float  : (x : Float)  → Literal
     char   : (c : Char)   → Literal
     string : (s : String) → Literal
@@ -81,6 +154,7 @@ has the following shape::
 
   {-# BUILTIN AGDALITERAL   Literal #-}
   {-# BUILTIN AGDALITNAT    nat     #-}
+  {-# BUILTIN AGDALITWORD64 word64  #-}
   {-# BUILTIN AGDALITFLOAT  float   #-}
   {-# BUILTIN AGDALITCHAR   char    #-}
   {-# BUILTIN AGDALITSTRING string  #-}
@@ -109,10 +183,28 @@ Arguments can be relevant or irrelevant::
   {-# BUILTIN RELEVANT   relevant   #-}
   {-# BUILTIN IRRELEVANT irrelevant #-}
 
-Visibility and relevance characterise the behaviour of an argument::
+Arguments also have a quantity::
+
+  data Quantity : Set where
+    quantity-0 quantity-ω : Quantity
+
+  {-# BUILTIN QUANTITY   Quantity   #-}
+  {-# BUILTIN QUANTITY-0 quantity-0 #-}
+  {-# BUILTIN QUANTITY-ω quantity-ω #-}
+
+Relevance and quantity are combined into a modality::
+
+  data Modality : Set where
+    modality : (r : Relevance) (q : Quantity) → Modality
+
+  {-# BUILTIN MODALITY             Modality #-}
+  {-# BUILTIN MODALITY-CONSTRUCTOR modality #-}
+
+The visibility and the modality characterise the behaviour of an
+argument::
 
   data ArgInfo : Set where
-    arg-info : (v : Visibility) (r : Relevance) → ArgInfo
+    arg-info : (v : Visibility) (m : Modality) → ArgInfo
 
   data Arg (A : Set) : Set where
     arg : (i : ArgInfo) (x : A) → Arg A
@@ -122,29 +214,6 @@ Visibility and relevance characterise the behaviour of an argument::
   {-# BUILTIN ARG        Arg      #-}
   {-# BUILTIN ARGARG     arg      #-}
 
-Patterns
-~~~~~~~~
-
-Reflected patterns are bound to the ``AGDAPATTERN`` built-in using the
-following data type.
-
-::
-
-  data Pattern : Set where
-    con    : (c : Name) (ps : List (Arg Pattern)) → Pattern
-    dot    : Pattern
-    var    : (s : String)  → Pattern
-    lit    : (l : Literal) → Pattern
-    proj   : (f : Name)    → Pattern
-    absurd : Pattern
-
-  {-# BUILTIN AGDAPATTERN   Pattern #-}
-  {-# BUILTIN AGDAPATCON    con     #-}
-  {-# BUILTIN AGDAPATDOT    dot     #-}
-  {-# BUILTIN AGDAPATVAR    var     #-}
-  {-# BUILTIN AGDAPATLIT    lit     #-}
-  {-# BUILTIN AGDAPATPROJ   proj    #-}
-  {-# BUILTIN AGDAPATABSURD absurd  #-}
 
 Name abstraction
 ~~~~~~~~~~~~~~~~
@@ -160,16 +229,19 @@ Name abstraction
 Terms
 ~~~~~
 
-Terms, sorts and clauses are mutually recursive and mapped to the ``AGDATERM``,
-``AGDASORT`` and ``AGDACLAUSE`` built-ins respectively. Types are simply
-terms. Terms use de Bruijn indices to represent variables.
+Terms, sorts, patterns, and clauses are mutually recursive and mapped
+to the ``AGDATERM``, ``AGDASORT``, ``AGDAPATTERN`` and ``AGDACLAUSE``
+built-ins respectively. Types are simply terms. Terms and patterns use
+de Bruijn indices to represent variables.
 
 ::
 
   data Term : Set
   data Sort : Set
+  data Pattern : Set
   data Clause : Set
   Type = Term
+  Telescope = List (Σ String λ _ → Arg Type)
 
   data Term where
     var       : (x : Nat) (args : List (Arg Term)) → Term
@@ -186,14 +258,26 @@ terms. Terms use de Bruijn indices to represent variables.
   data Sort where
     set     : (t : Term) → Sort -- A Set of a given (possibly neutral) level.
     lit     : (n : Nat) → Sort  -- A Set of a given concrete level.
+    prop    : (t : Term) → Sort -- A Prop of a given (possibly neutral) level.
+    propLit : (n : Nat) → Sort  -- A Prop of a given concrete level.
+    inf     : (n : Nat) → Sort  -- Setωi of a given concrete level i.
     unknown : Sort
 
-  data Clause where
-    clause        : (ps : List (Arg Pattern)) (t : Term) → Clause
-    absurd-clause : (ps : List (Arg Pattern)) → Clause
+  data Pattern where
+    con    : (c : Name) (ps : List (Arg Pattern)) → Pattern
+    dot    : (t : Term)    → Pattern
+    var    : (x : Nat   )  → Pattern
+    lit    : (l : Literal) → Pattern
+    proj   : (f : Name)    → Pattern
+    absurd : (x : Nat)     → Pattern  -- Absurd patterns have de Bruijn indices
 
-  {-# BUILTIN AGDASORT    Sort   #-}
+  data Clause where
+    clause        : (tel : Telescope) (ps : List (Arg Pattern)) (t : Term) → Clause
+    absurd-clause : (tel : Telescope) (ps : List (Arg Pattern)) → Clause
+
   {-# BUILTIN AGDATERM    Term   #-}
+  {-# BUILTIN AGDASORT    Sort   #-}
+  {-# BUILTIN AGDAPATTERN Pattern #-}
   {-# BUILTIN AGDACLAUSE  Clause #-}
 
   {-# BUILTIN AGDATERMVAR         var       #-}
@@ -209,7 +293,17 @@ terms. Terms use de Bruijn indices to represent variables.
 
   {-# BUILTIN AGDASORTSET         set     #-}
   {-# BUILTIN AGDASORTLIT         lit     #-}
+  {-# BUILTIN AGDASORTPROP        prop    #-}
+  {-# BUILTIN AGDASORTPROPLIT     propLit #-}
+  {-# BUILTIN AGDASORTINF         inf     #-}
   {-# BUILTIN AGDASORTUNSUPPORTED unknown #-}
+
+  {-# BUILTIN AGDAPATCON    con     #-}
+  {-# BUILTIN AGDAPATDOT    dot     #-}
+  {-# BUILTIN AGDAPATVAR    var     #-}
+  {-# BUILTIN AGDAPATLIT    lit     #-}
+  {-# BUILTIN AGDAPATPROJ   proj    #-}
+  {-# BUILTIN AGDAPATABSURD absurd  #-}
 
   {-# BUILTIN AGDACLAUSECLAUSE clause        #-}
   {-# BUILTIN AGDACLAUSEABSURD absurd-clause #-}
@@ -233,7 +327,8 @@ below <reflection-tc-monad>`.
     data-type   : (pars : Nat) (cs : List Name) → Definition  -- parameters and constructors
     record-type : (c : Name) (fs : List (Arg Name)) →         -- c: name of record constructor
                   Definition                                  -- fs: fields
-    data-cons   : (d : Name) → Definition                     -- d: name of data type
+    data-cons   : (d : Name) (q : Quantity) → Definition      -- d: name of data type
+                                                              -- q: constructor quantity
     axiom       : Definition
     prim-fun    : Definition
 
@@ -259,12 +354,33 @@ implement pretty printing for reflected terms.
   data ErrorPart : Set where
     strErr  : String → ErrorPart
     termErr : Term → ErrorPart
+    pattErr : Pattern → ErrorPart
     nameErr : Name → ErrorPart
 
   {-# BUILTIN AGDAERRORPART       ErrorPart #-}
   {-# BUILTIN AGDAERRORPARTSTRING strErr    #-}
   {-# BUILTIN AGDAERRORPARTTERM   termErr   #-}
   {-# BUILTIN AGDAERRORPARTNAME   nameErr   #-}
+
+Blockers
+~~~~~~~~
+
+A blocker represents a set of metavariables that impedes the progress of
+a reflective computation. Using a blocker containing all the metas in
+(for example) a term traversed by a macro is a lot more efficient than
+blocking on individual metas as they are encountered.
+
+::
+
+  data Blocker : Set where
+    blockerAny  : List Blocker → Blocker
+    blockerAll  : List Blocker → Blocker
+    blockerMeta : Meta → Blocker
+
+  {-# BUILTIN AGDABLOCKER     Blocker #-}
+  {-# BUILTIN AGDABLOCKERANY  blockerAny #-}
+  {-# BUILTIN AGDABLOCKERALL  blockerAll #-}
+  {-# BUILTIN AGDABLOCKERMETA blockerMeta #-}
 
 .. _reflection-tc-monad:
 
@@ -294,10 +410,10 @@ following primitive operations::
     -- Throw a type error. Can be caught by catchTC.
     typeError : ∀ {a} {A : Set a} → List ErrorPart → TC A
 
-    -- Block a type checking computation on a metavariable. This will abort
+    -- Block a type checking computation on a blocker. This will abort
     -- the computation and restart it (from the beginning) when the
-    -- metavariable is solved.
-    blockOnMeta : ∀ {a} {A : Set a} → Meta → TC A
+    -- blocker has been solved.
+    blockTC : ∀ {a} {A : Set a} → Blocker → TC A
 
     -- Prevent current solutions of metavariables from being rolled back in
     -- case 'blockOnMeta' is called.
@@ -322,21 +438,28 @@ following primitive operations::
     reduce : Term → TC Term
 
     -- Get the current context. Returns the context in reverse order, so that
-    -- it is indexable by deBruijn index.
-    getContext : TC (List (Arg Type))
+    -- it is indexable by deBruijn index. Note that the types in the context are
+    -- valid in the rest of the context. To use in the current context they need
+    -- to be weakened by 1 + their position in the list.
+    getContext : TC Telescope
 
-    -- Extend the current context with a variable of the given type.
-    extendContext : ∀ {a} {A : Set a} → Arg Type → TC A → TC A
+    -- Extend the current context with a variable of the given type and its name.
+    extendContext : ∀ {a} {A : Set a} → String → Arg Type → TC A → TC A
 
-    -- Set the current context. Takes a context telescope with the outer-most
-    -- entry first, in contrast to 'getContext'.
-    inContext : ∀ {a} {A : Set a} → List (Arg Type) → TC A → TC A
+    -- Set the current context relative to the context the TC computation
+    -- is invoked from.  Takes a context telescope entries in reverse
+    -- order, as given by `getContext`. Each type should be valid in the
+    -- context formed by the remaining elements in the list.
+    inContext : ∀ {a} {A : Set a} → Telescope → TC A → TC A
 
     -- Quote a value, returning the corresponding Term.
     quoteTC : ∀ {a} {A : Set a} → A → TC Term
 
     -- Unquote a Term, returning the corresponding value.
     unquoteTC : ∀ {a} {A : Set a} → Term → TC A
+
+    -- Quote a value in Setω, returning the corresponding Term
+    quoteωTC : ∀ {A : Setω} → A → TC Term
 
     -- Create a fresh name.
     freshName : String → TC Name
@@ -351,51 +474,133 @@ following primitive operations::
     -- option.
     declarePostulate : Arg Name → Type → TC ⊤
 
+    -- Declare a new datatype. The second argument is the number of parameters.
+    -- The third argument is the type of the datatype, i.e. its parameters and
+    -- indices. The datatype must be defined later using 'defineData'.
+    declareData      : Name → Nat → Type → TC ⊤
+
+    -- Define a declared datatype. The datatype must have been declared using
+    -- 'declareData`. The second argument is a list of triples in which each triple
+    -- is the name of a constructor, its erasure status and its type.
+    defineData       : Name → List (Σ Name (λ _ → Σ Quantity (λ _ → Type))) → TC ⊤
+
     -- Define a declared function. The function may have been declared using
     -- 'declareDef' or with an explicit type signature in the program.
     defineFun : Name → List Clause → TC ⊤
 
-    -- Get the type of a defined name. Replaces 'primNameType'.
+    -- Get the type of a defined name relative to the current
+    -- module. Replaces 'primNameType'.
     getType : Name → TC Type
 
-    -- Get the definition of a defined name. Replaces 'primNameDefinition'.
+    -- Get the definition of a defined name relative to the current
+    -- module. Replaces 'primNameDefinition'.
     getDefinition : Name → TC Definition
 
     -- Check if a name refers to a macro
     isMacro : Name → TC Bool
 
+    -- Generate FOREIGN pragma with specified backend and top-level backend-dependent text.
+    pragmaForeign : String → String → TC ⊤
+
+    -- Generate COMPILE pragma with specified backend, associated name and backend-dependent text.
+    pragmaCompile : String → Name → String → TC ⊤
+
     -- Change the behaviour of inferType, checkType, quoteTC, getContext
     -- to normalise (or not) their results. The default behaviour is no
     -- normalisation.
     withNormalisation : ∀ {a} {A : Set a} → Bool → TC A → TC A
+    askNormalisation  : TC Bool
 
-    -- Prints the third argument if the corresponding verbosity level is turned
-    -- on (with the -v flag to Agda).
+    -- If 'true', makes the following primitives to reconstruct hidden arguments:
+    -- getDefinition, normalise, reduce, inferType, checkType and getContext
+    withReconstructed : ∀ {a} {A : Set a} → Bool → TC A → TC A
+    askReconstructed  : TC Bool
+
+    -- Whether implicit arguments at the end should be turned into metavariables
+    withExpandLast : ∀ {a} {A : Set a} → Bool → TC A → TC A
+    askExpandLast  : TC Bool
+
+    -- White/blacklist specific definitions for reduction while executing the TC computation
+    -- 'true' for whitelist, 'false' for blacklist
+    withReduceDefs : ∀ {a} {A : Set a} → (Σ Bool λ _ → List Name) → TC A → TC A
+    askReduceDefs  : TC (Σ Bool λ _ → List Name)
+
+    -- Parse and type check the given string against the given type, returning
+    -- the resulting term (when successful).
+    checkFromStringTC : String → Type → TC Term
+
+    -- Prints the third argument to the debug buffer in Emacs
+    -- if the verbosity level (set by the -v flag to Agda)
+    -- is higher than the second argument. Note that Level 0 and 1 are printed
+    -- to the info buffer instead. For instance, giving -v a.b.c:10 enables
+    -- printing from debugPrint "a.b.c.d" 10 msg.
     debugPrint : String → Nat → List ErrorPart → TC ⊤
 
-  {-# BUILTIN AGDATCMUNIFY              unify              #-}
-  {-# BUILTIN AGDATCMTYPEERROR          typeError          #-}
-  {-# BUILTIN AGDATCMBLOCKONMETA        blockOnMeta        #-}
-  {-# BUILTIN AGDATCMCATCHERROR         catchTC            #-}
-  {-# BUILTIN AGDATCMINFERTYPE          inferType          #-}
-  {-# BUILTIN AGDATCMCHECKTYPE          checkType          #-}
-  {-# BUILTIN AGDATCMNORMALISE          normalise          #-}
-  {-# BUILTIN AGDATCMREDUCE             reduce             #-}
-  {-# BUILTIN AGDATCMGETCONTEXT         getContext         #-}
-  {-# BUILTIN AGDATCMEXTENDCONTEXT      extendContext      #-}
-  {-# BUILTIN AGDATCMINCONTEXT          inContext          #-}
-  {-# BUILTIN AGDATCMQUOTETERM          quoteTC            #-}
-  {-# BUILTIN AGDATCMUNQUOTETERM        unquoteTC          #-}
-  {-# BUILTIN AGDATCMFRESHNAME          freshName          #-}
-  {-# BUILTIN AGDATCMDECLAREDEF         declareDef         #-}
-  {-# BUILTIN AGDATCMDECLAREPOSTULATE   declarePostulate   #-}
-  {-# BUILTIN AGDATCMDEFINEFUN          defineFun          #-}
-  {-# BUILTIN AGDATCMGETTYPE            getType            #-}
-  {-# BUILTIN AGDATCMGETDEFINITION      getDefinition      #-}
-  {-# BUILTIN AGDATCMCOMMIT             commitTC           #-}
-  {-# BUILTIN AGDATCMISMACRO            isMacro            #-}
-  {-# BUILTIN AGDATCMWITHNORMALISATION  withNormalisation  #-}
-  {-# BUILTIN AGDATCMDEBUGPRINT         debugPrint         #-}
+    -- Return the formatted string of the argument using the internal pretty printer.
+    formatErrorParts : List ErrorPart → TC String
+
+    -- Fail if the given computation gives rise to new, unsolved
+    -- "blocking" constraints.
+    noConstraints : ∀ {a} {A : Set a} → TC A → TC A
+
+    -- Run the given computation at the type level, allowing use of erased things.
+    workOnTypes : ∀ {a} {A : Set a} → TC A → TC A
+
+    -- Run the given TC action and return the first component. Resets to
+    -- the old TC state if the second component is 'false', or keep the
+    -- new TC state if it is 'true'.
+    runSpeculative : ∀ {a} {A : Set a} → TC (Σ A λ _ → Bool) → TC A
+
+    -- Get a list of all possible instance candidates for the given meta
+    -- variable (it does not have to be an instance meta).
+    getInstances : Meta → TC (List Term)
+
+    -- Try to solve open instance constraints. When wrapped in `noConstraints`,
+    -- fails if there are unsolved instance constraints left over that originate
+    -- from the current macro invokation. Outside constraints are still attempted,
+    -- but failure to solve them are ignored by `noConstraints`.
+    solveInstanceConstraints : TC ⊤
+
+  {-# BUILTIN AGDATCMUNIFY                      unify                      #-}
+  {-# BUILTIN AGDATCMTYPEERROR                  typeError                  #-}
+  {-# BUILTIN AGDATCMBLOCK                      blockTC                    #-}
+  {-# BUILTIN AGDATCMCATCHERROR                 catchTC                    #-}
+  {-# BUILTIN AGDATCMINFERTYPE                  inferType                  #-}
+  {-# BUILTIN AGDATCMCHECKTYPE                  checkType                  #-}
+  {-# BUILTIN AGDATCMNORMALISE                  normalise                  #-}
+  {-# BUILTIN AGDATCMREDUCE                     reduce                     #-}
+  {-# BUILTIN AGDATCMGETCONTEXT                 getContext                 #-}
+  {-# BUILTIN AGDATCMEXTENDCONTEXT              extendContext              #-}
+  {-# BUILTIN AGDATCMINCONTEXT                  inContext                  #-}
+  {-# BUILTIN AGDATCMQUOTETERM                  quoteTC                    #-}
+  {-# BUILTIN AGDATCMUNQUOTETERM                unquoteTC                  #-}
+  {-# BUILTIN AGDATCMQUOTEOMEGATERM             quoteωTC                   #-}
+  {-# BUILTIN AGDATCMFRESHNAME                  freshName                  #-}
+  {-# BUILTIN AGDATCMDECLAREDEF                 declareDef                 #-}
+  {-# BUILTIN AGDATCMDECLAREPOSTULATE           declarePostulate           #-}
+  {-# BUILTIN AGDATCMDECLAREDATA                declareData                #-}
+  {-# BUILTIN AGDATCMDEFINEDATA                 defineData                 #-}
+  {-# BUILTIN AGDATCMDEFINEFUN                  defineFun                  #-}
+  {-# BUILTIN AGDATCMGETTYPE                    getType                    #-}
+  {-# BUILTIN AGDATCMGETDEFINITION              getDefinition              #-}
+  {-# BUILTIN AGDATCMCOMMIT                     commitTC                   #-}
+  {-# BUILTIN AGDATCMISMACRO                    isMacro                    #-}
+  {-# BUILTIN AGDATCMPRAGMAFOREIGN              pragmaForeign              #-}
+  {-# BUILTIN AGDATCMPRAGMACOMPILE              pragmaCompile              #-}
+  {-# BUILTIN AGDATCMWITHNORMALISATION          withNormalisation          #-}
+  {-# BUILTIN AGDATCMWITHRECONSTRUCTED          withReconstructed          #-}
+  {-# BUILTIN AGDATCMWITHEXPANDLAST             withExpandLast             #-}
+  {-# BUILTIN AGDATCMWITHREDUCEDEFS             withReduceDefs             #-}
+  {-# BUILTIN AGDATCMASKNORMALISATION           askNormalisation           #-}
+  {-# BUILTIN AGDATCMASKRECONSTRUCTED           askReconstructed           #-}
+  {-# BUILTIN AGDATCMASKEXPANDLAST              askExpandLast              #-}
+  {-# BUILTIN AGDATCMASKREDUCEDEFS              askReduceDefs              #-}
+  {-# BUILTIN AGDATCMDEBUGPRINT                 debugPrint                 #-}
+  {-# BUILTIN AGDATCMNOCONSTRAINTS              noConstraints              #-}
+  {-# BUILTIN AGDATCMWORKONTYPES                workOnTypes                #-}
+  {-# BUILTIN AGDATCMRUNSPECULATIVE             runSpeculative             #-}
+  {-# BUILTIN AGDATCMGETINSTANCES               getInstances               #-}
+  {-# BUILTIN AGDATCMSOLVEINSTANCES             solveInstanceConstraints   #-}
 
 Metaprogramming
 ---------------
@@ -452,6 +657,10 @@ Limitations:
     recursive function outside the macro block and have the macro call the
     recursive function.
 
+  - Macros and ``quoteTerm`` can get blocked on quoting a term with an
+    interactive hole inside it. Enable :option:`--quote-metas` to disable this
+    blocking, so that quoted holes can be constrained by macro unquoting.
+
 Silly example:
 
 ..
@@ -462,7 +671,8 @@ Silly example:
 
     macro
         plus-to-times : Term → Term → TC ⊤
-        plus-to-times (def (quote _+_) (a ∷ b ∷ [])) hole = unify hole (def (quote _*_) (a ∷ b ∷ []))
+        plus-to-times (def (quote _+_) (a ∷ b ∷ [])) hole =
+          unify hole (def (quote _*_) (a ∷ b ∷ []))
         plus-to-times v hole = unify hole v
 
     thm : (a b : Nat) → plus-to-times (a + b) ≡ a * b
@@ -476,7 +686,9 @@ overhead. For instance, suppose you have a solver::
 ..
   ::
   postulate God : (A : Set) → A
-  magic t = def (quote God) (arg (arg-info visible relevant) t ∷ [])
+  magic t =
+    def (quote God)
+        (arg (arg-info visible (modality relevant quantity-ω)) t ∷ [])
 
 that takes a reflected goal and outputs a proof (when successful). You can then
 define the following macro::
@@ -503,15 +715,66 @@ This lets you apply the magic tactic as a normal function:
 
 .. _unquoting-declarations:
 
+Tactic Arguments
+~~~~~~~~~~~~~~~~
+
+You can declare tactics to be used to solve a particular implicit argument
+using a ``@(tactic t)`` annotation. The provided tactic should be a term
+``t : Term → TC ⊤``. For instance,
+
+::
+
+  defaultTo : {A : Set} (x : A) → Term → TC ⊤
+  defaultTo x hole = bindTC (quoteTC x) (unify hole)
+
+  f : {@(tactic defaultTo true) x : Bool} → Bool
+  f {x} = x
+
+  test-f : f ≡ true
+  test-f = refl
+
+At calls to `f`, `defaultTo true` is called on the
+metavariable inserted for `x` if it is not given explicitly.
+The tactic can depend on previous arguments to the function.
+For instance,
+
+::
+
+  g : (x : Nat) {@(tactic defaultTo x) y : Nat} → Nat
+  g x {y} = x + y
+
+  test-g : g 4 ≡ 8
+  test-g = refl
+
+Record fields can also be annotated with a tactic, allowing them to be
+omitted in constructor applications, record constructions and co-pattern
+matches::
+
+  record Bools : Set where
+    constructor mkBools
+    field fst : Bool
+          @(tactic defaultTo fst) {snd} : Bool
+  open Bools
+
+  tt₀ tt₁ tt₂ tt₃ : Bools
+  tt₀ = mkBools true {true}
+  tt₁ = mkBools true
+  tt₂ = record{ fst = true }
+  tt₃ .fst = true
+
+  test-tt : tt₁ ∷ tt₂ ∷ tt₃ ∷ [] ≡ tt₀ ∷ tt₀ ∷ tt₀ ∷ []
+  test-tt = refl
+
 Unquoting Declarations
 ~~~~~~~~~~~~~~~~~~~~~~
 
 While macros let you write metaprograms to create terms, it is also useful to
 be able to create top-level definitions. You can do this from a macro using the
-``declareDef`` and ``defineFun`` primitives, but there is no way to bring such
-definitions into scope. For this purpose there are two top-level primitives
-``unquoteDecl`` and ``unquoteDef`` that runs a ``TC`` computation in a
-declaration position. They both have the same form:
+``declareDef``, ``declareData``, ``defineFun`` and ``defineData`` primitives,
+but there is no way to bring such definitions into scope. For this purpose
+there are two top-level primitives ``unquoteDecl`` and ``unquoteDef`` that runs
+a ``TC`` computation in a declaration position. They both have the same form
+for declaring function definitions:
 
 .. code-block:: agda
 
@@ -532,3 +795,166 @@ In ``m`` the ``xᵢ`` stand for the names of the functions being defined (i.e.
 One advantage of ``unquoteDef`` over ``unquoteDecl`` is that
 ``unquoteDef`` is allowed in mutual blocks, allowing mutually
 recursion between generated definitions and hand-written definitions.
+
+Example usage:
+
+..
+  ::
+
+  module unquote-id where
+
+    _>>=_ = bindTC
+    _>>_ : ∀ {ℓ} {A : Set ℓ} → TC ⊤ → TC A → TC A
+    a >> b = a >>= λ { tt → b }
+
+::
+
+    arg′ : {A : Set} → Visibility → A → Arg A
+    arg′ v = arg (arg-info v (modality relevant quantity-ω))
+
+    -- Defining: id-name {A} x = x
+    defId : (id-name : Name) → TC ⊤
+    defId id-name = do
+      defineFun id-name
+        [ clause
+          ( ("A" , arg′ visible (agda-sort (lit 0)))
+          ∷ ("x" , arg′ visible (var 0 []))
+          ∷ [])
+          ( arg′ hidden (var 1)
+          ∷ arg′ visible (var 0)
+          ∷ [] )
+          (var 0 [])
+        ]
+
+    id : {A : Set} (x : A) → A
+    unquoteDef id = defId id
+
+    mkId : (id-name : Name) → TC ⊤
+    mkId id-name = do
+      ty ← quoteTC ({A : Set} (x : A) → A)
+      declareDef (arg′ visible id-name) ty
+      defId id-name
+
+    unquoteDecl id′ = mkId id′
+
+Another form of ``unquoteDecl`` is used to declare data types:
+
+.. code-block:: agda
+
+  unquoteDecl data x constructor c₁ .. cₙ = m
+
+``m`` is a metaprogram required to declare and define a data type ``x`` and
+its constructors ``c₁`` to ``cₙ`` using ``declareData`` and ``defineData``.
+
+.. note::
+   To debug code generated by ``unquoteDecl`` and ``unquoteDef`` it can be useful to
+   turn on the verbosity flags ``-v tc.unquote.decl:10`` (for type signatures) and
+   ``-v tc.unquote.def:10`` (for definition bodies). This will cause the generated code
+   to be printed on stdout when running from the command line or in the debug buffer
+   when loading from an editor.
+   Unlike other verbosity flags, these two are available even if Agda has been built with the ``debug`` Cabal flag.
+
+System Calls
+~~~~~~~~~~~~
+
+It is possible to run system calls as part of a metaprogram, using the ``execTC`` builtin.
+You can use this feature to implement type providers, or to call external solvers.
+For instance, the following example calls ``/bin/echo`` from Agda:
+
+.. code-block:: agda
+
+  postulate
+    execTC : (exe : String) (args : List String) (stdIn : String)
+           → TC (Σ Nat (λ _ → Σ String (λ _ → String)))
+
+  {-# BUILTIN AGDATCMEXEC execTC #-}
+
+  macro
+    echo : List String → Term → TC ⊤
+    echo args hole = do
+      (exitCode , (stdOut , stdErr)) ← execTC "echo" args ""
+      unify hole (lit (string stdOut))
+
+  _ : echo ("hello" ∷ "world" ∷ []) ≡ "hello world\n"
+  _ = refl
+
+The ``execTC`` builtin takes three arguments:
+the basename of the executable (e.g., ``"echo"``),
+a list of arguments,
+and the contents of the standard input.
+It returns a triple, consisting of
+the exit code (as a natural number),
+the contents of the standard output,
+and the contents of the standard error.
+
+It would be ill-advised to allow Agda to make arbitrary system calls.
+Hence, the feature must be activated by passing the :option:`--allow-exec` option,
+either on the command-line or using a pragma.
+(Note that :option:`--allow-exec` is incompatible with :option:`--safe`.)
+Furthermore, Agda can only call executables which are listed in the list of
+trusted executables, ``~/.agda/executables``.
+For instance, to run the example above, you must add ``/bin/echo`` to this file:
+
+.. code-block:: text
+
+  # contents of ~/.agda/executables
+  /bin/echo
+
+The executable can then be called by passing its basename to ``execTC``,
+subtracting the ``.exe`` on Windows.
+
+.. _quote-metas:
+
+Quote Metas
+~~~~~~~~~~~
+
+The option :option:`--quote-metas` enables term quotation constraints to be
+resolved even when the term has meta variables in it. This allows for typed
+hole-driven development for macros, where the expected type for an interactive
+hole given as a quoted argument to a macro can be constrained by the unquoting
+of the macro.
+
+In the following example without, :option:`--quote-metas` , the interactive hole
+will cause the constraint to be blocked, which looks something like
+``quoteTerm ?0 : Term (blocked on _17)``.
+
+.. code-block:: agda
+
+    open import Agda.Builtin.Unit
+    open import Agda.Builtin.Nat
+    open import Agda.Builtin.List
+
+    repeat-helper : Nat → Name → Term → Term
+    repeat-helper zero f a = a
+    repeat-helper (suc n) f a = con f ((arg (arg-info visible (modality relevant quantity-ω)) (repeat-helper n f a)) ∷ [])
+
+    macro
+      repeat : Nat → Name → Term → Term → TC ⊤
+      repeat n f a hole = unify hole (repeat-helper n f a)
+
+    _ : Nat
+    _ = repeat 10 suc {! !}
+
+However, actually unquoting the macro would reveal that the interactive hole
+should have type ``ℕ``. Enabling :option:`--quote-metas` allows exactly this.
+
+.. code-block:: agda
+
+    {-# OPTIONS --quote-metas #-}
+
+    -- ...
+
+    ex1 = repeat 10 f {! !}
+
+Now, the macro will be unquoted, which in this spliced code applies ``f`` to the
+hole's value. This constrains hole's type to be ``ℕ``, and the user can inspect
+the expected context and type of the hole to learn this.
+
+.. note::
+
+    In this example, the hole's type is not constrained by the spliced code, so
+    it will have an unknown inferred type.
+
+    .. code-block:: agda
+
+        ex2 = repeat 0 f {! !}

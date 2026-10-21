@@ -31,7 +31,8 @@ functor			 = $(call misc,Functor)
 latemeta		 = $(call misc,LateMetaVariableInstantiation)
 polyfunctor  = $(call misc,UniversePolymorphicFunctor)
 patternmatch = $(call misc,Coverage)
-miscTests		 = functor latemeta polyfunctor patternmatch
+instanceargs = $(call misc,InstanceArgs)
+miscTests		 = functor latemeta polyfunctor patternmatch instanceargs
 
 #proj
 proj = proj/$1.agda -iproj --ignore-interfaces
@@ -43,8 +44,7 @@ projTests = record data nested
 #std-lib
 stdlib = std-lib/$1.agda -istd-lib -i../std-lib/src
 any = $(call stdlib,Any)
-stdlibTests = any
+stdlibTests =
 
 # All tests
 allTests = $(catTests) $(acTests) $(syntaxTests) $(cwfTests) $(monadTests) $(miscTests) $(projTests) $(stdlibTests)
-

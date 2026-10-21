@@ -1,7 +1,11 @@
+error: [UnsolvedConstraints]
 Failed to solve the following constraints:
-  _4 := λ x → x [blocked on problem 4]
-  [4] ?0 =< Loop → Loop : Set
-Unsolved metas at the following locations:
-  Issue2710.agda:8,13-14
+  ?0 =< Loop → Loop (blocked on _3)
+
+Issue2710.agda:4.10-14: error: [UnsolvedInteractionMetas]
 Unsolved interaction metas at the following locations:
-  Issue2710.agda:4,10-14
+  Issue2710.agda:4.10-14
+
+Issue2710.agda:8.13-14: error: [UnsolvedMetaVariables]
+Unsolved metas at the following locations:
+  Issue2710.agda:8.13-14

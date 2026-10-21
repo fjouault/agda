@@ -1,7 +1,6 @@
 NOTE: Put drafts of release notes here that might be included in some
 future release.
 
-
 Pragmas and Options
 -------------------
 
@@ -30,3 +29,4 @@ Pragmas and Options
   ```
 
   [See also Issue [#709](https://github.com/agda/agda/issues/709)]
+

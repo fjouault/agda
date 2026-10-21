@@ -1,4 +1,4 @@
-{-# OPTIONS --without-K --show-implicit #-}
+{-# OPTIONS --cubical-compatible --show-implicit #-}
 
 module WithoutK3 where
 
@@ -16,7 +16,7 @@ J P p refl = p _
 
 -- Heterogeneous equality.
 
-data _≅_ {A : Set} (x : A) : {B : Set} → B → Set where
+data _≅_ {A : Set} (x : A) : {B : Set} → B → Set₁ where
   refl : x ≅ x
 
 -- Substitutivity.

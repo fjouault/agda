@@ -1,17 +1,25 @@
+
+{-# OPTIONS_GHC -Wunused-imports #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Agda.TypeChecking.Serialise.Instances.Highlighting where
 
-import qualified Agda.Interaction.Highlighting.Range   as HR
+import Control.Monad.Reader
+import qualified Data.Map.Strict as Map
+
+import Agda.Utils.Monad
+import Agda.Utils.Range (Range(..))
 import qualified Agda.Interaction.Highlighting.Precise as HP
+import Agda.Utils.RangeMap (PairInt(..))
+import qualified Agda.Utils.RangeMap as RM
 
 import Agda.TypeChecking.Serialise.Base
-import Agda.TypeChecking.Serialise.Instances.Common ()
+import Agda.TypeChecking.Serialise.Instances.Common () --instance only
 
-instance EmbPrj HR.Range where
-  icod_ (HR.Range a b) = icodeN' HR.Range a b
+instance EmbPrj Range where
+  icod_ (Range a b) = icodeN' Range a b
 
-  value = valueN HR.Range
+  value = valueN Range
 
 instance EmbPrj HP.NameKind where
   icod_ HP.Bound           = icodeN' HP.Bound
@@ -25,71 +33,93 @@ instance EmbPrj HP.NameKind where
   icod_ HP.Record          = icodeN 8 ()
   icod_ HP.Argument        = icodeN 9 ()
   icod_ HP.Macro           = icodeN 10 ()
+  icod_ HP.Generalizable   = icodeN 11 ()
 
   value = vcase valu where
-    valu []      = valuN HP.Bound
-    valu [1 , a] = valuN HP.Constructor a
-    valu [2]     = valuN HP.Datatype
-    valu [3]     = valuN HP.Field
-    valu [4]     = valuN HP.Function
-    valu [5]     = valuN HP.Module
-    valu [6]     = valuN HP.Postulate
-    valu [7]     = valuN HP.Primitive
-    valu [8]     = valuN HP.Record
-    valu [9]     = valuN HP.Argument
-    valu [10]    = valuN HP.Macro
-    valu _       = malformed
+    valu N0       = valuN HP.Bound
+    valu (N2 1 a) = valuN HP.Constructor a
+    valu (N1 2)   = valuN HP.Datatype
+    valu (N1 3)   = valuN HP.Field
+    valu (N1 4)   = valuN HP.Function
+    valu (N1 5)   = valuN HP.Module
+    valu (N1 6)   = valuN HP.Postulate
+    valu (N1 7)   = valuN HP.Primitive
+    valu (N1 8)   = valuN HP.Record
+    valu (N1 9)   = valuN HP.Argument
+    valu (N1 10)  = valuN HP.Macro
+    valu (N1 11)  = valuN HP.Generalizable
+    valu _        = malformed
 
 instance EmbPrj HP.Aspect where
-  icod_ HP.Comment       = icodeN 0 ()
-  icod_ HP.Option        = icodeN 1 ()
-  icod_ HP.Keyword       = icodeN 2 ()
-  icod_ HP.String        = icodeN 3 ()
-  icod_ HP.Number        = icodeN 4 ()
+  icod_ HP.Comment        = icodeN 0 ()
+  icod_ HP.Keyword       = icodeN 1 ()
+  icod_ HP.String        = icodeN 2 ()
+  icod_ HP.Number        = icodeN 3 ()
   icod_ HP.Symbol        = icodeN' HP.Symbol
-  icod_ HP.PrimitiveType = icodeN 6 ()
-  icod_ (HP.Name mk b)   = icodeN 7 HP.Name mk b
+  icod_ HP.PrimitiveType = icodeN 4 ()
+  icod_ (HP.Name mk b)   = icodeN 5 HP.Name mk b
+  icod_ HP.Pragma        = icodeN 6 ()
+  icod_ HP.Background    = icodeN 7 ()
+  icod_ HP.Markup        = icodeN 8 ()
+  icod_ HP.Hole          = icodeN 9 ()
+  icod_ (HP.URL a)       = icodeN 10 HP.URL a
 
   value = vcase valu where
-    valu [0]        = valuN HP.Comment
-    valu [1]        = valuN HP.Option
-    valu [2]        = valuN HP.Keyword
-    valu [3]        = valuN HP.String
-    valu [4]        = valuN HP.Number
-    valu []         = valuN HP.Symbol
-    valu [6]        = valuN HP.PrimitiveType
-    valu [7, mk, b] = valuN HP.Name mk b
-    valu _          = malformed
+    valu (N1 0)      = valuN HP.Comment
+    valu (N1 1)      = valuN HP.Keyword
+    valu (N1 2)      = valuN HP.String
+    valu (N1 3)      = valuN HP.Number
+    valu N0          = valuN HP.Symbol
+    valu (N1 4)      = valuN HP.PrimitiveType
+    valu (N3 5 mk b) = valuN HP.Name mk b
+    valu (N1 6)      = valuN HP.Pragma
+    valu (N1 7)      = valuN HP.Background
+    valu (N1 8)      = valuN HP.Markup
+    valu (N1 9)      = valuN HP.Hole
+    valu (N2 10 a)   = valuN HP.URL a
+    valu _           = malformed
 
 instance EmbPrj HP.OtherAspect where
-  icod_ HP.Error               = icodeN 0 ()
-  icod_ HP.DottedPattern       = icodeN' HP.DottedPattern
-  icod_ HP.UnsolvedMeta        = icodeN 2 ()
-  icod_ HP.TerminationProblem  = icodeN 3 ()
-  icod_ HP.IncompletePattern   = icodeN 4 ()
-  icod_ HP.TypeChecks          = icodeN 5 ()
-  icod_ HP.UnsolvedConstraint  = icodeN 6 ()
-  icod_ HP.PositivityProblem   = icodeN 7 ()
-  icod_ HP.ReachabilityProblem = icodeN 8 ()
-  icod_ HP.CoverageProblem     = icodeN 9 ()
-  icod_ HP.CatchallClause      = icodeN 10 ()
+  icod_ HP.Error                = pure 0
+  icod_ HP.ErrorWarning         = pure 1
+  icod_ HP.DottedPattern        = pure 2
+  icod_ HP.UnsolvedMeta         = pure 3
+  icod_ HP.TerminationProblem   = pure 4
+  -- 5 is unused
+  icod_ HP.TypeChecks           = pure 6
+  icod_ HP.UnsolvedConstraint   = pure 7
+  icod_ HP.PositivityProblem    = pure 8
+  icod_ HP.Deadcode             = pure 9
+  icod_ HP.CoverageProblem      = pure 10
+  icod_ HP.CatchallClause       = pure 11
+  icod_ HP.ConfluenceProblem    = pure 12
+  icod_ HP.MissingDefinition    = pure 13
+  icod_ HP.ShadowingInTelescope = pure 14
+  icod_ HP.CosmeticProblem      = pure 15
+  icod_ HP.InstanceProblem      = pure 16
 
-  value = vcase valu where
-    valu [0] = valuN HP.Error
-    valu []  = valuN HP.DottedPattern
-    valu [2] = valuN HP.UnsolvedMeta
-    valu [3] = valuN HP.TerminationProblem
-    valu [4] = valuN HP.IncompletePattern
-    valu [5] = valuN HP.TypeChecks
-    valu [6] = valuN HP.UnsolvedConstraint
-    valu [7] = valuN HP.PositivityProblem
-    valu [8] = valuN HP.ReachabilityProblem
-    valu [9] = valuN HP.CoverageProblem
-    valu [10] = valuN HP.CatchallClause
-    valu _   = malformed
+  value = \case
+    0  -> pure HP.Error
+    1  -> pure HP.ErrorWarning
+    2  -> pure HP.DottedPattern
+    3  -> pure HP.UnsolvedMeta
+    4  -> pure HP.TerminationProblem
+    -- 5 is unused
+    6  -> pure HP.TypeChecks
+    7  -> pure HP.UnsolvedConstraint
+    8  -> pure HP.PositivityProblem
+    9  -> pure HP.Deadcode
+    10 -> pure HP.CoverageProblem
+    11 -> pure HP.CatchallClause
+    12 -> pure HP.ConfluenceProblem
+    13 -> pure HP.MissingDefinition
+    14 -> pure HP.ShadowingInTelescope
+    15 -> pure HP.CosmeticProblem
+    16 -> pure HP.InstanceProblem
+    _  -> malformed
 
 instance EmbPrj HP.Aspects where
-  icod_ (HP.Aspects a b c d) = icodeN' HP.Aspects a b c d
+  icod_ (HP.Aspects a b c d e) = icodeN' HP.Aspects a b c d e
 
   value = valueN HP.Aspects
 
@@ -98,7 +128,58 @@ instance EmbPrj HP.DefinitionSite where
 
   value = valueN HP.DefinitionSite
 
-instance EmbPrj HP.CompressedFile where
-  icod_ (HP.CompressedFile f) = icodeN' HP.CompressedFile f
+data KVS a = Cons !Int !Int a !(KVS a) | Nil
 
-  value = valueN HP.CompressedFile
+toAscList' :: RM.RangeMap a -> KVS a
+toAscList' (RM.RangeMap x) =
+  Map.foldrWithKey'
+    (\a (b :!: c) !acc -> Cons a b c acc)
+    Nil x
+
+{-# INLINABLE icodRM #-}
+icodRM :: EmbPrj a => KVS a -> S Node
+icodRM xs = ReaderT \r -> case xs of
+  Nil ->
+    pure N0
+  Cons a b c Nil -> flip runReaderT r $
+    N3 <$!> icode a <*!> icode b <*!> icode c
+  Cons a b c (Cons d e f xs) -> flip runReaderT r $
+    N6 <$!> icode a <*!> icode b <*!> icode c
+       <*!> icode d <*!> icode e <*!> icode f <*!> icodRM xs
+
+{-# INLINABLE valueRM #-}
+valueRM :: EmbPrj a => Node -> R [(Int, PairInt a)]
+valueRM as = ReaderT \r -> case as of
+  N0 ->
+    pure []
+  N3 a b c -> flip runReaderT r do
+    !a <- value a
+    !b <- value b
+    !c <- value c
+    pure [(a, b :!: c)]
+  N6 a b c d e f as -> flip runReaderT r do
+    !a  <- value a
+    !b  <- value b
+    !c  <- value c
+    !d  <- value d
+    !e  <- value e
+    !f  <- value f
+    !as <- valueRM as
+    pure ((a, b :!: c):(d, e :!: f):as)
+  _ -> malformedIO
+
+-- We serialize as a flat list of triples
+instance EmbPrj a => EmbPrj (RM.RangeMap a) where
+  {-# INLINE icod_ #-}
+  icod_ x = icodeNode =<< icodRM (toAscList' x) where
+  {-# INLINE value #-}
+  value = vcase (\n -> RM.RangeMap . Map.fromDistinctAscList <$!> valueRM n) where
+
+instance EmbPrj HP.TokenBased where
+  icod_ HP.TokenBased        = pure 0
+  icod_ HP.NotOnlyTokenBased = pure 1
+
+  value = \case
+    0 -> pure HP.TokenBased
+    1 -> pure HP.NotOnlyTokenBased
+    _ -> malformed

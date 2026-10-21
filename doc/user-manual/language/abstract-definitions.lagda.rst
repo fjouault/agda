@@ -1,6 +1,6 @@
 ..
   ::
-  -- {-# OPTIONS --allow-unsolved-metas #-}
+  {-# OPTIONS --rewriting --sized-types #-}
   module language.abstract-definitions where
 
   open import language.built-ins
@@ -47,9 +47,10 @@ Synopsis
   details (e.g. expose reduction behavior by using propositional
   equality).
 
-* Inside ``private`` type signatures in ``abstract`` blocks, abstract
-  definitions do reduce. However, there are some problems with this. See `Issue
-  #418 <https://github.com/agda/agda/issues/418#issuecomment-245590857>`_.
+  Consequently information from checking the body of a definition cannot leak
+  into its type signature, effectively disabling type inference for abstract
+  definitions. This means that all abstract definitions need a complete type
+  signature.
 
 * The reach of the ``abstract`` keyword block extends recursively to
   the ``where``-blocks of a function and the declarations inside of a
@@ -66,6 +67,7 @@ natural numbers::
 
     abstract
 
+      ℤ : Set
       ℤ = Nat × Nat
 
       0ℤ : ℤ
@@ -77,11 +79,19 @@ natural numbers::
       _+ℤ_ : (x y : ℤ) → ℤ
       (p , n) +ℤ (p' , n') = (p + p') , (n + n')
 
+      _*ℤ_ : (x y : ℤ) → ℤ
+      (a , b) *ℤ (c , d) = ((a * c) + (b * d)) , ((a * d) + (b * c))
+
+      infixl 20 _+ℤ_
+      infixl 30 _*ℤ_
+
       -ℤ_ : ℤ → ℤ
       -ℤ (p , n) = (n , p)
 
       _≡ℤ_ : (x y : ℤ) → Set
       (p , n) ≡ℤ (p' , n') = (p + n') ≡ (p' + n)
+
+      infix 10 _≡ℤ_
 
       private
         postulate
@@ -100,15 +110,20 @@ representation of integers as pairs.  As such, it is rejected by Agda:
 when checking its type signature, ``proj₁ x`` fails to type check
 since ``x`` is of abstract type ``ℤ``.  Remember that the abstract
 definition of ``ℤ`` does not unfold in type signatures, even when in
-an abstract block!  However, if we make ``shape-of-ℤ`` private,
-unfolding of abstract definitions like ``ℤ`` is enabled, and we
-succeed::
+an abstract block!  To work around this we have to define aliases for
+the projections functions::
 
   -- A property about the representation of zero integers:
 
     abstract
       private
-        shape-of-0ℤ : ∀ (x : ℤ) (is0ℤ : x ≡ℤ 0ℤ) → proj₁ x ≡ proj₂ x
+        posZ : ℤ → Nat
+        posZ = proj₁
+
+        negZ : ℤ → Nat
+        negZ = proj₂
+
+        shape-of-0ℤ : ∀ (x : ℤ) (is0ℤ : x ≡ℤ 0ℤ) → posZ x ≡ negZ x
         shape-of-0ℤ (p , n) refl rewrite +comm p 0 = refl
 
 By requiring ``shape-of-0ℤ`` to be private to type-check, leaking of
@@ -123,6 +138,7 @@ the abstract definitions of the parent module are transparent::
 
   module M1 where
     abstract
+      x : Nat
       x = 0
 
     module M2 where
@@ -133,14 +149,18 @@ the abstract definitions of the parent module are transparent::
 Thus, child modules can see into the representation choices of their
 parent modules.  However, parent modules cannot see like this into
 child modules, nor can sibling modules see through each others abstract
-definitions.
+definitions. An exception to this is anonymous modules, which share
+abstract scope with their parent module, allowing parent or sibling
+modules to see inside their abstract definitions.
 
 The reach of the ``abstract`` keyword does not extend into modules::
 
   module Parent where
     abstract
       module Child where
+        y : Nat
         y = 0
+      x : Nat
       x = 0  -- to avoid "useless abstract" error
 
     y-is-0 : Child.y ≡ 0
@@ -164,24 +184,3 @@ uncles::
         where
         x≡y : x ≡ 0
         x≡y = refl
-
-Type signatures in ``where`` blocks are private, so it is fine to make
-type abbreviations in ``where`` blocks of abstract definitions::
-
-  module WherePrivate where
-    abstract
-      x : Nat
-      x = proj₁ t
-        where
-        T = Nat × Nat
-        t : T
-        t = 0 , 1
-        p : proj₁ t ≡ 0
-        p = refl
-
-Note that if ``p`` was not private, application ``proj₁ t`` in its type
-would be ill-formed, due to the abstract definition of ``T``.
-
-Named ``where``-modules do not make their declarations private, thus
-this example will fail if you replace ``x``'s ``where`` by ``module M
-where``.

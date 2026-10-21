@@ -1,5 +1,3 @@
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE UndecidableInstances      #-}
 
 -- | Tools for benchmarking and accumulating results.
 --   Nothing Agda-specific in here.
@@ -8,26 +6,33 @@ module Agda.Utils.Benchmark where
 
 import Prelude hiding (null)
 
-import qualified Control.Exception as E (evaluate)
+import Control.DeepSeq
+import Control.Exception qualified as E (evaluate)
+import Control.Monad.Except
 import Control.Monad.Reader
+import Control.Monad.Writer
 import Control.Monad.State
+import Control.Monad.IO.Class ( MonadIO(..) )
 
-import Data.Foldable (foldMap)
-import Data.Functor
-import Data.Function
-import qualified Data.List as List
+
+import Data.Function (on)
+import Data.List qualified as List
 import Data.Monoid
 import Data.Maybe
 
-import qualified Text.PrettyPrint.Boxes as Boxes
+import GHC.Generics (Generic)
 
+import Text.PrettyPrint.Boxes qualified as Boxes
+
+import Agda.Utils.ListT
 import Agda.Utils.Null
 import Agda.Utils.Monad hiding (finally)
-import qualified Agda.Utils.Maybe.Strict as Strict
-import Agda.Utils.Pretty
+import Agda.Utils.Maybe.Strict qualified as Strict
+import Agda.Syntax.Common.Pretty
 import Agda.Utils.Time
 import Agda.Utils.Trie (Trie)
-import qualified Agda.Utils.Trie as Trie
+import Agda.Utils.Trie qualified as Trie
+import Agda.Utils.StrictReader qualified as Strict
 
 
 -- * Benchmark trie
@@ -41,6 +46,7 @@ type CurrentAccount a = Strict.Maybe (Account a, CPUTime)
 type Timings        a = Trie a CPUTime
 
 data BenchmarkOn a = BenchmarkOff | BenchmarkOn | BenchmarkSome (Account a -> Bool)
+  deriving Generic
 
 isBenchmarkOn :: Account a -> BenchmarkOn a -> Bool
 isBenchmarkOn _ BenchmarkOff      = False
@@ -57,6 +63,7 @@ data Benchmark a = Benchmark
   , timings        :: !(Timings a)
     -- ^ The accounts and their accumulated timing bill.
   }
+  deriving Generic
 
 -- | Initial benchmark structure (empty).
 instance Null (Benchmark a) where
@@ -97,7 +104,7 @@ instance (Ord a, Pretty a) => Pretty (Benchmark a) where
     aggrTimes = do
       (a, (t, aggrT)) <- zip accounts times0
       return $ if t == aggrT || null a
-               then Boxes.text ""
+               then ""
                else Boxes.text $ "(" ++ prettyShow aggrT ++ ")"
 
     -- Generate a table.
@@ -113,7 +120,7 @@ instance (Ord a, Pretty a) => Pretty (Benchmark a) where
            sum times : times
     -- Thid column: Aggregate times.
     col3 = Boxes.vcat Boxes.right $
-           Boxes.text "" : aggrTimes
+           "" : aggrTimes
 
     showAccount [] = "Miscellaneous"
     showAccount ks = List.intercalate "." $ map prettyShow ks
@@ -123,16 +130,14 @@ instance (Ord a, Pretty a) => Pretty (Benchmark a) where
 
 -- | Monad with access to benchmarking data.
 
-class (Ord a, Functor m, MonadIO m) => MonadBench a m | m -> a where
-  getBenchmark :: m (Benchmark a)
+class (Ord (BenchPhase m), Functor m, MonadIO m) => MonadBench m where
+  type BenchPhase m
+  getBenchmark :: m (Benchmark (BenchPhase m))
 
-  getsBenchmark :: (Benchmark a -> c) -> m c
-  getsBenchmark f = f <$> getBenchmark
-
-  putBenchmark :: Benchmark a -> m ()
+  putBenchmark :: Benchmark (BenchPhase m) -> m ()
   putBenchmark b = modifyBenchmark $ const b
 
-  modifyBenchmark :: (Benchmark a -> Benchmark a) -> m ()
+  modifyBenchmark :: (Benchmark (BenchPhase m) -> Benchmark (BenchPhase m)) -> m ()
   modifyBenchmark f = do
     b <- getBenchmark
     putBenchmark $! f b
@@ -140,33 +145,71 @@ class (Ord a, Functor m, MonadIO m) => MonadBench a m | m -> a where
   -- | We need to be able to terminate benchmarking in case of an exception.
   finally :: m b -> m c -> m b
 
--- needs UndecidableInstances because of weakness of FunctionalDependencies
-instance MonadBench a m => MonadBench a (ReaderT r m) where
+  {-# MINIMAL getBenchmark , (putBenchmark | modifyBenchmark) , finally #-}
+
+getsBenchmark :: MonadBench m => (Benchmark (BenchPhase m) -> c) -> m c
+getsBenchmark f = f <$> getBenchmark
+
+instance MonadBench m => MonadBench (ReaderT r m) where
+  type BenchPhase (ReaderT r m) = BenchPhase m
   getBenchmark    = lift $ getBenchmark
   putBenchmark    = lift . putBenchmark
   modifyBenchmark = lift . modifyBenchmark
   finally m f = ReaderT $ \ r ->
     finally (m `runReaderT` r) (f `runReaderT` r)
 
-instance MonadBench a m => MonadBench a (StateT r m) where
+instance MonadBench m => MonadBench (Strict.ReaderT r m) where
+  type BenchPhase (Strict.ReaderT r m) = BenchPhase m
+  getBenchmark    = lift $ getBenchmark
+  putBenchmark    = lift . putBenchmark
+  modifyBenchmark = lift . modifyBenchmark
+  finally m f = Strict.ReaderT $ \ r ->
+    finally (m `Strict.runReaderT` r) (f `Strict.runReaderT` r)
+
+instance (MonadBench m, Monoid w) => MonadBench (WriterT w m) where
+  type BenchPhase (WriterT w m) = BenchPhase m
+  getBenchmark    = lift $ getBenchmark
+  putBenchmark    = lift . putBenchmark
+  modifyBenchmark = lift . modifyBenchmark
+  finally m f = WriterT $ finally (runWriterT m) (runWriterT f)
+
+instance MonadBench m => MonadBench (StateT r m) where
+  type BenchPhase (StateT r m) = BenchPhase m
+
   getBenchmark    = lift $ getBenchmark
   putBenchmark    = lift . putBenchmark
   modifyBenchmark = lift . modifyBenchmark
   finally m f = StateT $ \s ->
     finally (m `runStateT` s) (f `runStateT` s)
 
+instance MonadBench m => MonadBench (ExceptT e m) where
+  type BenchPhase (ExceptT e m) = BenchPhase m
+
+  getBenchmark    = lift $ getBenchmark
+  putBenchmark    = lift . putBenchmark
+  modifyBenchmark = lift . modifyBenchmark
+  finally m f = ExceptT $ finally (runExceptT m) (runExceptT f)
+
+instance MonadBench m => MonadBench (ListT m) where
+  type BenchPhase (ListT m) = BenchPhase m
+
+  getBenchmark    = lift getBenchmark
+  putBenchmark    = lift . putBenchmark
+  modifyBenchmark = lift . modifyBenchmark
+  finally m f = ListT $ finally (runListT m) (runListT f)
+
 -- | Turn benchmarking on/off.
 
-setBenchmarking :: MonadBench a m => BenchmarkOn a -> m ()
+setBenchmarking :: MonadBench m => BenchmarkOn (BenchPhase m) -> m ()
 setBenchmarking b = modifyBenchmark $ mapBenchmarkOn $ const b
 
 -- | Bill current account with time up to now.
 --   Switch to new account.
 --   Return old account (if any).
 
-switchBenchmarking :: MonadBench a m
-  => Strict.Maybe (Account a)      -- ^ Maybe new account.
-  -> m (Strict.Maybe (Account a))  -- ^ Maybe old account.
+switchBenchmarking :: MonadBench m
+  => Strict.Maybe (Account (BenchPhase m))      -- ^ Maybe new account.
+  -> m (Strict.Maybe (Account (BenchPhase m)))  -- ^ Maybe old account.
 switchBenchmarking newAccount = do
   now <- liftIO $ getCPUTime
   -- Stop and bill current benchmarking.
@@ -179,15 +222,16 @@ switchBenchmarking newAccount = do
 
 -- | Resets the account and the timing information.
 
-reset :: MonadBench a m => m ()
+reset :: MonadBench m => m ()
 reset = modifyBenchmark $
   mapCurrentAccount (const Strict.Nothing) .
   mapTimings (const Trie.empty)
 
+{-# INLINABLE billTo #-}
 -- | Bill a computation to a specific account.
 --   Works even if the computation is aborted by an exception.
 
-billTo :: MonadBench a m => Account a -> m c -> m c
+billTo :: MonadBench m => Account (BenchPhase m) -> m c -> m c
 billTo account m = ifNotM (isBenchmarkOn account <$> getsBenchmark benchmarkOn) m $ do
   -- Switch to new account.
   old <- switchBenchmarking $ Strict.Just account
@@ -195,7 +239,7 @@ billTo account m = ifNotM (isBenchmarkOn account <$> getsBenchmark benchmarkOn) 
   (liftIO . E.evaluate =<< m) `finally` switchBenchmarking old
 
 -- | Bill a CPS function to an account. Can't handle exceptions.
-billToCPS :: MonadBench a m => Account a -> ((b -> m c) -> m c) -> (b -> m c) -> m c
+billToCPS :: MonadBench m => Account (BenchPhase m) -> ((b -> m c) -> m c) -> (b -> m c) -> m c
 billToCPS account f k = ifNotM (isBenchmarkOn account <$> getsBenchmark benchmarkOn) (f k) $ do
   -- Switch to new account.
   old <- switchBenchmarking $ Strict.Just account
@@ -204,5 +248,20 @@ billToCPS account f k = ifNotM (isBenchmarkOn account <$> getsBenchmark benchmar
     k x
 
 -- | Bill a pure computation to a specific account.
-billPureTo :: MonadBench a m  => Account a -> c -> m c
+billPureTo :: MonadBench m  => Account (BenchPhase m) -> c -> m c
 billPureTo account = billTo account . return
+
+-- NFData instances.
+
+instance NFData a => NFData (Benchmark a)
+
+-- Andreas, 2025-07-31:
+-- Generic derivation of NFData with embedded function spaces
+-- throws deprecation warning in GHC 9.10.3 (deepseq-1.5.2.0),
+-- see https://github.com/haskell/deepseq/issues/111 ,
+-- so we spell it out.
+instance NFData (BenchmarkOn a) where
+  rnf = \case
+    BenchmarkOff -> ()
+    BenchmarkOn  -> ()
+    BenchmarkSome _fun -> ()  -- functions cannot be normalized

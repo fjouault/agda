@@ -1,111 +1,159 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.Monad.Env where
 
-import Control.Monad.Reader
 import qualified Data.List as List
-import Data.Monoid
+
+import Data.Maybe (fromMaybe)
 
 import Agda.Syntax.Common
 import Agda.Syntax.Abstract.Name
 
 import Agda.TypeChecking.Monad.Base
 
+import qualified Agda.Utils.SmallSet as SmallSet
+
+import Agda.Utils.Impossible
+
 -- | Get the name of the current module, if any.
 {-# SPECIALIZE currentModule :: TCM ModuleName #-}
 {-# SPECIALIZE currentModule :: ReduceM ModuleName #-}
-currentModule :: MonadReader TCEnv m => m ModuleName
-currentModule = asks envCurrentModule
+currentModule :: MonadTCEnv m => m ModuleName
+currentModule = viewTC eCurrentModule
 
+{-# INLINE withCurrentModule #-}
 -- | Set the name of the current module.
-withCurrentModule :: ModuleName -> TCM a -> TCM a
-withCurrentModule m =
-    local $ \e -> e { envCurrentModule = m }
+withCurrentModule :: (MonadTCEnv m) => ModuleName -> m a -> m a
+withCurrentModule m = localTC $ set eCurrentModule m
+
+-- | Get the path of the currently checked file
+getCurrentPath :: (MonadTCEnv m, MonadFileId m) => m AbsolutePath
+getCurrentPath = do
+  i <- fromMaybe __IMPOSSIBLE__ <$> viewTC eCurrentPath
+  fileFromId i
 
 -- | Get the number of variables bound by anonymous modules.
 {-# SPECIALIZE getAnonymousVariables :: ModuleName -> TCM Nat #-}
 {-# SPECIALIZE getAnonymousVariables :: ModuleName -> ReduceM Nat #-}
-getAnonymousVariables :: MonadReader TCEnv m => ModuleName -> m Nat
+getAnonymousVariables :: MonadTCEnv m => ModuleName -> m Nat
 getAnonymousVariables m = do
-  ms <- asks envAnonymousModules
+  ms <- viewTC eAnonymousModules
   return $ sum [ n | (m', n) <- ms, mnameToList m' `List.isPrefixOf` mnameToList m ]
 
+{-# INLINE withAnonymousModule #-}
 -- | Add variables bound by an anonymous module.
 withAnonymousModule :: ModuleName -> Nat -> TCM a -> TCM a
 withAnonymousModule m n =
-  local $ \e -> e { envAnonymousModules   = (m, n) : envAnonymousModules e
-                  }
+  localTC $ over eAnonymousModules \ms -> (m, n) : ms
 
+{-# INLINE withEnv #-}
 -- | Set the current environment to the given
-withEnv :: TCEnv -> TCM a -> TCM a
-withEnv env = local $ \ env0 -> env
+withEnv :: MonadTCEnv m => TCEnv -> m a -> m a
+withEnv env = localTC \env0 ->
   -- Keep persistent settings
-  { envAllowDestructiveUpdate = envAllowDestructiveUpdate env0
-  , envPrintMetasBare         = envPrintMetasBare env0
-  }
+  env & ePrintMetasBare .~ (env0 ^. ePrintMetasBare)
 
 -- | Get the current environment
 getEnv :: TCM TCEnv
-getEnv = ask
+getEnv = askTC
 
--- | Increases the module nesting level by one in the given
--- computation.
-withIncreasedModuleNestingLevel :: TCM a -> TCM a
-withIncreasedModuleNestingLevel =
-  local (\e -> e { envModuleNestingLevel =
-                     envModuleNestingLevel e + 1 })
-
+{-# INLINE withHighlightingLevel #-}
 -- | Set highlighting level
 withHighlightingLevel :: HighlightingLevel -> TCM a -> TCM a
-withHighlightingLevel h = local $ \e -> e { envHighlightingLevel = h }
+withHighlightingLevel h = localTC $ set eHighlightingLevel h
 
+{-# INLINE doExpandLast #-}
 -- | Restore setting for 'ExpandLast' to default.
 doExpandLast :: TCM a -> TCM a
-doExpandLast = local $ \ e -> e { envExpandLast = ExpandLast }
+doExpandLast = localTC $ over eExpandLast setExpand where
+    setExpand ReallyDontExpandLast = ReallyDontExpandLast
+    setExpand _                    = ExpandLast
 
+{-# INLINE dontExpandLast #-}
 dontExpandLast :: TCM a -> TCM a
-dontExpandLast = local $ \ e -> e { envExpandLast = DontExpandLast }
+dontExpandLast = localTC $ set eExpandLast DontExpandLast
+
+{-# INLINE reallyDontExpandLast #-}
+reallyDontExpandLast :: TCM a -> TCM a
+reallyDontExpandLast = localTC $ set eExpandLast ReallyDontExpandLast
 
 -- | If the reduced did a proper match (constructor or literal pattern),
 --   then record this as simplification step.
-{-# SPECIALIZE performedSimplification :: TCM a -> TCM a #-}
-performedSimplification :: MonadReader TCEnv m => m a -> m a
-performedSimplification = local $ \ e -> e { envSimplification = YesSimplification }
+{-# INLINE performedSimplification #-}
+performedSimplification :: MonadTCEnv m => m a -> m a
+performedSimplification = localTC $ set eSimplification YesSimplification
 
-{-# SPECIALIZE performedSimplification' :: Simplification -> TCM a -> TCM a #-}
-performedSimplification' :: MonadReader TCEnv m => Simplification -> m a -> m a
-performedSimplification' simpl = local $ \ e -> e { envSimplification = simpl `mappend` envSimplification e }
+{-# INLINE performedSimplification' #-}
+performedSimplification' :: MonadTCEnv m => Simplification -> m a -> m a
+performedSimplification' simpl = localTC $ over' eSimplification (simpl <>)
 
-getSimplification :: MonadReader TCEnv m => m Simplification
-getSimplification = asks envSimplification
+getSimplification :: MonadTCEnv m => m Simplification
+getSimplification = viewTC eSimplification
 
 -- * Controlling reduction.
 
 -- | Lens for 'AllowedReductions'.
 updateAllowedReductions :: (AllowedReductions -> AllowedReductions) -> TCEnv -> TCEnv
-updateAllowedReductions f e = e { envAllowedReductions = f (envAllowedReductions e) }
+updateAllowedReductions = over eAllowedReductions
 
-modifyAllowedReductions :: (AllowedReductions -> AllowedReductions) -> TCM a -> TCM a
-modifyAllowedReductions = local . updateAllowedReductions
+{-# INLINE modifyAllowedReductions #-}
+modifyAllowedReductions :: MonadTCEnv m => (AllowedReductions -> AllowedReductions) -> m a -> m a
+modifyAllowedReductions = localTC . updateAllowedReductions
 
-putAllowedReductions :: AllowedReductions -> TCM a -> TCM a
+{-# INLINE putAllowedReductions #-}
+putAllowedReductions :: MonadTCEnv m => AllowedReductions -> m a -> m a
 putAllowedReductions = modifyAllowedReductions . const
 
+{-# INLINE onlyReduceProjections #-}
 -- | Reduce @Def f vs@ only if @f@ is a projection.
-onlyReduceProjections :: TCM a -> TCM a
-onlyReduceProjections = putAllowedReductions [ProjectionReductions]
+onlyReduceProjections :: MonadTCEnv m => m a -> m a
+onlyReduceProjections = modifyAllowedReductions $ SmallSet.intersection $
+  SmallSet.singleton ProjectionReductions
 
+{-# INLINE allowAllReductions #-}
 -- | Allow all reductions except for non-terminating functions (default).
-allowAllReductions :: TCM a -> TCM a
+allowAllReductions :: MonadTCEnv m => m a -> m a
 allowAllReductions = putAllowedReductions allReductions
 
+{-# INLINE allowNonTerminatingReductions #-}
 -- | Allow all reductions including non-terminating functions.
-allowNonTerminatingReductions :: TCM a -> TCM a
-allowNonTerminatingReductions = putAllowedReductions $ [NonTerminatingReductions] ++ allReductions
+allowNonTerminatingReductions :: MonadTCEnv m => m a -> m a
+allowNonTerminatingReductions = putAllowedReductions reallyAllReductions
+
+{-# INLINE onlyReduceTypes #-}
+-- | Allow all reductions when reducing types. Otherwise only allow
+--   inlined functions to be unfolded.
+onlyReduceTypes :: MonadTCEnv m => m a -> m a
+onlyReduceTypes = modifyAllowedReductions $ SmallSet.intersection $
+  SmallSet.fromList [TypeLevelReductions, InlineReductions]
+
+{-# INLINE typeLevelReductions #-}
+-- | Update allowed reductions when working on types
+typeLevelReductions :: MonadTCEnv m => m a -> m a
+typeLevelReductions = modifyAllowedReductions $ \reds -> if
+  | TypeLevelReductions `SmallSet.member` reds ->
+      if NonTerminatingReductions `SmallSet.member` reds
+       then reallyAllReductions
+       else allReductions
+  | otherwise -> reds
 
 -- * Concerning 'envInsideDotPattern'
 
+{-# INLINE insideDotPattern #-}
 insideDotPattern :: TCM a -> TCM a
-insideDotPattern = local $ \e -> e { envInsideDotPattern = True }
+insideDotPattern = localTC $ set eInsideDotPattern True
 
 isInsideDotPattern :: TCM Bool
-isInsideDotPattern = asks envInsideDotPattern
+isInsideDotPattern = viewTC eInsideDotPattern
+
+{-# INLINE callByName #-}
+-- | Don't use call-by-need evaluation for the given computation.
+callByName :: TCM a -> TCM a
+callByName = localTC $ set eCallByNeed False
+
+{-# INLINE dontFoldLetBindings #-}
+-- | Don't fold let bindings when printing. This is a bit crude since it disables any folding of let
+--   bindings at all. In many cases it's better to use `removeLetBinding` before printing to drop
+--   the let bindings that should not be folded.
+dontFoldLetBindings :: MonadTCEnv m => m a -> m a
+dontFoldLetBindings = localTC $ set eFoldLetBindings False

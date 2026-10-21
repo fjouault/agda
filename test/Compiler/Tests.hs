@@ -1,37 +1,32 @@
-{-# LANGUAGE CPP                  #-}
-{-# LANGUAGE DoAndIfThenElse      #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE OverloadedStrings    #-}
-{-# LANGUAGE TypeSynonymInstances #-}
-{-# LANGUAGE PatternGuards        #-}
 
 module Compiler.Tests where
 
 import Utils
 import Test.Tasty
-import Test.Tasty.Silver.Advanced (readFileMaybe)
 import Test.Tasty.Silver
 import Test.Tasty.Silver.Filter
+import Data.Bits (finiteBitSize)
 import qualified Data.Text as T
 import Data.Text.Encoding
 import Data.Monoid
-import Data.List
+import Data.List (isPrefixOf)
+import System.Directory
 import System.IO.Temp
 import System.FilePath
 import System.Environment
 import System.Exit
+import qualified System.Process as P
 import System.Process.Text as PT
 
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ((<$>))
-#endif
-#if __GLASGOW_HASKELL__ <= 706
-import Control.Monad ( void )
-import System.SetEnv (setEnv)
-#endif
 
 import Control.Monad (forM)
 import Data.Maybe
+import Text.Read
+
+import Agda.Utils.List
+import Agda.Utils.List1 (wordsBy, toList)
+import Agda.Utils.Functor ((<&>))
+import Utils (readFileMaybeText)
 
 type GHCArgs = [String]
 
@@ -44,7 +39,15 @@ data ExecResult
     { result :: ProgramResult }
   deriving (Show, Read, Eq)
 
-data Compiler = MAlonzo | JS
+data CodeOptimization = NonOptimized | Optimized | MinifiedOptimized
+  deriving (Show, Read, Eq, Enum, Bounded)
+
+data Strict = Strict | StrictData | Lazy
+  deriving (Show, Read, Eq, Enum, Bounded)
+
+data Compiler
+  = MAlonzo Strict
+  | JS CodeOptimization
   deriving (Show, Read, Eq)
 
 data CompilerOptions
@@ -60,7 +63,9 @@ data TestOptions
     } deriving (Show, Read)
 
 allCompilers :: [Compiler]
-allCompilers = [MAlonzo, JS]
+allCompilers
+  =  [ MAlonzo strict | strict <- [Lazy, StrictData, Strict]]
+  ++ [ JS opt   | opt <- [minBound..] ]
 
 defaultOptions :: TestOptions
 defaultOptions = TestOptions
@@ -72,26 +77,89 @@ defaultOptions = TestOptions
 
 disabledTests :: [RegexFilter]
 disabledTests =
-  [ -- See issue 1528
-    RFInclude "Compiler/.*/simple/Sharing"
-  , RFInclude "Compiler/JS/simple/VecReverseIrr"
-    -- Fix to 2524 is too unsafe
-  , RFInclude "Compiler/.*/simple/Issue2524"
+  -----------------------------------------------------------------------------
+  -- The GHC backend no longer allows compiling abstract definitions
+  -- to user-chosen Haskell representations.
+  disable "Compiler/MAlonzo_.*/simple/Issue2524" :
+  -----------------------------------------------------------------------------
+  -- The test case for #2918 stopped working when inlining of
+  -- recursive pattern-matching lambdas was disabled.
+  disable "Compiler/MAlonzo_.*/simple/Issue2918$" :
+  -----------------------------------------------------------------------------
+  -- The following test cases fail (at least at the time of writing)
+  -- for the JS backend.
+  disable "Compiler/JS_Optimized/simple/ModuleReexport" :
+  disable "Compiler/JS_MinifiedOptimized/simple/ModuleReexport" :
+  -----------------------------------------------------------------------------
+  -- The following test cases are GHC backend specific and thus disabled on JS.
+  disable "Compiler/JS_.*/simple/Issue2821" :
+  disable "Compiler/JS_.*/simple/Issue2879-.*" :
+  disable "Compiler/JS_.*/simple/Issue2909-.*" :
+  disable "Compiler/JS_.*/simple/Issue2914" :
+  disable "Compiler/JS_.*/simple/Issue2918$" :
+  disable "Compiler/JS_.*/simple/Issue3732" :
+  disable "Compiler/JS_.*/simple/VecReverseIrr" :
+  disable "Compiler/JS_.*/simple/VecReverseErased" :  -- RangeError: Maximum call stack size exceeded
+  -----------------------------------------------------------------------------
+  []
+  where disable = RFInclude
+
+-- | Filtering out compiler tests that require Agda built with -fdebug.
+
+fdebugTestFilter :: [RegexFilter]
+fdebugTestFilter =
+-- This list was crafted using
+--    grep -RP '(?<!-- ){-# OPTIONS.* -v' | grep Compiler/
+--  and screening the results (e.g. for comments)
+  [ disable "Compiler/simple/UnusedArguments"
+  , disable "Compiler/simple/EraseRefl"
+  , disable "Compiler/simple/InlineRecursive"
+  , disable "Compiler/simple/Word"
+  , disable "Compiler/simple/CompileNumbers"
+  , disable "Compiler/simple/CaseOnCase"
+  , disable "Compiler/simple/CompareNat"
+  , disable "Compiler/simple/CompileCatchAll"
   ]
+  where disable = RFInclude
+
+-- | Filtering out compiler tests using the Agda standard library.
+
+stdlibTestFilter :: [RegexFilter]
+stdlibTestFilter =
+  [ disable "Compiler/.*/with-stdlib"
+  ]
+  where disable = RFInclude
 
 tests :: IO TestTree
 tests = do
-  hasNode <- doesCommandExist "node"
-  let enabledCompilers = [MAlonzo] ++ [JS | hasNode]
+  nodeBin    <- findExecutable "node"
+  ghcVersion <- findGHCVersion
+  let ghcVersionAtLeast9 = case ghcVersion of
+        Just (n : _) | n >= 9 -> True
+        _                     -> False
+      enabledCompilers =
+        [ MAlonzo s
+        | s <- [Lazy, StrictData] ++
+               [Strict | ghcVersionAtLeast9]
+        ] ++
+        [ JS opt
+        | isJust nodeBin
+        , opt   <- [minBound..]
+        ]
+  _ <- case nodeBin of
+    Nothing -> putStrLn "No JS node binary found, skipping JS tests."
+    Just n -> putStrLn $ "Using JS node binary at " ++ n
 
-  ts <- mapM forComp enabledCompilers
-  return $ testGroup "Compiler" ts
-  where
-    forComp comp = testGroup (show comp) . catMaybes
+  ts <- forM enabledCompilers \ comp -> do
+    testGroup (map spaceToUnderscore $ show comp) . catMaybes
         <$> sequence
             [ Just <$> simpleTests comp
             , Just <$> stdlibTests comp
             , specialTests comp]
+  return $ testGroup "Compiler" ts
+  where
+    spaceToUnderscore ' ' = '_'
+    spaceToUnderscore c = c
 
 simpleTests :: Compiler -> IO TestTree
 simpleTests comp = do
@@ -106,23 +174,42 @@ simpleTests comp = do
   return $ testGroup "simple" $ catMaybes tests'
 
   where compArgs :: Compiler -> AgdaArgs
-        compArgs MAlonzo = ghcArgsAsAgdaArgs ["-itest/"]
-        compArgs JS = []
+        compArgs MAlonzo{} =
+          -- Compile the generated code without optimising it: the test
+          -- suite only checks the behaviour of the compiled program, and
+          -- GHC's -O pass dominates the runtime of each test.
+          ghcArgsAsAgdaArgs ["-itest/", "-fno-excess-precision", "-O0"]
+        compArgs JS{} = []
 
 -- The Compiler tests using the standard library are horribly
 -- slow at the moment (1min or more per test case).
 stdlibTests :: Compiler -> IO TestTree
 stdlibTests comp = do
   let testDir = "test" </> "Compiler" </> "with-stdlib"
-  inps <- return [testDir </> "AllStdLib.agda"]
+  let inps    = map (testDir </>) ["AllStdLib.agda", "AllStdLibJS.agda"]
     -- put all tests in AllStdLib to avoid compiling the standard library
     -- multiple times
 
   let extraArgs :: [String]
-      extraArgs = [ "-i" ++ testDir, "-i" ++ "std-lib" </> "src", "-istd-lib" ]
+      extraArgs =
+        [ "-i" ++ testDir
+        , "-i" ++ "std-lib" </> "src"
+        , "-istd-lib"
+        , "--warning=noUnsupportedIndexedMatch"
+        ]
 
-  let rtsOptions :: [String]
-      rtsOptions = [ "+RTS", "-H1G", "-M1.5G", "-RTS" ]
+  let -- Note that -M4G can trigger the following error on 32-bit
+      -- systems: "error in RTS option -M4G: size outside allowed
+      -- range (4096 - 4294967295)".
+      maxHeapSize =
+        if finiteBitSize (undefined :: Int) == 32 then
+          "-M2G"
+        else
+          "-M4G"
+
+      rtsOptions :: [String]
+      -- See Issue #3792.
+      rtsOptions = [ "+RTS", "-H2G", maxHeapSize, "-RTS" ]
 
   tests' <- forM inps $ \inp -> do
     opts <- readOptions inp
@@ -132,9 +219,9 @@ stdlibTests comp = do
 
 
 specialTests :: Compiler -> IO (Maybe TestTree)
-specialTests MAlonzo = do
+specialTests c@MAlonzo{} = do
   let t = fromJust $
-            agdaRunProgGoldenTest1 testDir MAlonzo (return extraArgs)
+            agdaRunProgGoldenTest1 testDir c (return extraArgs)
               (testDir </> "ExportTestAgda.agda") defaultOptions cont
 
   return $ Just $ testGroup "special" [t]
@@ -148,8 +235,8 @@ specialTests MAlonzo = do
                     ]
                     T.empty
             -- ignore stderr, as there may be some GHC warnings in it
-            return $ ExecutedProg (ret, out <> sout, err)
-specialTests JS = return Nothing
+            return $ ExecutedProg (ProgramResult ret (out <> sout) err)
+specialTests JS{} = return Nothing
 
 ghcArgsAsAgdaArgs :: GHCArgs -> AgdaArgs
 ghcArgsAsAgdaArgs = map f
@@ -162,24 +249,26 @@ agdaRunProgGoldenTest :: FilePath     -- ^ directory where to run the tests.
     -> TestOptions
     -> Maybe TestTree
 agdaRunProgGoldenTest dir comp extraArgs inp opts =
-      agdaRunProgGoldenTest1 dir comp extraArgs inp opts (\compDir out err -> do
+      agdaRunProgGoldenTest1 dir comp extraArgs inp opts $ \compDir out err -> do
         if executeProg opts then do
           -- read input file, if it exists
-          inp' <- maybe T.empty decodeUtf8 <$> readFileMaybe inpFile
+          inp' <- fromMaybe T.empty <$> readFileMaybeText inpFile
           -- now run the new program
           let exec = getExecForComp comp compDir inpFile
           case comp of
-            JS -> do
-              setEnv "NODE_PATH" compDir
-              (ret, out', err') <- PT.readProcessWithExitCode "node" [exec] inp'
-              return $ ExecutedProg (ret, out <> out', err <> err')
+            JS{} -> do
+              env <- (("NODE_PATH", compDir) :) <$> getEnvironment
+              nodePath <- fromJust <$> findExecutable "node"
+              (ret, out', err') <- readProcessWithEnv env Nothing nodePath ["--stack-size=4096", exec] inp'
+              out' <- cleanOutput out'
+              err' <- cleanOutput err'
+              return $ ExecutedProg $ ProgramResult ret (out <> out') (err <> err')
             _ -> do
               (ret, out', err') <- PT.readProcessWithExitCode exec (runtimeOptions opts) inp'
-              return $ ExecutedProg (ret, out <> out', err <> err')
+              return $ ExecutedProg $ ProgramResult ret (out <> out') (err <> err')
         else
-          return $ CompileSucceeded (ExitSuccess, out, err)
-        )
-  where inpFile = dropAgdaExtension inp <.> ".inp"
+          return $ CompileSucceeded (ProgramResult ExitSuccess out err)
+  where inpFile = dropAgdaExtension inp <.> "inp"
 
 agdaRunProgGoldenTest1 :: FilePath     -- ^ directory where to run the tests.
     -> Compiler
@@ -190,9 +279,9 @@ agdaRunProgGoldenTest1 :: FilePath     -- ^ directory where to run the tests.
     -> Maybe TestTree
 agdaRunProgGoldenTest1 dir comp extraArgs inp opts cont
   | (Just cOpts) <- lookup comp (forCompilers opts) =
-      Just $ goldenVsAction testName goldenFile (doRun cOpts) printExecResult
+      Just $ goldenVsAction' testName goldenFile (doRun cOpts) printExecResult
   | otherwise = Nothing
-  where goldenFile = dropAgdaExtension inp <.> ".out"
+  where goldenFile = dropAgdaExtension inp <.> "out"
         testName   = asTestName dir inp
 
         -- Andreas, 2017-04-14, issue #2317
@@ -205,41 +294,80 @@ agdaRunProgGoldenTest1 dir comp extraArgs inp opts cont
           extraArgs' <- extraArgs
           -- compile file
           let cArgs   = cleanUpOptions (extraAgdaArgs cOpts)
-              defArgs = ["--ignore-interfaces" | notElem "--no-ignore-interfaces" (extraAgdaArgs cOpts)] ++
-                        ["--no-default-libraries"] ++
+              defArgs = ["--ignore-interfaces" | "--no-ignore-interfaces" `notElem` extraAgdaArgs cOpts] ++
+                        ["--no-libraries"] ++
                         ["--compile-dir", compDir, "-v0", "-vwarning:1"] ++ extraArgs' ++ cArgs ++ [inp]
-          args <- (++ defArgs) <$> argsForComp comp
-          res@(ret, out, err) <- readAgdaProcessWithExitCode args T.empty
+          let args = argsForComp comp ++ defArgs
+          res@(ret, out, err) <- readAgdaProcessWithExitCode Nothing args T.empty
 
-          case ret of
+          absDir <- canonicalizePath dir
+          removePaths [absDir, compDir] <$> case ret of
             ExitSuccess -> cont compDir out err
-            ExitFailure _ -> return $ CompileFailed res
+            ExitFailure _ -> return $ CompileFailed $ toProgramResult res
           )
 
-        argsForComp :: Compiler -> IO [String]
-        argsForComp MAlonzo = return ["--compile"]
-        argsForComp JS = return ["--js"]
+        argsForComp :: Compiler -> [String]
+        argsForComp (MAlonzo s) = [ "--compile" ] ++ case s of
+          Lazy       -> []
+          StrictData -> ["--ghc-strict-data"]
+          Strict     -> ["--ghc-strict"]
+        argsForComp (JS opt) = [ "--js", "--js-verify", "--js-es6" ]
+          ++ case opt of
+            NonOptimized      -> []
+            Optimized         -> [ "--js-optimize" ]
+            MinifiedOptimized -> [ "--js-optimize", "--js-minify" ]
+
+        removePaths ps = \case
+          CompileFailed    r -> CompileFailed    (removePaths' r)
+          CompileSucceeded r -> CompileSucceeded (removePaths' r)
+          ExecutedProg     r -> ExecutedProg     (removePaths' r)
+          where
+          removePaths' (ProgramResult c out err) = ProgramResult c (rm out) (rm err)
+
+          rm = foldr (.) id $
+               map (\p -> T.concat . T.splitOn (T.pack p)) ps
 
 readOptions :: FilePath -- file name of the agda file
     -> IO TestOptions
-readOptions inpFile =
-  maybe defaultOptions (read . T.unpack . decodeUtf8) <$> readFileMaybe optFile
-  where optFile = dropAgdaOrOtherExtension inpFile <.> ".options"
+readOptions inpFile = readFileMaybeText optFile <&> \case
+    Nothing -> defaultOptions
+    (Just optsBS) ->
+      case readMaybe . T.unpack $ optsBS of
+        Nothing -> error $ "Failed to parse options inside file " <> optFile
+        (Just optsParsed) -> optsParsed
+  where optFile = dropAgdaOrOtherExtension inpFile <.> "options"
 
 cleanUpOptions :: AgdaArgs -> AgdaArgs
 cleanUpOptions = filter clean
   where
     clean :: String -> Bool
     clean "--no-ignore-interfaces"         = False
-    clean o | isPrefixOf "--ghc-flag=-j" o = hasGHCJobsFlag
+    clean o | "--ghc-flag=-j" `isPrefixOf` o = True
     clean _                                = True
 
 -- gets the generated executable path
 getExecForComp :: Compiler -> FilePath -> FilePath -> FilePath
-getExecForComp JS compDir inpFile = compDir </> ("jAgda." ++ (takeFileName $ dropAgdaOrOtherExtension inpFile) ++ ".js")
-getExecForComp _ compDir inpFile = compDir </> (takeFileName $ dropAgdaOrOtherExtension inpFile)
+getExecForComp (JS opt) compDir inpFile
+  = compDir </> ("jAgda." ++ takeFileName (dropAgdaOrOtherExtension inpFile) ++ ".mjs")
+getExecForComp _ compDir inpFile = compDir </> takeFileName (dropAgdaOrOtherExtension inpFile)
 
 printExecResult :: ExecResult -> T.Text
-printExecResult (CompileFailed r) = "COMPILE_FAILED\n\n" `T.append` printProcResult r
-printExecResult (CompileSucceeded r) = "COMPILE_SUCCEEDED\n\n" `T.append` printProcResult r
-printExecResult (ExecutedProg r)  = "EXECUTED_PROGRAM\n\n" `T.append` printProcResult r
+printExecResult (CompileFailed r)    = "COMPILE_FAILED\n\n"    <> printProgramResult r
+printExecResult (CompileSucceeded r) = "COMPILE_SUCCEEDED\n\n" <> printProgramResult r
+printExecResult (ExecutedProg r)     = "EXECUTED_PROGRAM\n\n"  <> printProgramResult r
+
+-- | Tries to figure out the version of the program @ghc@ (if such a
+-- program can be found).
+
+findGHCVersion :: IO (Maybe [Integer])
+findGHCVersion = do
+  (code, version, _) <-
+    P.readProcessWithExitCode "ghc" ["--numeric-version"] ""
+  case code of
+    ExitFailure{} -> return Nothing
+    ExitSuccess   -> return $
+      sequence $
+      concat $
+      map (map (readMaybe . toList) . wordsBy (== '.')) $
+      take 1 $
+      lines version

@@ -1,5 +1,4 @@
-{-# LANGUAGE CPP                        #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- To avoid warning on derived Integral instance for CPUTime.
 {-# OPTIONS_GHC -fno-warn-identities #-}
@@ -15,13 +14,14 @@ module Agda.Utils.Time
   , fromMilliseconds
   ) where
 
+import Control.DeepSeq
 import Control.Monad.Trans
-import qualified System.CPUTime as CPU
+import System.CPUTime qualified as CPU
 
-import Data.Functor
-import qualified Data.Time
 
-import Agda.Utils.Pretty
+import Data.Time qualified
+
+import Agda.Syntax.Common.Pretty
 import Agda.Utils.String
 
 -- | Timestamps.
@@ -36,7 +36,7 @@ getClockTime = Data.Time.getCurrentTime
 -- | CPU time in pico (10^-12) seconds.
 
 newtype CPUTime = CPUTime Integer
-  deriving (Eq, Show, Ord, Num, Real, Enum, Integral)
+  deriving (Eq, Show, Ord, Num, Real, Enum, Integral, NFData)
 
 fromMilliseconds :: Integer -> CPUTime
 fromMilliseconds n = CPUTime (n * 1000000000)

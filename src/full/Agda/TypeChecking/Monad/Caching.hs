@@ -1,5 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+-- {-# OPTIONS_GHC -ddump-simpl -dsuppress-all -dno-suppress-type-signatures -ddump-to-file -dno-typeable-binds #-}
 
 module Agda.TypeChecking.Monad.Caching
   ( -- * Log reading/writing operations
@@ -11,14 +11,16 @@ module Agda.TypeChecking.Monad.Caching
     -- * Activating/deactivating
   , activateLoadedFileCache
   , cachingStarts
-  , noCacheForImportedModule
+  , areWeCaching
+  , localCache, withoutCache
 
     -- * Restoring the 'PostScopeState'
   , restorePostScopeState
+
+  , cachingStartsTEST
   ) where
 
-import Control.Monad.State
-import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 import Agda.Syntax.Common
 
@@ -26,71 +28,116 @@ import Agda.Interaction.Options
 
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
 
-import Agda.Utils.Lens
+import qualified Agda.Utils.BiMap as BiMap
 import Agda.Utils.Monad
+import Agda.Utils.Null (empty)
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
+{-# NOINLINE cachingStartsTEST #-}
+cachingStartsTEST :: TCM ()
+cachingStartsTEST = do
+    NameId _ m <- useTC stFreshNameId
+    stFreshNameId   `setTCLens` NameId 1 m
+    stFreshOpaqueId `setTCLens` OpaqueId 1 m
+    stAreWeCaching  `setTCLens` True
+    validateCache m -- fixes issue #4835
+    where
+      validateCache m = (localCache readFromCachedLog) >>= \case
+        Just (_ , s) -> do
+          let
+            NameId _ m'    = s ^. lensFreshNameId
+            OpaqueId _ m'' = s ^. lensFreshOpaqueId
+            stale = (m' /= m) || (m'' /= m)
+          when stale cleanCachedLog
+        _ -> return ()
+
 -- | To be called before any write or restore calls.
-cachingStarts :: TCM ()
+{-# SPECIALIZE cachingStarts :: TCM () #-}
+cachingStarts :: (MonadDebug m, MonadTCState m, ReadTCState m) => m ()
 cachingStarts = do
-    NameId _ m <- use stFreshNameId
-    stFreshNameId .= NameId 1 m
+    NameId _ m <- useTC stFreshNameId
+    stFreshNameId   `setTCLens` NameId 1 m
+    stFreshOpaqueId `setTCLens` OpaqueId 1 m
+    stAreWeCaching  `setTCLens` True
+    validateCache m -- fixes issue #4835
+    where
+      validateCache m = (localCache readFromCachedLog) >>= \case
+        Just (_ , s) -> do
+          let
+            NameId _ m'    = s ^. lensFreshNameId
+            OpaqueId _ m'' = s ^. lensFreshOpaqueId
+            stale = (m' /= m) || (m'' /= m)
+          when stale cleanCachedLog
+        _ -> return ()
+
+areWeCaching :: (ReadTCState m) => m Bool
+areWeCaching = useR stAreWeCaching
 
 -- | Writes a 'TypeCheckAction' to the current log, using the current
 -- 'PostScopeState'
-writeToCurrentLog :: TypeCheckAction -> TCM ()
+{-# SPECIALIZE writeToCurrentLog :: TypeCheckAction -> TCM () #-}
+writeToCurrentLog :: (MonadDebug m, MonadTCState m, ReadTCState m) => TypeCheckAction -> m ()
 writeToCurrentLog !d = do
   reportSLn "cache" 10 $ "cachePostScopeState"
-  !l <- gets stPostScopeState
+  !l <- getsTC stPostScopeState
   modifyCache $ fmap $ \lfc -> lfc{ lfcCurrent = (d, l) : lfcCurrent lfc}
 
-restorePostScopeState :: PostScopeState -> TCM ()
+{-# SPECIALIZE restorePostScopeState :: PostScopeState -> TCM () #-}
+restorePostScopeState :: (MonadDebug m, MonadTCState m) => PostScopeState -> m ()
 restorePostScopeState pss = do
   reportSLn "cache" 10 $ "restorePostScopeState"
-  modify $ \s ->
-    let ipoints = s^.stInteractionPoints
-        pss' = pss{stPostInteractionPoints = stPostInteractionPoints pss `mergeIPMap` ipoints}
-    in  s{stPostScopeState = pss'}
+  modifyTC $ \s ->
+    let ipoints = s ^. stInteractionPoints
+        ws = s ^. stTCWarnings
+        pss' = pss & lensInteractionPoints %~ (`mergeIPMap` ipoints)
+                   & lensTCWarnings %~ (`mergeWarnings` ws)
+                   & lensOpaqueBlocks .~ s ^. stOpaqueBlocks
+                   & lensOpaqueIds    .~ s ^. stOpaqueIds
+    in s{stPostScopeState = pss'}
   where
-    mergeIPMap lm sm = Map.mapWithKey (\k v -> maybe v (`mergeIP` v) (Map.lookup k lm)) sm
-    mergeIP li si = si {ipMeta = ipMeta li}
+    mergeIPMap lm sm = BiMap.mapWithKey (\k v -> maybe v (`mergeIP` v) (BiMap.lookup k lm)) sm
+    -- see #1338 on why we need to use the new ranges.
+    mergeIP li si = li { ipRange = ipRange si }
 
+    mergeWarnings loading current = Set.filter (not . tcWarningCached) current
+                        `Set.union` Set.filter (      tcWarningCached) loading
+
+{-# SPECIALIZE modifyCache :: (Maybe LoadedFileCache -> Maybe LoadedFileCache) -> TCM () #-}
 modifyCache
-  :: (Maybe LoadedFileCache -> Maybe LoadedFileCache)
-  -> TCM ()
-modifyCache f = do
-  modify $ \s -> let !p = stPersistentState s in s
-    { stPersistentState =
-                          p { stLoadedFileCache = f (stLoadedFileCache p)}
-    }
+  :: MonadTCState m
+  => (Maybe LoadedFileCache -> Maybe LoadedFileCache)
+  -> m ()
+modifyCache = modifyTCLens stLoadedFileCache
 
-getCache :: TCM (Maybe LoadedFileCache)
-getCache = do
-  gets (stLoadedFileCache . stPersistentState)
+{-# SPECIALIZE getCache :: TCM (Maybe LoadedFileCache) #-}
+getCache :: ReadTCState m => m (Maybe LoadedFileCache)
+getCache = useTC stLoadedFileCache
 
-putCache :: Maybe LoadedFileCache -> TCM ()
-putCache cs = modifyCache $ const cs
+{-# SPECIALIZE putCache :: Maybe LoadedFileCache -> TCM () #-}
+putCache :: MonadTCState m => Maybe LoadedFileCache -> m ()
+putCache = setTCLens stLoadedFileCache
 
--- | The cache should not be used for an imported module, and it
--- should be restored after the module has been type-checked. This
--- combinator takes care of that.
+-- | Runs the action and restores the current cache at the end of it.
+{-# SPECIALIZE localCache :: TCM a -> TCM a #-}
+localCache :: (MonadTCState m, ReadTCState m) => m a -> m a
+localCache = bracket_ getCache putCache
 
-noCacheForImportedModule :: TCM a -> TCM a
-noCacheForImportedModule m =
-  bracket_ getCache putCache $ do
-    modifyCache (const Nothing)
+-- | Runs the action without cache and restores the current cache at
+-- the end of it.
+{-# SPECIALIZE withoutCache :: TCM a -> TCM a #-}
+withoutCache :: (MonadTCState m, ReadTCState m) => m a -> m a
+withoutCache m = localCache $ do
+    putCache empty
     m
 
 -- | Reads the next entry in the cached type check log, if present.
-readFromCachedLog :: TCM (Maybe (TypeCheckAction, PostScopeState))
+{-# SPECIALIZE readFromCachedLog :: TCM (Maybe (TypeCheckAction, PostScopeState)) #-}
+readFromCachedLog :: (MonadDebug m, MonadTCState m, ReadTCState m) => m (Maybe (TypeCheckAction, PostScopeState))
 readFromCachedLog = do
   reportSLn "cache" 10 $ "getCachedTypeCheckAction"
-  mbCache <- getCache
-  case mbCache of
+  getCache >>= \case
     Just lfc | (entry : entries) <- lfcCached lfc -> do
       putCache $ Just lfc{lfcCached = entries}
       return (Just entry)
@@ -98,7 +145,8 @@ readFromCachedLog = do
       return Nothing
 
 -- | Empties the "to read" CachedState. To be used when it gets invalid.
-cleanCachedLog :: TCM ()
+{-# SPECIALIZE cleanCachedLog :: TCM () #-}
+cleanCachedLog :: (MonadDebug m, MonadTCState m) => m ()
 cleanCachedLog = do
   reportSLn "cache" 10 $ "cleanCachedLog"
   modifyCache $ fmap $ \lfc -> lfc{lfcCached = []}
@@ -107,7 +155,8 @@ cleanCachedLog = do
 -- current log. Crashes is 'stLoadedFileCache' is already active with a
 -- dirty log.  Should be called when we start typechecking the current
 -- file.
-activateLoadedFileCache :: TCM ()
+{-# SPECIALIZE activateLoadedFileCache :: TCM () #-}
+activateLoadedFileCache :: (HasOptions m, MonadDebug m, MonadTCState m) => m ()
 activateLoadedFileCache = do
   reportSLn "cache" 10 $ "activateLoadedFileCache"
 
@@ -120,7 +169,8 @@ activateLoadedFileCache = do
 
 -- | Caches the current type check log.  Discardes the old cache.  Does
 -- nothing if caching is inactive.
-cacheCurrentLog :: TCM ()
+{-# SPECIALIZE cacheCurrentLog :: TCM () #-}
+cacheCurrentLog :: (MonadDebug m, MonadTCState m) => m ()
 cacheCurrentLog = do
   reportSLn "cache" 10 $ "cacheCurrentTypeCheckLog"
   modifyCache $ fmap $ \lfc ->

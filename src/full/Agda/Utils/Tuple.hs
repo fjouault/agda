@@ -1,34 +1,44 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
-module Agda.Utils.Tuple where
+module Agda.Utils.Tuple
+  (
+    (//)
+  , (***)
+  , (&&&)
+  , first
+  , second
+  , sortPair
+  , fst3
+  , snd3
+  , thd3
+  , swap
+  , uncurry3
+  , uncurry4
+  , mapPairM
+  , firstM
+  , secondM
+  , Pair(..)
+  ) where
 
-import Control.Applicative
+import Control.Arrow   ( (&&&), (***) )
+import Control.DeepSeq ( NFData )
 
-import Data.Foldable
-import Data.Traversable
+import Data.Bifunctor  ( first, second )
+import Data.Tuple      ( swap )
 
-infix 2 -*-
-infix 3 /\ -- backslashes at EOL interact badly with CPP...
+import GHC.Generics    ( Generic )
 
--- | Bifunctoriality for pairs.
-(-*-) :: (a -> c) -> (b -> d) -> (a,b) -> (c,d)
-(f -*- g) ~(x,y) = (f x, g y)
+{-# INLINE (//) #-}
+-- | Strict pairing.
+(//) :: a -> b -> (a, b)
+(//) !a !b = (a, b)
+infixr 4 //
 
--- | @mapFst f = f -*- id@
-mapFst :: (a -> c) -> (a,b) -> (c,b)
-mapFst f ~(x,y) = (f x, y)
-
--- | @mapSnd g = id -*- g@
-mapSnd :: (b -> d) -> (a,b) -> (a,d)
-mapSnd g ~(x,y) = (x, g y)
-
--- | Lifted pairing.
-(/\) :: (a -> b) -> (a -> c) -> a -> (b,c)
-(f /\ g) x = (f x, g x)
-
--- | Swap.  (Only in Data.Tuple from base-4.3)
-swap :: (a,b) -> (b,a)
-swap ~(a,b) = (b,a)
+-- | Order a pair.
+sortPair :: Ord a => (a, a) -> (a, a)
+sortPair p@(x, y)
+  | x <= y    = p
+  | otherwise = (y, x)
 
 -- * Triple (stolen from Data.Tuple.HT)
 
@@ -52,21 +62,23 @@ uncurry3 f ~(x,y,z) = f x y z
 uncurry4 :: (a -> b -> c -> d -> e) -> (a,b,c,d) -> e
 uncurry4 f ~(w,x,y,z) = f w x y z
 
--- | Monadic version of '-*-'.
+-- | Monadic version of '***'.
 mapPairM :: (Applicative m) => (a -> m c) -> (b -> m d) -> (a,b) -> m (c,d)
 mapPairM f g ~(a,b) = (,) <$> f a <*> g b
 
--- | Monadic 'mapFst'.
-mapFstM :: (Applicative m) => (a -> m c) -> (a,b) -> m (c,b)
-mapFstM f ~(a,b) = (,b) <$> f a
+-- | Monadic 'first'.
+firstM :: Functor m => (a -> m c) -> (a,b) -> m (c,b)
+firstM f ~(a,b) = (,b) <$> f a
 
--- | Monadic 'mapSnd'.
-mapSndM :: (Applicative m) => (b -> m d) -> (a,b) -> m (a,d)
-mapSndM f ~(a,b) = (a,) <$> f b
+-- | Monadic 'second'.
+secondM :: Functor m => (b -> m d) -> (a,b) -> m (a,d)
+secondM f ~(a,b) = (a,) <$> f b
 
-newtype List2 a = List2 { list2 :: (a,a) }
-  deriving (Eq, Functor, Foldable, Traversable)
+data Pair a = Pair a a
+  deriving (Show, Eq, Generic, Functor, Foldable, Traversable)
 
-instance Applicative List2 where
-  pure a                            = List2 (a,a)
-  (List2 (f,f')) <*> (List2 (a,a')) = List2 (f a, f' a')
+instance Applicative Pair where
+  pure a                  = Pair a a
+  Pair f f' <*> Pair a a' = Pair (f a) (f' a')
+
+instance NFData a => NFData (Pair a)

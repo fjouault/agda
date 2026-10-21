@@ -1,0 +1,1 @@
+--ghc -v0 -v treeless:20 --no-main

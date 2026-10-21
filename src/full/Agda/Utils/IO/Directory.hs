@@ -1,18 +1,39 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 module Agda.Utils.IO.Directory
   ( copyDirContent
+  , copyIfChanged
+  , findWithInfo
   )
 where
 
 import Control.Monad
-import Control.Monad.Writer
+import Control.Monad.Writer ( WriterT, execWriterT, tell )
+import Control.Monad.Trans  ( lift )
+
+import Data.ByteString      as BS
+import Data.Monoid          ( Endo(Endo, appEndo) )
 
 import System.Directory
 import System.FilePath
-import Data.ByteString as BS
+import System.FilePath.Find qualified as Find
 
-import Paths_Agda
 
-import Agda.Utils.Functor
+-- | Search a directory recursively, with recursion controlled by a
+--   'RecursionPredicate'.  Lazily return a unsorted list of all files
+--   matching the given 'FilterPredicate'.  Any errors that occur are
+--   ignored, with warnings printed to 'stderr'.
+findWithInfo
+  :: Find.RecursionPredicate  -- ^ Control recursion into subdirectories.
+  -> Find.FilterPredicate     -- ^ Decide whether a file appears in the result.
+  -> FilePath                 -- ^ Directory to start searching.
+  -> IO [Find.FileInfo]       -- ^ Files that matched the 'FilterPredicate'.
+findWithInfo recurse filt dir = Find.fold recurse act [] dir
+  where
+  -- Add file to list front when it matches the filter
+  act :: [Find.FileInfo] -> Find.FileInfo -> [Find.FileInfo]
+  act fs f = if Find.evalClause filt f then f : fs else fs
+
 
 -- | @copyDirContent src dest@ recursively copies directory @src@ onto @dest@.
 --

@@ -1,27 +1,21 @@
-{-# LANGUAGE CPP        #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Utils.Memo where
 
-import Control.Applicative
 import Control.Monad.State
 import System.IO.Unsafe
 import Data.IORef
-import qualified Data.Map as Map
-import qualified Agda.Utils.HashMap as HMap
+import Data.Map qualified as Map
+import Data.HashMap.Strict qualified as HMap
 import Data.Hashable
 
 import Agda.Utils.Lens
+import qualified Data.IntMap as IntMap
 
 -- Simple memoisation in a state monad
 
 -- | Simple, non-reentrant memoisation.
-memo
-#if __GLASGOW_HASKELL__ <= 708
-  :: (Functor m, MonadState s m)
-#else
-  :: MonadState s m
-#endif
-  => Lens' (Maybe a) s -> m a -> m a
+memo :: MonadState s m => Lens' s (Maybe a) -> m a -> m a
 memo tbl compute = do
   mv <- use tbl
   case mv of
@@ -32,13 +26,7 @@ memo tbl compute = do
 
 -- | Recursive memoisation, second argument is the value you get
 --   on recursive calls.
-memoRec
-#if __GLASGOW_HASKELL__ <= 708
-  :: (Functor m, MonadState s m)
-#else
-  :: MonadState s m
-#endif
-  => Lens' (Maybe a) s -> a -> m a -> m a
+memoRec :: MonadState s m => Lens' s (Maybe a) -> a -> m a -> m a
 memoRec tbl ih compute = do
   mv <- use tbl
   case mv of
@@ -64,7 +52,7 @@ memoUnsafe f = unsafePerformIO $ do
           return y
 
 {-# NOINLINE memoUnsafeH #-}
-memoUnsafeH :: (Eq a, Hashable a) => (a -> b) -> (a -> b)
+memoUnsafeH :: (Hashable a) => (a -> b) -> (a -> b)
 memoUnsafeH f = unsafePerformIO $ do
   tbl <- newIORef HMap.empty
   return (unsafePerformIO . f' tbl)
@@ -78,3 +66,17 @@ memoUnsafeH f = unsafePerformIO $ do
           writeIORef tbl (HMap.insert x y m)
           return y
 
+{-# NOINLINE memoUnsafeInt #-}
+memoUnsafeInt :: (Int -> a) -> (Int -> a)
+memoUnsafeInt f = unsafePerformIO $ do
+  tbl <- newIORef IntMap.empty
+  return (unsafePerformIO . f' tbl)
+  where
+    f' tbl x = do
+      m <- readIORef tbl
+      case IntMap.lookup x m of
+        Just y  -> return y
+        Nothing -> do
+          let y = f x
+          writeIORef tbl (IntMap.insert x y m)
+          return y

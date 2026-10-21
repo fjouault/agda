@@ -1,16 +1,10 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 module Agda.TypeChecking.Monad.Options where
 
-import Control.Applicative
-import Control.Monad.Trans
-
-import Agda.Interaction.Options
+import Agda.Interaction.Library.Base
 import Agda.TypeChecking.Monad.Base
-import Agda.Utils.FileName
-import Agda.Utils.Pretty
+import Agda.Utils.List1 (List1)
 
-getIncludeDirs :: TCM [AbsolutePath]
-
-type VerboseKey = String
-
-hasVerbosity :: HasOptions m => VerboseKey -> Int -> m Bool
-verboseS :: HasOptions m => VerboseKey -> Int -> m () -> m ()
+libToTCM       :: LibM a -> TCM a
+getIncludeDirs :: TCM (List1 AbsolutePath)

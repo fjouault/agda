@@ -1,6 +1,7 @@
 {-# OPTIONS --show-implicit #-}
--- {-# OPTIONS --sized-types #-}         -- no longer necessary
--- {-# OPTIONS --termination-depth=2 #-} -- no longer necessary
+{-# OPTIONS --sized-types #-}
+{-# OPTIONS --no-double-check #-} -- otherwise we have an unsolved size constraint
+-- {-# OPTIONS --termination-depth=2 #-} -- no longer necessary (PR #8184)
 -- {-# OPTIONS -v term:10 #-}
 
 module SizedBTree where
@@ -30,6 +31,9 @@ module Old where
   -- deep2 to be given explicitly. This is because otherwise the unifier gets
   -- stuck on an equation [↑ i₁ =?= _i_46 {i} {A} l r t]. It's not clear whether
   -- it is safe to instantiate the meta to [↑ _] here.
+
+  -- Jesper 2019-05-21: This no longer passes the termination check
+  -- since the removal of with-inlining.
   deep2 : ∀ {i A} → BTree A {i} → BTree A {i}
   deep2 (leaf a) = leaf a
   deep2 (node (leaf _) r) = r
@@ -64,3 +68,5 @@ module New where
   deep2 (node (node l r) _) with deep2 (deep2 (node l r))
   ... | leaf a     = leaf a
   ... | node l2 r2 = deep2 (node l2 r2)
+
+-- Should termination check with termination-depth 2.

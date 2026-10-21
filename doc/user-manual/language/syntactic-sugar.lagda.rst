@@ -61,6 +61,25 @@ Syntactic Sugar
    :depth: 2
    :local:
 
+.. _hidden_argument_puns:
+
+Hidden argument puns
+====================
+
+If the option :option:`--hidden-argument-puns` is used, then the
+pattern ``{x}`` is interpreted as ``{x = x}``, and the pattern
+``⦃ x ⦄`` is interpreted as ``⦃ x = x ⦄``. Here ``x`` must be an
+unqualified name that does not refer to a constructor that is in
+scope: if ``x`` is qualified, then the pattern is not interpreted as a
+pun, and if ``x`` is unqualified and refers to a constructor that is
+in scope, then the code is rejected.
+
+Note that ``{(x)}`` and ``⦃ (x) ⦄`` are not interpreted as puns.
+
+Note also that ``{x}`` is not interpreted as a pun in ``λ {x} → …`` or
+``syntax f {x} = …``. However, ``{x}`` is interpreted as a pun in
+``λ (c {x}) → …``.
+
 .. _do-notation:
 
 Do-notation
@@ -91,7 +110,11 @@ For example::
       where false → []
     x ∷ []
 
-Do-notation is desugared before scope checking and is translated into calls to ``_>>=_`` and ``_>>_``, whatever those happen to be bound in the context of the do-block. This means that do-blocks are not tied to any particular notion of monad. In fact if there are no monadic statements in the do block it can be used as sugar for a ``let``::
+Do-notation is desugared before scope checking and is translated into
+calls to ``_>>=_`` and ``_>>_``, which can be arbitrary user-defined
+functions. This means that do-blocks are not tied to any particular
+notion of monad. In fact, if there are no monadic statements in the do
+block, it can be used as sugar for a ``let``::
 
   pure-do : Nat → Nat
   pure-do n = do
@@ -101,6 +124,30 @@ Do-notation is desugared before scope checking and is translated into calls to `
 
   check-pure-do : pure-do 5 ≡ 625
   check-pure-do = refl
+
+The operators used for desugaring ``do`` notation are resolved as if the
+user had written the desugared version, and so will refer to whatever
+functions are in scope by those names. To control this, the ``do``
+keyword may appear qualified by a *module* name, in which case the
+operators will be drawn from that module instead::
+
+  module Add where
+    _>>_ : Nat → Nat → Nat
+    x >> y = x + y
+
+  qualified-example : Nat
+  qualified-example = Add.do
+    1
+    2
+    3
+
+  _ : qualified-example ≡ 6
+  _ = refl
+
+Note that the qualifying module is **not** opened in the scope of the
+``do`` expression, i.e. no bindings are brought into scope. This means
+that explicit usage of ``_>>=_`` and ``_>>_`` inside a qualified ``do``
+expression will still refer to the **unqualified** versions.
 
 .. _do-desugaring:
 
@@ -120,6 +167,10 @@ Desugaring
 |               |   do p ← m           |   m >>= λ where      |
 |               |        where pᵢ → mᵢ |            p  → m'   |
 |               |      m'              |            pᵢ → mᵢ   |
++---------------+----------------------+----------------------+
+| Absurd match  | ::                   | ::                   |
+|               |                      |                      |
+|               |   do () ← m          |     m >>= λ ()       |
 +---------------+----------------------+----------------------+
 | Non-binding   | ::                   | ::                   |
 | statement     |                      |                      |
@@ -172,7 +223,7 @@ Next up, well-typed terms::
     app : ∀ {A B} (s : Term Γ (A => B)) (t : Term Γ A) → Term Γ B
     lam : ∀ A {B} (t : Term (A ∷ Γ) B) → Term Γ (A => B)
 
-Given a well-typed term we can mechaincally erase all the type
+Given a well-typed term we can mechanically erase all the type
 information (except the annotation on the lambda) to get the
 corresponding raw term::
 
@@ -222,8 +273,8 @@ advantage of pattern matching binds::
 
   _=?=_ : (A B : Type) → TC (A ≡ B)
   nat      =?= nat      = pure refl
-  nat      =?= (_ => _) = typeError "type mismatch: nat ‌≠ _ => _"
-  (_ => _) =?= nat      = typeError "type mismatch: _ => _ ≠ nat"
+  nat      =?= (_ => _) = typeError "type mismatch: expected nat, got _ => _"
+  (_ => _) =?= nat      = typeError "type mismatch: expected _ => _, got nat"
   (A => B) =?= (A₁ => B₁) = do
     refl ← A =?= A₁
     refl ← B =?= B₁
@@ -276,8 +327,10 @@ functors, i.e. functors ``F`` equipped with two operations
   pure  : ∀ {A} → A → F A
   _<*>_ : ∀ {A B} → F (A → B) → F A → F B
 
-As do-notation, idiom brackets desugar before scope checking, so whatever the names ``pure``
-and ``_<*>_`` are bound to gets used when desugaring the idiom brackets.
+Name resolution for idiom brackets works as for ``do``-notation: the
+operators are resolved as though the user had written them, unless the
+brackets appear qualified, in which case they are looked up in the
+qualifying module.
 
 The syntax for idiom brackets is
 
@@ -308,6 +361,36 @@ desugars to
 .. code-block:: agda
 
   pure if_then_else_ <*> a <*> b <*> c
+
+Idiom brackets also support none or multiple applications. If the applicative
+functor has an additional binary operation
+
+.. code-block:: agda
+
+  _<|>_ : ∀ {A B} → F A → F A → F A
+
+then idiom brackets support multiple applications separated by a vertical bar ``|``, i.e.
+
+.. code-block:: agda
+
+  (| e₁ a₁ .. aₙ | e₂ a₁ .. aₘ | .. | eₖ a₁ .. aₗ |)
+
+which expands to (assuming right associative ``_<|>_``)
+
+.. code-block:: agda
+
+  (pure e₁ <*> a₁ <*> .. <*> aₙ) <|> ((pure e₂ <*> a₁ <*> .. <*> aₘ) <|> (pure eₖ <*> a₁ <*> .. <*> aₗ))
+
+Idiom brackets without any application ``(|)`` or ``⦇⦈`` expend to ``empty`` if
+
+.. code-block:: agda
+
+  empty :  ∀ {A} → F A
+
+is in scope. An applicative functor with ``empty`` and ``_<|>_`` is typically
+called ``Alternative``.
+
+Note that ``pure``, ``_<*>_``, and ``_<|>_`` need not be in scope to use ``(|)``.
 
 Limitations:
 

@@ -1,0 +1,8 @@
+Issue2170.agda:32.16-19: error: [UnequalTypes]
+The function type
+  .(unirr₁ : _A_13) → Irr _A_13
+is not a subtype of
+  Bool → Irr Bool
+because:
+  one has irrelevant domain, while the other is relevant.
+when checking that the expression irr has type Bool → Irr Bool

@@ -1,0 +1,8 @@
+Issue5251-2.agda:4.11-12: error: [UnequalTypes]
+The function type
+  @0 Set → Set
+is not a subtype of
+  @ω Set → Set
+because:
+  one has erased domain, while the other is unrestricted.
+when checking that the expression f has type @ω Set → Set

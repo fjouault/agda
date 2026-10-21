@@ -1,0 +1,99 @@
+name: Haddock
+# Test documentation: haddock, user-manual.
+# Since `stack haddock` compiles Agda but `cabal haddock` does not,
+# we use cabal if we just want to build the haddockumentation [Issue #2188].
+on:
+  push:
+    branches:
+    - master
+    paths: &trigger_path_list
+    - 'src/full/**.hs'
+    - 'Agda.cabal'
+    - '.github/workflows/haddock.yml'
+  pull_request:
+    paths: *trigger_path_list
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # Andreas, 2022-10-18
+        # Don't use 'latest' when you want the latest version,
+        # since this often does not point at the latest version;
+        # not for the virtual environments, and also haskell/action/setup
+        # is usually not up-to-date.
+        os: [ubuntu-26.04]
+        ghc-ver: ['9.14.1']
+          # Use the versions that come with the virtual environment, if possible.
+
+    if: |
+      !contains(github.event.head_commit.message, '[skip ci]')
+      && !contains(github.event.head_commit.message, '[ci skip]')
+      && !contains(github.event.head_commit.message, '[github skip]')
+      && !contains(github.event.head_commit.message, '[skip github]')
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      FLAGS: -fenable-cluster-counting --disable-library-profiling --enable-documentation
+      # --enable-documentation build documentation for the dependencies too
+      # This is default in cabal-3.8.1.0 (not in 3.6.2.0).
+      # Could be turned off with --disable-documentation.
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: haskell-actions/setup@v2
+      id: setup-haskell
+      with:
+        ghc-version:   ${{ matrix.ghc-ver }}
+        cabal-version: latest
+        cabal-update:  true
+
+    - name: Configure the build plan
+      run: |
+        # shellcheck disable=SC2086
+        cabal configure ${FLAGS}
+        cabal build --dry-run
+      # cabal build --dry-run creates dist-newstyle/cache/plan.json
+      # Keep a watch on this `cabal-3.9 build --dry-run` bug:
+      # https://github.com/haskell/cabal/issues/8706
+
+    - name: Cache dependencies
+      uses: actions/cache@v6
+      id: cache
+      with:
+        path: |
+          ${{ steps.setup-haskell.outputs.cabal-store }}
+        # The file `plan.json` contains the build information.
+        key: ${{ env.key }}-plan-${{ hashFiles('**/plan.json') }}
+        restore-keys: ${{ env.key }}-
+      env:
+        key: haddock.yml-${{ runner.os }}-ghc-${{ steps.setup-haskell.outputs.ghc-version }}-cabal-${{ steps.setup-haskell.outputs.cabal-version }}
+
+    - name: Install dependencies
+      if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cabal build --dependencies-only
+
+    # Testing Haddock [Issue 1773]
+    - name: Build Haddock
+      run: |
+        # shellcheck disable=SC2016
+        cabal haddock --haddock-html-location='https://hackage.haskell.org/package/$pkg-$version/docs' --haddock-hyperlink-source --haddock-quickjump
+
+    - name: Prepare to upload built htmls
+      run: |
+        find dist-newstyle -path '*/doc/html/Agda' -type d -exec cp -R {} html \;
+        find html -name '*.md' -delete
+        ls -R html
+      # The but-last step is to fix #6502; the .md files can make Jekyll choke.
+
+    - name: Deploy haddock
+      uses: peaceiris/actions-gh-pages@v4
+      if: github.ref == 'refs/heads/master'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: html
+        force_orphan:  true
+        destination_dir: docs

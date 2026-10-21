@@ -9,58 +9,123 @@
 # the master branch of the GitHub repository, they only have 1471 and
 # 72 commits, respectively. I couldn't fix it.
 
+# Format of a line:
+#
+# Proper Name <Proper@email> commit name <commit@email>
+# \-----------+------------/ \----------+-------------/
+#             |                         |
+#          replace                     find
+#
+# <Proper@email> is never optional and cannot appear by itself.
+# Besides that, the other parts are optional (as long as 2 parts
+# are present).
+
 # Please keep this file in alphabetic order!
 
 ##############################################################################
 
 Adam Gundry <adam.gundry@strath.ac.uk>
+Adam Sandberg Eriksson <adam@sandbergericsson.se>
 Alan Jeffrey <ajeffrey@bell-labs.com> ajeffrey
+Alex Haršáni <alex.harsani@gmail.com> Alex Harsani <alex.harsani@gmail.com>
 Alexandre Buisse <buisse@cs.chalmers.se>
+Amélia Liao <me@amelia.how>
+András Kovács <puttamalac@gmail.com> AndrasKovacs
+Andre Knispel <andre.knispel@gmx.de> whatisRT
 Andreas Abel <andreas.abel@ifi.lmu.de> andreas.abel
 Andreas Abel <andreas.abel@ifi.lmu.de> abel <abel@cs.chalmers.se>
+Andreas Nuyts <andreas.nuyts@kuleuven.be> anuyts <anuyts@users.noreply.github.com>
 Andrea Vezzosi <sanzhiyan@gmail.com>
-Andrés Sicard-Ramírez <asr@eafit.edu.co> andres.sicard.ramirez
-Andrés Sicard-Ramírez <asr@eafit.edu.co> andres.sicard.ramirez <andres.sicard.ramirez@gmail.com>
 Andrés Sicard-Ramírez <asr@eafit.edu.co> andres.sicard <andres.sicard@gmail.com>
-<asr@eafit.edu.co> <andres.sicard.ramirez@gmail.com>
+Andrés Sicard-Ramírez <asr@eafit.edu.co> andres.sicard.ramirez
+Andrés Sicard-Ramírez <asr@eafit.edu.co> <andres.sicard.ramirez@gmail.com>
+Anton Setzer <a.g.setzer@swan.ac.uk> csetzer
+Artem Shinkarov <artyom.shinkaroff@gmail.com> Artem Shinkarov <tema@pm.me>
+Arthur Adjedj <arthur.adjedj@gmail.com> arthur-adjedj <arthur.adjedj@gmail.com>
+Arthur Adjedj <arthur.adjedj@gmail.com> <arthur.adjedj@ens-paris-saclay.fr>
+Arthur Adjedj <arthur.adjedj@gmail.com> <aarthuur01@gmail.com>
+Bohdan Liesnikov <b.liesnikov+git@gmail.com> Bohdan <b.liesnikov+git@gmail.com>
+Brian Ellingsgaard <brianellingsgaard9@gmail.com> Brian-ED
+Carlo Cabrera <30379873+carlocab@users.noreply.github.com>
+Calvin Lee <calvins.lee@utah.edu> <pounce@integraldoma.in>
 Christian Sattler <sattler.christian@gmail.com>
+cmcmA20 <cmcmA20@pm.me> Your Name <you@example.com>
 Daniel Gustafsson <daniel.gustafsson@gmail.com> daniel.gustafsson
 Darin Morrison <dwm@cs.nott.ac.uk> dwm
 Darin Morrison <dwm@cs.nott.ac.uk> darinmorrison <darinmorrison@gmail.com>
-Dominique Devriese <dominique.devriese@cs.kuleuven.be> dominique.devriese <dominique.devriese@gmail.com>
+Dominique Devriese <dominique.devriese@cs.kuleuven.be> <dominique.devriese@gmail.com>
 Dominique Devriese <dominique.devriese@cs.kuleuven.be> dominique.devriese
+Ed Nutting <ed@beyondrisc.com> Ed Nutting <1746336+EdNutting@users.noreply.github.com>
+Eduard-Gabriel Munteanu <eduard.munteanu@linux360.ro>
+Evgenii Akentev <i@ak3n.com> Eugene Akentyev <ak3ntev@gmail.com>
 Fabien Renaud <fabienr@chalmers.se>
+Fabian Ruch <bafain@gmail.com>
+Frédéric Jouault <fjouault@users.noreply.github.com>
 Fredrik Lindblad <frelindb@chalmers.se> frelindb <frelindb@gmail.com>
 Fredrik Lindblad <frelindb@chalmers.se> frelindb
 Fredrik Nordvall Forsberg <csfnf@swansea.ac.uk> <fredrik.nordvall-forsberg@strath.ac.uk>
 Fredrik Nordvall Forsberg <csfnf@swansea.ac.uk> csfnf <csfnf@swansea.ac.uk>
 Guillaume Brunerie <guillaume.brunerie@gmail.com>
 Guillaume Allais <guillaume.allais@ens-lyon.org> gallais
+Henry Blanchette <henry@rybl.net> <henry@monkeyface.com>
+Herminie Pagel <nlp@fairbill.com> herminie <47478084+pnlph@users.noreply.github.com>
+Herminie Pagel <nlp@fairbill.com> pnlph
+Holger Borum <holger.stadel.borum@gmail.com> blaavogn
 James Burton <j.burton@brighton.ac.uk>
-James Chapman <james@cs.ioc.ee> james
-James Chapman <james@cs.ioc.ee> James Chapman <jmchapman@gmail.com>
+James Chapman <james.chapman@iohk.io> james
+James Chapman <james.chapman@iohk.io> <jmchapman@gmail.com>
+James Chapman <james.chapman@iohk.io> <james@cs.ioc.ee>
+Jaro Reinders <noughtmare@users.noreply.github.com> Jaro
 Jean-Philippe Bernardy <jeanphilippe.bernardy@gmail.com> jeanphilippe.bernardy
 Jesper Cockx <jesper.cockx@cs.kuleuven.be> jesper.cockx
 Jesper Cockx <jesper.cockx@cs.kuleuven.be> <jesper@sikanda.be>
+Jens Petersen <juhpetersen@gmail.com> Jens Petersen <petersen@redhat.com>
 Karl Mehltretter <mehltret@cip.ifi.lmu.de>
+Konstantin Nisht <konstantin.nisht@jetbrains.com> Konstantin Nisht <36202647+knisht@users.noreply.github.com>
 Kuen-Bang Hou (Favonia) <favonia@gmail.com>
+Lawrence Chonavel <95857153+lawcho@users.noreply.github.com> lawcho
 Lennart Augustsson <lennart@augustsson.net>
+Liang-Ting Chen <liang.ting.chen.tw@gmail.com>
+LUA Ting-Gan <banacorn@gmail.com>
+LUA Ting-Gan <banacorn@gmail.com> Ting-Gian Lua <banacorn@Ting-Giande-MacBook-Pro.local>
+Lucas Escot <lucas@escot.me> flupe
+Lucas Escot <lucas@escot.me> <flupe@users.noreply.github.com>
 Makoto Takeyama <makoto.takeyama@aist.go.jp> makoto.takeyama
 Marcin Benke <marcin.benke@gmail.com> marcin.benke
-Nils Anders Danielsson <nils.anders.danielsson@gmail.com> <nad@cs.chalmers.se>
-Nils Anders Danielsson <nils.anders.danielsson@gmail.com> <nad@cse.gu.se>
-Nils Anders Danielsson <nils.anders.danielsson@gmail.com> nils.anders.danielsson <nils.anders.danielsson@86b02449-c53c-0410-81b4-87051234213d>
+Marcin Jan Turek-Grzybowski <marcinjangrzybowski@gmail.com> MJG
+Marko Dimjašević <marko@dimjasevic.net> Marko Dimjašević <mdimjasevic@users.noreply.github.com>
+Martin Fredin <fredin.martin@gmail.com> fredins
+Matthew Daggitt <matthewdaggitt@gmail.com>
+Michael Shulman <shulman@sandiego.edu> Mike Shulman <shulman@sandiego.edu>
+Naïm Camille Favier <n@monade.li> Naïm Favier
+Nate Soares <so8res@gmail.com> Nate
+Nils Anders Danielsson <nad@cse.gu.se> <nad@cs.chalmers.se>
+Nils Anders Danielsson <nad@cse.gu.se> <nils.anders.danielsson@gmail.com>
+Nils Anders Danielsson <nad@cse.gu.se> nils.anders.danielsson <nils.anders.danielsson@86b02449-c53c-0410-81b4-87051234213d>
 Noam Zeilberger <noam.zeilberger@gmail.com>
 Nobuo Yamashita <nobuo-yamashita@aist.go.jp> nobuo-yamashita
 Olle Fredriksson <fredriksson.olle@gmail.com> fredriksson.olle
+Oskar Eriksson <98822866+oskeri@users.noreply.github.com> oskeri
+Panagiotis Koutsourakis <kutsurak@monetdbsolutions.com> Panagiotis Koutsourakis <kutsurak@slartibartfast.net>
 Patrick Palka <patrick@parcs.ath.cx>
 Patrik Jansson <patrikj@chalmers.se> patrikj
-Péter Divianszki <divipp@gmail.com> divipp
-Ryan Scott <ryan.gl.scott@ku.edu>
+Péter Diviánszky <divipp@gmail.com> divipp
+Philip Kaludercic <philipk@posteo.net> <pkal@posteo.net>
+Philip Kaludercic <philipk@posteo.net> Philip
+Philipp Hausmann <ph_git@314.ch> Philipp Hausmann <philipp@xpc001.lenzburg>
+Piotr Paradziński <dancingwithopenheart@gmail.com> Piotr Paradzinski
+Prabhakar Ragde <plragde@uwaterloo.ca>
+Ryan Scott <ryan.gl.scott@ku.edu> Ryan Scott <ryan.gl.scott@gmail.com>
+Ryan Scott <ryan.gl.scott@ku.edu> RyanGlScott <ryan.gl.scott@ku.edu>
 Samuel Gélineau <gelisam@gmail.com>
+Sergei Trofimovich <slyfox@community.haskell.org> Sergei Trofimovich <siarheit@google.com>
 Shin-Cheng Mu <scm@iis.sinica.edu.tw>
+Shu-Hung You <shhyou@users.noreply.github.com> shuhung
+Simon Boulier <SimonBoulier@users.noreply.github.com>
 Stefan Monnier <monnier@iro.umontreal.ca> monnier
 Steven Keuchel <steven.keuchel@gmail.com>
+Szumi Xie <szumixie@gmail.com> szumixie <39803844+szumixie@users.noreply.github.com>
+Tesla Ice Zhang <ice1000kotlin@foxmail.com> ice1000
 Thomas Anberree <thomas.anberree@nottingham.edu.cn>
 Thorsten Altenkirch <txa@cs.nott.ac.uk>
 Ulf Norell <ulfn@chalmers.se> ulfn <ulfn@cs.chalmers.se>
@@ -68,5 +133,13 @@ Ulf Norell <ulfn@chalmers.se> ulf.norell <ulf.norell@gmail.com>
 Ulf Norell <ulfn@chalmers.se> ulf.norell <ulf.norell@86b02449-c53c-0410-81b4-87051234213d>
 Ulf Norell <ulfn@chalmers.se> ulfn
 <ulfn@chalmers.se> <ulf.norell@gmail.com>
-<w.s.swierstra@uu.nl> <wss@cs.nott.ac.uk>
+Uma Zalakain <ping@umazalakain.info> <uma@gisa-elkartea.org>
+Vic ten Bokum <github@vicgeentor.nl> Vic
+Víctor López Juan <victor@lopezjuan.com>
+Wen Kokke <wen.kokke@gmail.com> Pepijn Kokke <pepijn.kokke@gmail.com>
+Wen Kokke <wen.kokke@gmail.com> <wenkokke@users.noreply.github.com>
+Wouter Swierstra <w.s.swierstra@uu.nl> <wss@cs.nott.ac.uk>
 Wojciech Jedynak <wjedynak@gmail.com>
+Yee Jian Tan <tanyeejian@gmail.com> Yee Jian TAN
+Zack Grannan <zgrannan@gmail.com> <zgrannan@protonmail.com>
+Ziyang Liu <free@cofree.io> Ziyang Liu <unsafeFixIO@gmail.com>

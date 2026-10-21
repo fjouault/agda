@@ -1,3 +1,4 @@
+{-# OPTIONS --backtracking-instance-search #-}
 
 module _ where
 

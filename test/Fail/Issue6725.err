@@ -1,0 +1,49 @@
+Issue6725.agda:49.5-9: error: [CoverageIssue]
+Incomplete pattern matching for .extendedlambda0. Missing cases:
+  .extendedlambda0 .ze
+  .extendedlambda0 .on
+  .extendedlambda0 .se
+when checking the definition of .extendedlambda0
+
+Issue6725.agda:51.5-9: error: [CoverageIssue]
+Incomplete pattern matching for .extendedlambda1. Missing cases:
+  .extendedlambda1 .ze
+  .extendedlambda1 .on
+  .extendedlambda1 .se
+when checking the definition of .extendedlambda1
+
+Issue6725.agda:54.5-56.8: error: [CoverageIssue]
+Incomplete pattern matching for .extendedlambda2. Missing cases:
+  .extendedlambda2 i .se
+when checking the definition of .extendedlambda2
+
+Issue6725.agda:55.11-56.12: warning: -W[no]InteractionMetaBoundaries
+Interaction meta(s) at the following location(s) have unsolved
+boundary constraints:
+  Issue6725.agda:55.11-12
+  Issue6725.agda:56.11-12
+
+Issue6725.agda:53.3-12: error: [UnequalTerms]
+The terms
+  se (λ { .Φ _ → Set }) i
+and
+  se
+  (λ { .Φ _ → Set
+     ; .ze → ?2 (i = Agda.Primitive.Cubical.i0)
+     ; .on → ?3 (i = Agda.Primitive.Cubical.i0)
+     })
+  i
+are not equal at type Set
+when checking that a clause of alg has the correct boundary.
+
+Specifically, the terms
+  case (λ { .Φ _ → Set }) x
+and
+  case
+  (λ { .Φ _ → Set
+     ; .ze → ?2 (i = Agda.Primitive.Cubical.i0)
+     ; .on → ?3 (i = Agda.Primitive.Cubical.i0)
+     })
+  x
+must be equal, since alg .se Agda.Primitive.Cubical.i0 x could
+reduce to either.

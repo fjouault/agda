@@ -1,0 +1,8 @@
+
+Issue3545.agda:14.1-16.6: warning: -W[no]PragmaCompileErased
+The backend JS erases createElem so the COMPILE pragma will be
+ignored.
+
+Issue3545.agda:18.1-44: warning: -W[no]PragmaCompileErased
+The backend GHC erases createElem so the COMPILE pragma will be
+ignored.

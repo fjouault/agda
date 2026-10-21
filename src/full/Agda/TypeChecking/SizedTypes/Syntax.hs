@@ -1,34 +1,40 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE NoMonomorphismRestriction  #-}
-{-# LANGUAGE UndecidableInstances       #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Syntax of size expressions and constraints.
 
 module Agda.TypeChecking.SizedTypes.Syntax where
 
-import Prelude hiding (null)
+import Prelude hiding ( null )
 
-import Data.Maybe
-import Data.Foldable (Foldable)
+import GHC.Generics (Generic)
+import Control.DeepSeq
+
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Traversable (Traversable)
 
+import Agda.Syntax.Common
+
+import Agda.TypeChecking.Monad.Base.Types hiding (Polarity)
 import Agda.TypeChecking.SizedTypes.Utils
 
+import Agda.Utils.Function
 import Agda.Utils.Functor
 import Agda.Utils.Null
-import Agda.Utils.Pretty
+import Agda.Syntax.Common.Pretty as P
+
+import Agda.Utils.Impossible
 
 -- * Syntax
 
 -- | Constant finite sizes @n >= 0@.
 newtype Offset = O Int
-  deriving (Eq, Ord, Num, Enum)
+  deriving (Eq, Ord, Generic, Num, Enum)
 
--- This Show instance is ok because of the Enum constraint.
+instance NFData Offset
+
+-- This Show instance is ok because of the Num constraint.
 instance Show Offset where
   show (O n) = show n
 
@@ -67,15 +73,19 @@ data SizeExpr' rigid flex
   | Rigid { rigid  :: rigid, offset :: Offset }  -- ^ Variable plus offset @i + n@.
   | Infty                                        -- ^ Infinity @∞@.
   | Flex  { flex   :: flex, offset :: Offset }   -- ^ Meta variable @X + n@.
-    deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
+    deriving (Show, Eq, Ord, Generic, Functor, Foldable, Traversable)
 
 type SizeExpr = SizeExpr' Rigid Flex
+
+instance (NFData r, NFData f) => NFData (SizeExpr' r f)
 
 -- | Comparison operator, e.g. for size expression.
 data Cmp
   = Lt  -- ^ @<@.
   | Le  -- ^ @≤@.
-  deriving (Show, Eq, Bounded, Enum)
+  deriving (Show, Eq, Generic, Bounded, Enum)
+
+instance NFData Cmp
 
 instance Dioid Cmp where
   compose     = min
@@ -100,9 +110,11 @@ data Constraint' rigid flex = Constraint
   , cmp       :: Cmp
   , rightExpr :: SizeExpr' rigid flex
   }
-  deriving (Show, Functor, Foldable, Traversable)
+  deriving (Show, Generic, Functor, Foldable, Traversable)
 
 type Constraint = Constraint' Rigid Flex
+
+instance (NFData r, NFData f) => NFData (Constraint' r f)
 
 -- * Polarities to specify solutions.
 ------------------------------------------------------------------------
@@ -120,8 +132,9 @@ type Polarities flex = Map flex Polarity
 emptyPolarities :: Polarities flex
 emptyPolarities = Map.empty
 
+-- Used in size-solver (Andreas, 2021-08-20)
 polaritiesFromAssignments :: Ord flex => [PolarityAssignment flex] -> Polarities flex
-polaritiesFromAssignments = Map.fromList . map (\ (PolarityAssignment p x) -> (x,p))
+polaritiesFromAssignments = Map.fromListWith __IMPOSSIBLE__ . map (\ (PolarityAssignment p x) -> (x,p))
 
 -- | Default polarity is 'Least'.
 getPolarity :: Ord flex => Polarities flex -> flex -> Polarity
@@ -136,7 +149,7 @@ newtype Solution rigid flex = Solution { theSolution :: Map flex (SizeExpr' rigi
 
 instance (Pretty r, Pretty f) => Pretty (Solution r f) where
   pretty (Solution sol) = prettyList $ for (Map.toList sol) $ \ (x, e) ->
-    pretty x <+> text ":=" <+> pretty e
+    pretty x <+> ":=" <+> pretty e
 
 emptySolution :: Solution r f
 emptySolution = Solution Map.empty
@@ -174,12 +187,12 @@ instance Plus (SizeExpr' r f) Offset (SizeExpr' r f) where
 
 -- * Constraint simplification
 
-type CTrans r f = Constraint' r f -> Either String [Constraint' r f]
+type CTrans r f = Constraint' r f -> Maybe [Constraint' r f]
 
--- | Returns an error message if we have a contradictory constraint.
-simplify1 :: (Pretty f, Pretty r, Eq r) => CTrans r f -> CTrans r f
+-- | Returns 'Nothing' if the constraint is contradictory.
+simplify1 :: (Eq r) => CTrans r f -> CTrans r f
 simplify1 test c = do
-  let err = Left $ "size constraint " ++ prettyShow c ++ " is inconsistent"
+  let err = Nothing
   case c of
     -- rhs is Infty
     Constraint a           Le  Infty -> return []
@@ -242,22 +255,22 @@ compareOffset n Lt m = n <  m
 
 instance (Pretty r, Pretty f) => Pretty (SizeExpr' r f) where
   pretty (Const n)   = pretty n
-  pretty (Infty)     = text "∞"
+  pretty (Infty)     = "∞"
   pretty (Rigid i 0) = pretty i
   pretty (Rigid i n) = pretty i <> text ("+" ++ show n)
   pretty (Flex  x 0) = pretty x
   pretty (Flex  x n) = pretty x <> text ("+" ++ show n)
 
 instance Pretty Polarity where
-  pretty Least    = text "-"
-  pretty Greatest = text "+"
+  pretty Least    = "-"
+  pretty Greatest = "+"
 
 instance Pretty flex => Pretty (PolarityAssignment flex) where
   pretty (PolarityAssignment pol flex) = pretty pol <> pretty flex
 
 instance Pretty Cmp where
-  pretty Le = text "≤"
-  pretty Lt = text "<"
+  pretty Le = "≤"
+  pretty Lt = "<"
 
 instance (Pretty r, Pretty f) => Pretty (Constraint' r f) where
   pretty (Constraint a cmp b) = pretty a <+> pretty cmp <+> pretty b
@@ -296,29 +309,100 @@ instance TruncateOffset (SizeExpr' r f) where
 -- * Computing variable sets
 
 -- | The rigid variables contained in a pice of syntax.
-class Rigids r a where
-  rigids :: a -> Set r
+class Ord (RigidOf a) => Rigids a where
+  type RigidOf a
+  rigids :: a -> Set (RigidOf a)
 
-instance (Ord r, Rigids r a) => Rigids r [a] where
+instance Rigids a => Rigids [a] where
+  type RigidOf [a] = RigidOf a
   rigids as = Set.unions (map rigids as)
 
-instance Rigids r (SizeExpr' r f) where
+instance Ord r => Rigids (SizeExpr' r f) where
+  type RigidOf (SizeExpr' r f) = r
   rigids (Rigid x _) = Set.singleton x
+
   rigids _           = Set.empty
 
-instance Ord r => Rigids r (Constraint' r f) where
+instance Ord r => Rigids (Constraint' r f) where
+  type RigidOf (Constraint' r f) = r
   rigids (Constraint l _ r) = Set.union (rigids l) (rigids r)
 
 -- | The flexibe variables contained in a pice of syntax.
-class Flexs flex a | a -> flex where
-  flexs :: a -> Set flex
+class Ord (FlexOf a) => Flexs a where
+  type FlexOf a
+  flexs :: a -> Set (FlexOf a)
 
-instance (Ord flex, Flexs flex a) => Flexs flex [a] where
+instance Flexs a => Flexs [a] where
+  type FlexOf [a] = FlexOf a
   flexs as = Set.unions (map flexs as)
 
-instance Flexs flex (SizeExpr' rigid flex) where
+instance Ord flex => Flexs (SizeExpr' rigid flex) where
+  type FlexOf (SizeExpr' rigid flex) = flex
   flexs (Flex x _) = Set.singleton x
   flexs _          = Set.empty
 
-instance (Ord flex) => Flexs flex (Constraint' rigid flex) where
+instance Ord flex => Flexs (Constraint' rigid flex) where
+  type FlexOf (Constraint' rigid flex) = flex
   flexs (Constraint l _ r) = Set.union (flexs l) (flexs r)
+
+-- | Identifiers for rigid variables.
+data NamedRigid = NamedRigid
+  { rigidName  :: String   -- ^ Name for printing in debug messages.
+  , rigidIndex :: Int      -- ^ De Bruijn index.
+  } deriving (Show, Generic)
+
+instance NFData NamedRigid
+
+instance Eq NamedRigid where
+  (==) = (==) `on` rigidIndex
+
+instance Ord NamedRigid where
+  compare = compare `on` rigidIndex
+
+instance Pretty NamedRigid where
+  pretty = P.text . rigidName
+
+instance Plus NamedRigid Int NamedRigid where
+  plus (NamedRigid x i) j = NamedRigid x (i + j)
+
+-- | Size metas in size expressions.
+data SizeMeta = SizeMeta
+  { sizeMetaId   :: MetaId
+  -- TODO to fix issue 300?
+  -- , sizeMetaPerm :: Permutation -- ^ Permutation from the current context
+  --                               --   to the context of the meta.
+  , sizeMetaArgs :: [Int]       -- ^ De Bruijn indices.
+  } deriving (Show, Generic)
+
+instance NFData SizeMeta
+
+-- | An equality which ignores the meta arguments.
+instance Eq  SizeMeta where
+  (==) = (==) `on` sizeMetaId
+
+-- | An order which ignores the meta arguments.
+instance Ord SizeMeta where
+  compare = compare `on` sizeMetaId
+
+instance Pretty SizeMeta where
+  pretty = P.pretty . sizeMetaId
+
+-- | Size expression with de Bruijn indices.
+type DBSizeExpr = SizeExpr' NamedRigid SizeMeta
+
+type SizeConstraint = Constraint' NamedRigid SizeMeta
+
+-- | Size constraint with de Bruijn indices.
+data HypSizeConstraint = HypSizeConstraint
+  { sizeContext    :: Context
+  , sizeHypIds     :: [Nat] -- ^ DeBruijn indices
+  , sizeHypotheses :: [SizeConstraint]  -- ^ Living in @Context@.
+  , sizeConstraint :: SizeConstraint    -- ^ Living in @Context@.
+  }
+  deriving (Show, Generic)
+
+instance Flexs HypSizeConstraint where
+  type FlexOf HypSizeConstraint = SizeMeta
+  flexs (HypSizeConstraint _ _ hs c) = flexs hs `mappend` flexs c
+
+instance NFData HypSizeConstraint

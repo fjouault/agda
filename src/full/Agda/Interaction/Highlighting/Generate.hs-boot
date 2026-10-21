@@ -1,10 +1,7 @@
-module Agda.Interaction.Highlighting.Generate where
-import Agda.TypeChecking.Monad.Base
-import Agda.Syntax.Position (Range)
+{-# OPTIONS_GHC -Wunused-imports #-}
 
-highlightAsTypeChecked
-  :: MonadTCM tcm
-  => Range
-  -> Range
-  -> tcm a
-  -> tcm a
+module Agda.Interaction.Highlighting.Generate where
+
+import Agda.TypeChecking.Monad.Base (TCM, TCWarning)
+
+highlightWarning :: TCWarning -> TCM ()

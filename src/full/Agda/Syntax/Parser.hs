@@ -1,21 +1,22 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Agda.Syntax.Parser
     ( -- * Types
       Parser
       -- * Parse functions
-    , Agda.Syntax.Parser.parse
-    , Agda.Syntax.Parser.parsePosString
-    , parseFile'
+    , parse
+    , parsePosString
+    , parseRangeString
+    , parseFile
       -- * Parsers
     , moduleParser
     , moduleNameParser
+    , agdaFileExtensions
     , exprParser
     , exprWhereParser
     , holeContentParser
     , tokensParser
+      -- * Reading files.
+    , readFilePM
       -- * Parse errors
     , ParseError(..)
     , ParseWarning(..)
@@ -23,73 +24,80 @@ module Agda.Syntax.Parser
     , runPMIO
     ) where
 
-import Control.Arrow (second)
 import Control.Exception
-import Control.Monad ((>=>), forM_)
+import Control.Monad          ( forM_ )
+import Control.Monad.Except
 import Control.Monad.State
-import Control.Monad.Reader
-import Control.Monad.Writer hiding ((<>))
+import Control.Monad.IO.Class ( MonadIO(..) )
 
+import Data.Bifunctor
 import qualified Data.List as List
-import Data.Typeable ( Typeable )
+import Data.Text.Lazy (Text)
 
+import Agda.Syntax.Common
 import Agda.Syntax.Position
-import Agda.Syntax.Parser.Monad as M hiding (Parser, parseFlags)
+import Agda.Syntax.Parser.Monad
+  ( ParseError(..), ParseWarning(..), ParseResult(..), ParseFlags, LexState
+  , ParseState (parseWarnings, parseAttributes), defaultParseFlags, parseKeepComments
+  )
 import qualified Agda.Syntax.Parser.Monad as M
 import qualified Agda.Syntax.Parser.Parser as P
 import Agda.Syntax.Parser.Lexer
 import Agda.Syntax.Parser.Literate
 import Agda.Syntax.Concrete
-import Agda.Syntax.Concrete.Definitions
+import Agda.Syntax.Concrete.Attribute
 import Agda.Syntax.Parser.Tokens
 
-import Agda.Utils.Except
-  ( ExceptT
-  , MonadError(catchError, throwError)
-  , runExceptT
-  )
 import Agda.Utils.FileName
 import Agda.Utils.IO.UTF8 (readTextFile)
+import Agda.Utils.Maybe   (forMaybe, fromMaybe)
 import qualified Agda.Utils.Maybe.Strict as Strict
-import Agda.Utils.Pretty
-
-
-
-
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ((<$>), Applicative)
-#endif
-
-#include "undefined.h"
-import Agda.Utils.Impossible
 
 ------------------------------------------------------------------------
 -- Wrapping parse results
 
-wrap :: ParseResult a -> PM a
-wrap (ParseOk _ x)      = return x
-wrap (ParseFailed err)  = throwError err
+-- | A monad for handling parse errors and warnings.
 
-wrapIOM :: (MonadError e m, MonadIO m) => (IOError -> e) -> IO a -> m a
-wrapIOM f m = do
-  a <- liftIO$ (Right <$> m) `catch` (\err -> return$ Left (err :: IOError))
-  case a of
-    Right x  -> return x
-    Left err -> throwError (f err)
-
-wrapM :: IO (ParseResult a) -> PM a
-wrapM m = liftIO m >>= wrap
-
--- | A monad for handling parse results
 newtype PM a = PM { unPM :: ExceptT ParseError (StateT [ParseWarning] IO) a }
-               deriving (Functor, Applicative, Monad,
-                         MonadError ParseError, MonadIO)
+  deriving ( Functor, Applicative, Monad, MonadIO
+           , MonadError ParseError, MonadState [ParseWarning]
+           )
+
+-- | Run a 'PM' computation, returning a list of warnings in first-to-last order
+--   and either a parse error or the parsed thing.
+
+runPMIO :: (MonadIO m) => PM a -> m (Either ParseError a, [ParseWarning])
+runPMIO = liftIO . fmap (second reverse) . flip runStateT [] . runExceptT . unPM
+
+-- | Add a 'ParseWarning'.
 
 warning :: ParseWarning -> PM ()
 warning w = PM (modify (w:))
 
-runPMIO :: (MonadIO m) => PM a -> m (Either ParseError a, [ParseWarning])
-runPMIO = liftIO . fmap (second reverse) . flip runStateT [] . runExceptT . unPM
+-- | Embed a 'ParseResult' as 'PM' computation.
+
+wrap :: ParseResult a -> PM (a, Attributes)
+wrap (ParseFailed err)  = throwError err
+wrap (ParseOk s x)      = do
+  modify' (parseWarnings s ++)
+  return (x, parseAttributes s)
+
+wrapM :: IO (ParseResult a) -> PM (a, Attributes)
+wrapM m = liftIO m >>= wrap
+
+-- | Returns the contents of the given file.
+
+readFilePM :: RangeFile -> PM Text
+readFilePM file =
+  wrapIOM (ReadFileError file) $
+  readTextFile (filePath $ rangeFilePath file)
+
+wrapIOM :: (MonadError e m, MonadIO m) => (IOError -> e) -> IO a -> m a
+wrapIOM f m = do
+  a <- liftIO $ (Right <$> m) `catch` (\ err -> return $ Left (err :: IOError))
+  case a of
+    Right x  -> return x
+    Left err -> throwError (f err)
 
 ------------------------------------------------------------------------
 -- Parse functions
@@ -102,64 +110,112 @@ data Parser a = Parser
   , parseLiterate  :: LiterateParser a
   }
 
-type LiterateParser a = Parser a -> [Layer] -> PM a
+type LiterateParser a =
+  Parser a -> SrcFile -> [Layer] -> PM (a, Attributes)
 
-parse :: Parser a -> String -> PM a
-parse p = wrapM . return . M.parse (parseFlags p) [normal] (parser p)
+-- | Initial state for lexing.
 
-parseFile :: Parser a -> AbsolutePath -> PM a
-parseFile p = wrapM . M.parseFile (parseFlags p) [layout, normal] (parser p)
+normalLexState :: [LexState]
+normalLexState = [normal]
 
-parseString :: Parser a -> String -> PM a
-parseString = parseStringFromFile Strict.Nothing
+-- | Initial state for lexing with top-level layout.
 
-parseStringFromFile :: SrcFile -> Parser a -> String -> PM a
-parseStringFromFile src p = wrapM . return . M.parseFromSrc (parseFlags p) [layout, normal] (parser p) src
+layoutLexState :: [LexState]
+layoutLexState = [layout, normal]
+
+-- | Parse without top-level layout.
+
+parse :: Parser a -> String -> PM (a, Attributes)
+parse p = wrapM . return . M.parse (parseFlags p) normalLexState (parser p)
+
+-- | Parse with top-level layout.
+
+parseFileFromString
+  :: SrcFile   -- ^ Name of source file.
+  -> Parser a  -- ^ Parser to use.
+  -> String    -- ^ Contents of source file.
+  -> PM (a, Attributes)
+parseFileFromString src p = wrapM . return . M.parseFromSrc (parseFlags p) layoutLexState (parser p) src
+
+-- | Parse with top-level layout.
 
 parseLiterateWithoutComments :: LiterateParser a
-parseLiterateWithoutComments p layers = parseStringFromFile (literateSrcFile layers) p $ illiterate layers
+parseLiterateWithoutComments p f layers = parseFileFromString f p $ illiterate layers
+
+-- | Parse with top-level layout.
 
 parseLiterateWithComments :: LiterateParser [Token]
-parseLiterateWithComments p layers = do
-  code <- map Left <$> parseLiterateWithoutComments p layers
-  let literate = Right <$> filter (not . isCodeLayer) layers
-  let (terms, overlaps) = interleaveRanges code literate
+parseLiterateWithComments p f layers = do
+  (code, coh) <- parseLiterateWithoutComments p f layers
+  let literate = filter (not . isCodeLayer) layers
+  let (terms, overlaps) = interleaveRanges (map Left code) (map Right literate)
+
   forM_ (map fst overlaps) $ \c ->
-    warning$ OverlappingTokensWarning { warnRange = getRange c }
+    warning $ OverlappingTokensWarning { warnRange = f <$ getRangeWithoutFile c }
 
-  return$ concat [ case m of
-                       Left t -> [t]
-                       Right (Layer Comment interval s) -> [TokTeX (interval, s)]
-                       Right (Layer Markup _ _) -> []
-                       Right (Layer Code _ _) -> []
-                   | m <- terms ]
+  return . (,coh) . forMaybe terms $ \case
+      Left t                           -> Just t
+      Right (Layer Comment interval s) -> Just $ TokTeX    (f <$ interval, s)
+      Right (Layer Markup  interval s) -> Just $ TokMarkup (f <$ interval, s)
+      Right (Layer Code _ _)           -> Nothing
 
-readFilePM :: AbsolutePath -> PM String
-readFilePM path = wrapIOM (ReadFileError path) (readTextFile (filePath path))
 
-parseLiterateFile :: Processor -> Parser a -> AbsolutePath -> PM a
-parseLiterateFile po p path = readFilePM path >>= parseLiterate p p . po (startPos (Just path))
+parseLiterateFile
+  :: Processor
+  -> Parser a
+  -> RangeFile
+     -- ^ The file.
+  -> String
+     -- ^ The file contents. Note that the file is /not/ read from
+     -- disk.
+  -> PM (a, Attributes)
+parseLiterateFile po p path = parseLiterate p p (pure path) . po (startPos' ())
 
-parsePosString :: Parser a -> Position -> String -> PM a
-parsePosString p pos = wrapM . return . M.parsePosString pos (parseFlags p) [normal] (parser p)
+parsePosString :: Parser a -> Position -> String -> PM (a, Attributes)
+parsePosString p pos = wrapM . return . M.parsePosString pos (parseFlags p) normalLexState (parser p)
 
--- | Extensions supported by `parseFile'`
-parseFileExts :: [String]
-parseFileExts = ".agda":literateExts
+-- | Calls 'parsePosString' with 'Position' extracted from the Range.
+parseRangeString :: Parser a -> Range -> String -> PM (a, Attributes)
+parseRangeString p = parsePosString p . fromMaybe (startPos Nothing) . rStart
 
-parseFile' :: (Show a) => Parser a -> AbsolutePath -> PM a
-parseFile' p file =
-  if ".agda" `List.isSuffixOf` filePath file then
-    Agda.Syntax.Parser.parseFile p file
+-- | Extensions supported by `parseFile`.
+
+agdaFileExtensions :: [String]
+agdaFileExtensions = ".agda" : literateExts
+
+-- | Parse a file.
+--
+--   The 'Bool' parameter controls whether only @```agda@ blocks
+--   are treated as Agda code in Markdown/Typst files.
+--   When @True@, only blocks marked @```agda@ are considered code.
+--   When @False@, both @```@ and @```agda@ blocks are code (default).
+
+parseFile ::
+     Bool
+     -- ^ When @True@, only treat @```agda@ blocks as code in Markdown/Typst.
+  -> Parser a
+  -> RangeFile
+     -- ^ The file.
+  -> String
+     -- ^ The file contents. Note that the file is /not/ read from
+     -- disk.
+  -> PM ((a, Attributes), FileType)
+parseFile onlyAgdaBlocks p file input =
+  if ".agda" `List.isSuffixOf` path then
+    (, AgdaFileType) <$> parseFileFromString (Strict.Just file) p input
   else
-    go literateProcessors
+    go (literateProcessors onlyAgdaBlocks)
   where
-    go [] = throwError InvalidExtensionError {
-                     errPath = file
-                   , errValidExts = parseFileExts
+    path = filePath (rangeFilePath file)
+
+    go [] = throwError InvalidExtensionError
+                   { errPath = file
+                   , errValidExts = agdaFileExtensions
                    }
-    go ((ext, po):pos) | ext `List.isSuffixOf` filePath file = parseLiterateFile po p file
-    go (_:pos) = go pos
+    go ((ext, (po, ft)) : pos)
+      | ext `List.isSuffixOf` path =
+          (, ft) <$> parseLiterateFile po p file input
+      | otherwise = go pos
 
 ------------------------------------------------------------------------
 -- Specific parsers
@@ -167,33 +223,36 @@ parseFile' p file =
 -- | Parses a module.
 
 moduleParser :: Parser Module
-moduleParser = Parser { parser = P.moduleParser
-                      , parseFlags = withoutComments
-                      , parseLiterate = parseLiterateWithoutComments
-                      }
+moduleParser = Parser
+  { parser        = P.moduleParser
+  , parseFlags    = withoutComments
+  , parseLiterate = parseLiterateWithoutComments
+  }
 
 -- | Parses a module name.
 
 moduleNameParser :: Parser QName
-moduleNameParser = Parser { parser = P.moduleNameParser
-                          , parseFlags = withoutComments
-                          , parseLiterate = parseLiterateWithoutComments
-                          }
+moduleNameParser = Parser
+  { parser        = P.moduleNameParser
+  , parseFlags    = withoutComments
+  , parseLiterate = parseLiterateWithoutComments
+  }
 
 -- | Parses an expression.
 
 exprParser :: Parser Expr
-exprParser = Parser { parser = P.exprParser
-                    , parseFlags = withoutComments
-                    , parseLiterate = parseLiterateWithoutComments
-                    }
+exprParser = Parser
+  { parser        = P.exprParser
+  , parseFlags    = withoutComments
+  , parseLiterate = parseLiterateWithoutComments
+  }
 
 -- | Parses an expression followed by a where clause.
 
 exprWhereParser :: Parser ExprWhere
 exprWhereParser = Parser
-  { parser     = P.exprWhereParser
-  , parseFlags = withoutComments
+  { parser        = P.exprWhereParser
+  , parseFlags    = withoutComments
   , parseLiterate = parseLiterateWithoutComments
   }
 
@@ -209,10 +268,11 @@ holeContentParser = Parser
 -- | Gives the parsed token stream (including comments).
 
 tokensParser :: Parser [Token]
-tokensParser = Parser { parser = P.tokensParser
-                      , parseFlags = withComments
-                      , parseLiterate = parseLiterateWithComments
-                      }
+tokensParser = Parser
+  { parser        = P.tokensParser
+  , parseFlags    = withComments
+  , parseLiterate = parseLiterateWithComments
+  }
 
 -- | Keep comments in the token stream generated by the lexer.
 

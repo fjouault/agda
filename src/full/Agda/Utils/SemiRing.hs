@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 module Agda.Utils.SemiRing where
 
 -- | Semirings (<https://en.wikipedia.org/wiki/Semiring>).
@@ -7,6 +9,12 @@ class SemiRing a where
   oone   :: a
   oplus  :: a -> a -> a
   otimes :: a -> a -> a
+
+instance SemiRing () where
+  ozero      = ()
+  oone       = ()
+  oplus  _ _ = ()
+  otimes _ _ = ()
 
 instance SemiRing a => SemiRing (Maybe a) where
   ozero = Nothing
@@ -25,6 +33,9 @@ instance SemiRing a => SemiRing (Maybe a) where
 
 class SemiRing a => StarSemiRing a where
   ostar :: a -> a
+
+instance StarSemiRing () where
+  ostar _ = ()
 
 instance StarSemiRing a => StarSemiRing (Maybe a) where
   ostar Nothing  = oone

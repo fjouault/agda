@@ -1,11 +1,9 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.Functions
   ( etaExpandClause
   , getDef
   ) where
-
-import Control.Arrow ( first )
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
@@ -13,7 +11,7 @@ import Agda.Syntax.Internal
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.Context
 import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
+import Agda.TypeChecking.Monad.Pure
 import Agda.TypeChecking.Level
 import Agda.TypeChecking.Pretty
 import Agda.TypeChecking.Reduce
@@ -22,14 +20,15 @@ import Agda.TypeChecking.Telescope
 
 import Agda.Utils.Impossible
 import Agda.Utils.Functor ( ($>) )
-import Agda.Utils.Pretty ( prettyShow )
+import Agda.Syntax.Common.Pretty ( prettyShow )
 import Agda.Utils.Monad
 import Agda.Utils.Size
+import Agda.Utils.List
+import Agda.Utils.Tuple ( first )
 
-#include "undefined.h"
-
--- | Expand a clause to the maximal arity, by inserting variable
---   patterns and applying the body to variables.
+{-# SPECIALIZE etaExpandClause :: Clause -> TCM (Int, Clause) #-}
+-- | Expand a clause to the maximal arity, by inserting variable patterns and applying the body to
+--   variables. Return the arity and the expanded clause.
 
 --  Fixes issue #2376.
 --  Replaces 'introHiddenLambdas'.
@@ -38,40 +37,41 @@ import Agda.Utils.Size
 --  This is used instead of special treatment of lambdas
 --  (which was unsound: Issue #121)
 
-etaExpandClause :: MonadTCM tcm => Clause -> tcm Clause
-etaExpandClause clause = liftTCM $ do
+etaExpandClause :: PureTCM tcm => Clause -> tcm (Int, Clause)
+etaExpandClause clause = do
   case clause of
-    Clause _  _  ctel ps _           Nothing  _ _ -> return clause
-    Clause _  _  ctel ps Nothing     (Just t) _ _ -> return clause
-    Clause rl rf ctel ps (Just body) (Just t) catchall unreachable -> do
+    Clause _  _  ctel ps _           Nothing  _ _ _ _ _ -> let !arity = length ps in pure (arity, clause)
+    Clause _  _  ctel ps Nothing     (Just t) _ _ _ _ _ -> let !arity = length ps in pure (arity, clause)
+    Clause rl rf ctel ps (Just body) (Just t) catchall recursive unreachable ell wm -> do
 
       -- Get the telescope to expand the clause with.
-      TelV tel0 t' <- telView $ unArg t
+      TelV tel0 t' <- addContext ctel $ telView $ unArg t
 
       -- If the rhs has lambdas, harvest the names of the bound variables.
       let xs   = peekLambdas body
-      let ltel = useNames xs $ telToList tel0
+      let ltel = useNames xs $! telToList tel0
       let tel  = telFromList ltel
       let n    = size tel
       unless (n == size tel0) __IMPOSSIBLE__  -- useNames should not drop anything
       -- Join with lhs telescope, extend patterns and apply body.
       -- NB: no need to raise ctel!
-      let ctel' = telFromList $ telToList ctel ++ ltel
-          ps'   = raise n ps ++ teleNamedArgs tel
+      let ctel' = telFromList $! telToList ctel ++! ltel
+          ps'   = raise n ps ++! teleNamedArgs tel
           body' = raise n body `apply` teleArgs tel
       reportSDoc "term.clause.expand" 30 $ inTopContext $ vcat
-        [ text "etaExpandClause"
-        , text "  body    = " <+> (addContext ctel' $ prettyTCM body)
-        , text "  xs      = " <+> text (prettyShow xs)
-        , text "  new tel = " <+> prettyTCM ctel'
+        [ "etaExpandClause"
+        , "  body    = " <+> addContext ctel' (prettyTCM body)
+        , "  xs      = " <+> text (prettyShow xs)
+        , "  new tel = " <+> prettyTCM ctel'
         ]
-      return $ Clause rl rf ctel' ps' (Just body') (Just (t $> t')) catchall unreachable
+      let !arity = length ps + size tel0
+      pure (arity, Clause rl rf ctel' ps' (Just body') (Just (t $> t')) catchall recursive unreachable ell wm)
   where
     -- Get all initial lambdas of the body.
     peekLambdas :: Term -> [Arg ArgName]
     peekLambdas v =
-      case ignoreSharing v of
-        Lam info b -> Arg info (absName b) : peekLambdas (unAbs b)
+      case v of
+        Lam info b -> (Arg info (absName b) :) $! peekLambdas (unAbs b)
         _ -> []
 
     -- Use the names of the first argument, and set the Origin all other
@@ -95,7 +95,7 @@ etaExpandClause clause = liftTCM $ do
 --   Returns 'Nothing' if no such head exists.
 
 getDef :: Term -> TCM (Maybe QName)
-getDef t = (ignoreSharing <$> reduce t) >>= \case
+getDef t = reduce t >>= \case
   Def d _    -> return $ Just d
   Lam _ v    -> underAbstraction_ v getDef
   Level v    -> getDef =<< reallyUnLevelView v

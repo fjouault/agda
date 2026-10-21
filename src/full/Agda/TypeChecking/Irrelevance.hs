@@ -1,108 +1,131 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
-{-| Irrelevant function types.
+{-# LANGUAGE NondecreasingIndentation #-}
+
+{-| Compile-time irrelevance.
+
+In type theory with compile-time irrelevance à la Pfenning (LiCS 2001),
+variables in the context are annotated with relevance attributes.
+@@
+  Γ = r₁x₁:A₁, ..., rⱼxⱼ:Aⱼ
+@@
+To handle irrelevant projections, we also record the current relevance
+attribute in the judgement.  For instance, this attribute is equal to
+to 'Irrelevant' if we are in an irrelevant position, like an
+irrelevant argument.
+@@
+  Γ ⊢r t : A
+@@
+Only relevant variables can be used:
+@@
+
+  (Relevant x : A) ∈ Γ
+  --------------------
+  Γ  ⊢r  x  :  A
+@@
+Irrelevant global declarations can only be used if @r = Irrelevant@.
+
+When we enter a @r'@-relevant function argument, we compose the @r@ with @r'@
+and (left-)divide the attributes in the context by @r'@.
+@@
+  Γ  ⊢r  t  :  (r' x : A) → B      r' \ Γ  ⊢(r'·r)  u  :  A
+  ---------------------------------------------------------
+  Γ  ⊢r  t u  :  B[u/x]
+@@
+No surprises for abstraction:
+@@
+
+  Γ, (r' x : A)  ⊢r  :  B
+  -----------------------------
+  Γ  ⊢r  λxt  :  (r' x : A) → B
+@@
+
+This is different for runtime irrelevance (erasure) which is ``flat'',
+meaning that once one is in an irrelevant context, all new assumptions will
+be usable, since they are turned relevant once entering the context.
+See Conor McBride (WadlerFest 2016), for a type system in this spirit:
+
+We use such a rule for runtime-irrelevance:
+@@
+  Γ, (q \ q') x : A  ⊢q  t  :  B
+  ------------------------------
+  Γ  ⊢q  λxt  :  (q' x : A) → B
+@@
+
+Conor's system is however set up differently, with a very different
+variable rule:
+
+@@
+
+  (q x : A) ∈ Γ
+  --------------
+  Γ  ⊢q  x  :  A
+
+  Γ, (q·p) x : A  ⊢q  t  :  B
+  -----------------------------
+  Γ  ⊢q  λxt  :  (p x : A) → B
+
+  Γ  ⊢q  t  :  (p x : A) → B       Γ'  ⊢qp  u  :  A
+  -------------------------------------------------
+  Γ + Γ'  ⊢q  t u  :  B[u/x]
+@@
+
+
 -}
+
 module Agda.TypeChecking.Irrelevance where
 
-import Control.Arrow (first, second)
-import Control.Applicative
-import Control.Monad.Reader
-
-import qualified Data.Map as Map
-
-import Agda.Interaction.Options
+import Control.Monad.Except ( MonadError(..), runExceptT )
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Pretty
+import Agda.TypeChecking.Reduce
 import Agda.TypeChecking.Substitute.Class
+import Agda.TypeChecking.Telescope
 
+import Agda.Utils.Either (fromRightM)
+import Agda.Utils.Maybe
 import Agda.Utils.Monad
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
--- | data 'Relevance'
---   see "Agda.Syntax.Common".
+checkIrrelevanceAllowed :: LensRelevance a => a -> TCM ()
+checkIrrelevanceAllowed x = unlessM isIrrelevanceEnabled $
+  when (isIrrelevant x) $ typeError NeedOptionIrrelevance
 
--- * Operations on 'Dom'.
-
--- | Prepare parts of a parameter telescope for abstraction in constructors
---   and projections.
-hideAndRelParams :: Dom a -> Dom a
-hideAndRelParams = hideOrKeepInstance . mapRelevance nonStrictToIrr
-
--- | Used to modify context when going into a @rel@ argument.
-inverseApplyRelevance :: Relevance -> Dom a -> Dom a
-inverseApplyRelevance rel = mapRelevance (rel `inverseComposeRelevance`)
-
--- | Compose two relevance flags.
---   This function is used to update the relevance information
---   on pattern variables @a@ after a match against something @rel@.
-applyRelevance :: Relevance -> Dom a -> Dom a
-applyRelevance rel = mapRelevance (rel `composeRelevance`)
-
--- * Operations on 'Context'.
-
--- | Modify the context whenever going from the l.h.s. (term side)
---   of the typing judgement to the r.h.s. (type side).
-workOnTypes :: TCM a -> TCM a
-workOnTypes cont = do
-  allowed <- optExperimentalIrrelevance <$> pragmaOptions
-  verboseBracket "tc.irr" 20 "workOnTypes" $ workOnTypes' allowed cont
-
--- | Internal workhorse, expects value of --experimental-irrelevance flag
---   as argument.
-workOnTypes' :: Bool -> TCM a -> TCM a
-workOnTypes' experimental cont = modifyContext (modifyContextEntries $ mapRelevance f) cont
-  where
-    f | experimental = irrToNonStrict . nonStrictToRel
-      | otherwise    = nonStrictToRel
-
--- | (Conditionally) wake up irrelevant variables and make them relevant.
---   For instance,
---   in an irrelevant function argument otherwise irrelevant variables
---   may be used, so they are awoken before type checking the argument.
-applyRelevanceToContext :: Relevance -> TCM a -> TCM a
-applyRelevanceToContext rel =
-  case rel of
-    Relevant -> id
-    _        -> local $ \ e -> e
-      { envContext     = modifyContextEntries      (inverseApplyRelevance rel) (envContext e)
-      , envLetBindings = (Map.map . fmap . second) (inverseApplyRelevance rel) (envLetBindings e)
-                                                  -- enable local  irr. defs
-      , envRelevance   = composeRelevance rel (envRelevance e)
-                                                  -- enable global irr. defs
-      }
-
--- | Wake up irrelevant variables and make them relevant. This is used
---   when type checking terms in a hole, in which case you want to be able to
---   (for instance) infer the type of an irrelevant variable. In the course
---   of type checking an irrelevant function argument 'applyRelevanceToContext'
---   is used instead, which also sets the context relevance to 'Irrelevant'.
---   This is not the right thing to do when type checking interactively in a
---   hole since it also marks all metas created during type checking as
---   irrelevant (issue #2568).
-wakeIrrelevantVars :: TCM a -> TCM a
-wakeIrrelevantVars = local $ \ e -> e
-  { envContext     = modifyContextEntries      (inverseApplyRelevance Irrelevant) (envContext e)
-  , envLetBindings = (Map.map . fmap . second) (inverseApplyRelevance Irrelevant) (envLetBindings e)
-  }
+checkAllIrrelevanceAllowed :: (Traversable f, LensRelevance a) => f a -> TCM ()
+checkAllIrrelevanceAllowed xs = unlessM isIrrelevanceEnabled $
+  when (any isIrrelevant xs) $ typeError NeedOptionIrrelevance
 
 -- | Check whether something can be used in a position of the given relevance.
+--
+--   This is a substitute for double-checking that only makes sure
+--   relevances are correct.  See issue #2640.
+--
+--   Used in unifier (@ unifyStep Solution{}@).
+--
+--   At the moment, this implements McBride-style irrelevance,
+--   where Pfenning-style would be the most accurate thing.
+--   However, these two notions only differ how they handle
+--   bound variables in a term.  Here, we are only concerned
+--   in the free variables, used meta-variables, and used
+--   (irrelevant) definitions.
+--
 class UsableRelevance a where
-  usableRel :: Relevance -> a -> TCM Bool
+  usableRel
+    :: (ReadTCState m, HasConstInfo m, MonadAddContext m)
+    => Relevance -> a -> m Bool
 
 instance UsableRelevance Term where
-  usableRel rel u = case ignoreSharing u of
+  usableRel rel = \case
     Var i vs -> do
-      irel <- getRelevance <$> typeOfBV' i
+      irel <- getRelevance <$> domOfBV i
       let ok = irel `moreRelevant` rel
       reportSDoc "tc.irr" 50 $
-        text "Variable" <+> prettyTCM (var i) <+>
+        "Variable" <+> prettyTCM (var i) <+>
         text ("has relevance " ++ show irel ++ ", which is " ++
               (if ok then "" else "NOT ") ++ "more relevant than " ++ show rel)
       return ok `and2M` usableRel rel vs
@@ -116,37 +139,34 @@ instance UsableRelevance Term where
     Sort s   -> usableRel rel s
     Level l  -> return True
     MetaV m vs -> do
-      mrel <- getMetaRelevance <$> lookupMeta m
+      mrel <- getRelevance <$> lookupMetaModality m
       return (mrel `moreRelevant` rel) `and2M` usableRel rel vs
-    DontCare _ -> return $ isIrrelevant rel
-    Shared _ -> __IMPOSSIBLE__
+    DontCare v -> usableRel rel v -- TODO: allow irrelevant things to be used in DontCare position?
+    Dummy{}  -> return True
 
 instance UsableRelevance a => UsableRelevance (Type' a) where
   usableRel rel (El _ t) = usableRel rel t
 
 instance UsableRelevance Sort where
-  usableRel rel s = case s of
-    Type l -> usableRel rel l
-    Prop   -> return True
-    Inf    -> return True
+  usableRel rel = \case
+    Univ _ l -> usableRel rel l
+    Inf _ _ -> return True
     SizeUniv -> return True
-    DLub s1 s2 -> usableRel rel (s1,s2)
+    LockUniv -> return True
+    LevelUniv -> return True
+    IntervalUniv -> return True
+    PiSort a s1 s2 -> usableRel rel (a,s1,s2)
+    FunSort s1 s2 -> usableRel rel (s1,s2)
+    UnivSort s -> usableRel rel s
+    MetaS x es -> usableRel rel es
+    DefS d es  -> usableRel rel $ Def d es
+    DummyS{} -> return True
 
 instance UsableRelevance Level where
-  usableRel rel (Max ls) = usableRel rel ls
+  usableRel rel (Max _ ls) = usableRel rel ls
 
 instance UsableRelevance PlusLevel where
-  usableRel rel ClosedLevel{} = return True
-  usableRel rel (Plus _ l)    = usableRel rel l
-
-instance UsableRelevance LevelAtom where
-  usableRel rel l = case l of
-    MetaLevel m vs -> do
-      mrel <- getMetaRelevance <$> lookupMeta m
-      return (mrel `moreRelevant` rel) `and2M` usableRel rel vs
-    NeutralLevel _ v -> usableRel rel v
-    BlockedLevel _ v -> usableRel rel v
-    UnreducedLevel v -> usableRel rel v
+  usableRel rel (Plus _ l) = usableRel rel l
 
 instance UsableRelevance a => UsableRelevance [a] where
   usableRel rel = andM . map (usableRel rel)
@@ -154,12 +174,15 @@ instance UsableRelevance a => UsableRelevance [a] where
 instance (UsableRelevance a, UsableRelevance b) => UsableRelevance (a,b) where
   usableRel rel (a,b) = usableRel rel a `and2M` usableRel rel b
 
+instance (UsableRelevance a, UsableRelevance b, UsableRelevance c) => UsableRelevance (a,b,c) where
+  usableRel rel (a,b,c) = usableRel rel a `and2M` usableRel rel b `and2M` usableRel rel c
+
 instance UsableRelevance a => UsableRelevance (Elim' a) where
   usableRel rel (Apply a) = usableRel rel a
   usableRel rel (Proj _ p) = do
     prel <- relOfConst p
     return $ prel `moreRelevant` rel
-  usableRel rel (IApply x y v) = allM [x,y,v] $ usableRel rel
+  usableRel rel (IApply x y v) = usableRel rel v
 
 instance UsableRelevance a => UsableRelevance (Arg a) where
   usableRel rel (Arg info u) =
@@ -167,7 +190,269 @@ instance UsableRelevance a => UsableRelevance (Arg a) where
     in  usableRel (rel `composeRelevance` rel') u
 
 instance UsableRelevance a => UsableRelevance (Dom a) where
-  usableRel rel (Dom _ _ u) = usableRel rel u
+  usableRel rel d = usableRel rel (unDom d)
 
-instance (Subst t a, UsableRelevance a) => UsableRelevance (Abs a) where
+instance (Subst a, UsableRelevance a) => UsableRelevance (Abs a) where
   usableRel rel abs = underAbstraction_ abs $ \u -> usableRel rel u
+
+-- | Check whether something can be used in a position of the given modality.
+--
+--   This is a substitute for double-checking that only makes sure
+--   modalities are correct.  See issue #2640.
+--
+--   Used in unifier (@ unifyStep Solution{}@).
+--
+--   This uses McBride-style modality checking.
+--   It does not differ from Pfenning-style if we
+--   are only interested in the modality of the
+--   free variables, used meta-variables, and used
+--   definitions.
+--
+class UsableModality a where
+  usableMod
+    :: (HasConstInfo m, MonadAddContext m, MonadReduce m, MonadError Blocker m)
+    => Modality -> a -> m Bool
+
+instance UsableModality Term where
+  usableMod mod u = do
+   case u of
+    Var i vs -> do
+      imod <- getModality <$> domOfBV i
+      let ok = imod `moreUsableModality` mod
+      reportSDoc "tc.irr" 50 $
+        "Variable" <+> prettyTCM (var i) <+>
+        text ("has modality " ++ show imod ++ ", which is a " ++
+              (if ok then "" else "NOT ") ++ "more usable modality than " ++ show mod)
+      return ok `and2M` usableMod mod vs
+    Def f vs -> do
+      fmod <- modalityOfConst f
+      -- Pure modalities don't matter here, only positional ones, hence remove
+      -- them from the equation.
+      let ok = setModalPolarity (withStandardLock MixedPolarity) (setCohesion Flat fmod) `moreUsableModality` mod
+      reportSDoc "tc.irr" 50 $
+        "Definition" <+> prettyTCM (Def f []) <+>
+        text ("has modality " ++ show fmod ++ ", which is a " ++
+              (if ok then "" else "NOT ") ++ "more usable modality than " ++ show mod)
+      return ok `and2M` usableMod mod vs
+    Con c o vs -> do
+      cmod <- modalityOfConst (conName c)
+      let ok = cmod `moreUsableModality` mod
+      reportSDoc "tc.irr" 50 $
+        "The constructor" <+> prettyTCM (Con c o []) <+>
+        text ("has the modality " ++ show cmod ++ ", which is " ++
+              (if ok then "" else "NOT ") ++
+              "more usable than the modality " ++ show mod ++ ".")
+      return ok `and2M` usableMod mod vs
+    Lit l    -> return True
+    Lam info v  -> usableModAbs info mod v
+    -- Even if Pi contains Type, here we check it as a constructor for terms in the universe.
+    Pi a b   -> usableMod domMod (unEl $ unDom a) `and2M` usableModAbs (getArgInfo a) mod (unEl <$> b)
+      where
+        domMod = mapQuantity (composeQuantity $ getQuantity a) $
+                 mapCohesion (composeCohesion $ getCohesion a) $
+                 mapModalPolarity (composePolarity $ getModalPolarity a) mod
+    -- Andrea 15/10/2020 not updating these cases yet, but they are quite suspicious,
+    -- do we have special typing rules for Sort and Level?
+    Sort s   -> usableMod mod s
+    Level l  -> return True
+    MetaV m vs -> do
+      -- Polarity is a pure modality, as for definitions (see above).
+      -- (The free variables of the meta solution are checked via @vs@.)
+      mmod <- setModalPolarity mixedPolarity <$> lookupMetaModality m
+      let ok = mmod `moreUsableModality` mod
+      reportSDoc "tc.irr" 50 $
+        "Metavariable" <+> prettyTCM (MetaV m []) <+>
+        text ("has modality " ++ show mmod ++ ", which is a " ++
+              (if ok then "" else "NOT ") ++ "more usable modality than " ++ show mod)
+      (return ok `and2M` usableMod mod vs) `or2M` do
+        u <- instantiate u
+        caseMaybe (isMeta u) (usableMod mod u) $ \ m -> throwError (UnblockOnMeta m)
+    DontCare v -> usableMod mod v
+    Dummy{}  -> return True
+
+usableModAbs :: (Subst a, MonadAddContext m, UsableModality a, HasConstInfo m, MonadReduce m, MonadError Blocker m) =>
+                      ArgInfo -> Modality -> Abs a -> m Bool
+usableModAbs info mod abs = underAbstraction (setArgInfo info $ __DUMMY_DOM__) abs $ \ u -> usableMod mod u
+
+instance UsableRelevance a => UsableModality (Type' a) where
+  usableMod mod (El _ t) = usableRel (getRelevance mod) t
+
+instance UsableModality Sort where
+  usableMod mod s = usableRel (getRelevance mod) s
+
+instance UsableModality Level where
+  usableMod mod (Max _ ls) = usableRel (getRelevance mod) ls
+
+-- instance UsableModality PlusLevel where
+--   usableMod mod ClosedLevel{} = return True
+--   usableMod mod (Plus _ l)    = usableMod mod l
+
+instance UsableModality a => UsableModality [a] where
+  usableMod mod = andM . map (usableMod mod)
+
+instance (UsableModality a, UsableModality b) => UsableModality (a,b) where
+  usableMod mod (a,b) = usableMod mod a `and2M` usableMod mod b
+
+instance UsableModality a => UsableModality (Elim' a) where
+  usableMod mod (Apply a) = usableMod mod a
+  usableMod mod (Proj _ p) = do
+    pmod <- modalityOfConst p
+    return $ pmod `moreUsableModality` mod
+  usableMod mod (IApply x y v) = usableMod mod v
+
+instance UsableModality a => UsableModality (Arg a) where
+  usableMod mod (Arg info u) =
+    let mod' = getModality info
+    in  usableMod (mod `composeModality` mod') u
+
+instance UsableModality a => UsableModality (Dom a) where
+  usableMod mod d = usableMod mod (unDom d)
+
+usableAtModality' :: MonadConstraint TCM
+  -- Note: This weird-looking constraint is to trick GHC into accepting
+  -- that an instance of MonadConstraint TCM will exist, even if we
+  -- can't import the module in which it is defined.
+  => Maybe Sort -> WhyCheckModality -> Modality -> Term -> TCM ()
+usableAtModality' ms why mod t =
+  catchConstraint (UsableAtModality why ms mod t) $ do
+    whenM (maybe (pure True) isFibrant ms) $ do
+      res <- runExceptT $ usableMod mod t
+      case res of
+        Right b -> unless b $ typeError $ UnusableAtModality why mod t
+        Left blocker -> patternViolation blocker
+
+usableAtModality :: MonadConstraint TCM => WhyCheckModality -> Modality -> Term -> TCM ()
+usableAtModality = usableAtModality' Nothing
+
+-- | Given a partitioning of the context into the local context, telescope of
+--   of pattern variables and pattern-lambda bound variables, return whether
+--   the given variable is one of the pattern variables.
+isPatternVar :: Nat -> Nat -> Nat -> Bool
+isPatternVar k0 k1 x = k0 > x && x >= k1
+
+{-# SPECIALIZE isDefSing :: Nat -> Nat -> Type -> TCM DefSing #-}
+-- | Compute whether a type is a definitional singleton or might become one
+--   after a substitution or after the addition of some rewrite rules
+--   Assumes type passed in has been reduced (otherwise will be even more
+--   conservative than necessary).
+isDefSing :: (PureTCM m, MonadBlock m) => Nat -> Nat -> Type -> m DefSing
+isDefSing k0 k1 a = do
+  let s = getSort a
+  p <- isProp <$> abortIfBlocked s
+  -- Strict propositions are always definitional singletons
+  if p
+  then pure MaybeSing
+  else do
+  case unEl a of
+    Var x _           ->
+      -- Pattern variables might get substituted for definitional singletons
+      -- but bound variables cannot
+      if isPatternVar k0 k1 x then pure MaybeSing else pure NeverSing
+    Lam _ _           -> __IMPOSSIBLE__
+    Lit _             -> __IMPOSSIBLE__
+    Def d es          -> do
+      def <- theDef <$> getConstInfo d
+      case def of
+        Datatype{}         -> pure NeverSing
+        Record{recTel=tel} -> case recEtaEquality def of
+          YesEta  -> do
+            let Just vs = allApplyElims es
+            sings <- traverse (isDefSing' k0 k1) $ tel `apply` vs
+            pure $ foldr minDefSing AlwaysSing sings
+          NoEta _ -> pure NeverSing
+        Axiom{}            -> pure $ NeverSing
+          -- TODO: Postulated type formers might still become definitionally
+          -- singular if further rewrites are added (see #8266)
+        DataOrRecSig{}     -> pure NeverSing
+        AbstractDefn{}     -> pure MaybeSing
+          -- I am erring on the side of caution here: specifically, I am
+          -- worried about the possibility that a rewrite might look fine
+          -- outside of an abstract block, but then inside an abstract block,
+          -- all the abstract definitions will reduce and the rewrite will
+          -- become invalid.
+        Function{}         -> pure MaybeSing
+        Primitive{}        -> pure MaybeSing
+        PrimitiveSort{}    -> __IMPOSSIBLE__
+        GeneralizableVar{} -> __IMPOSSIBLE__
+        Constructor{}      -> __IMPOSSIBLE__
+    Con _ _ _         -> __IMPOSSIBLE__
+    Pi _ (unAbs -> b) -> isDefSing k0 (k1 + 1) b
+    Sort _            -> pure NeverSing
+    Level _           -> __IMPOSSIBLE__
+    MetaV _ _         -> __IMPOSSIBLE__
+    DontCare a        -> __IMPOSSIBLE__
+    Dummy _ _         -> __IMPOSSIBLE__
+
+{-# SPECIALIZE isDefSing' :: Nat -> Nat -> Dom Type -> TCM DefSing #-}
+isDefSing' :: (PureTCM m, MonadBlock m) => Nat -> Nat -> Dom Type -> m DefSing
+isDefSing' k0 k1 t =
+  if isIrrelevant $ getRelevance t
+  then pure AlwaysSing
+  else isDefSing k0 k1 $ unDom t
+
+-- * Propositions
+
+-- | Is a type a proposition?  (Needs reduction.)
+
+{-# SPECIALIZE isPropM :: Dom Type -> TCM Bool #-}
+isPropM :: (LensSort a, PrettyTCM a, PureTCM m, MonadBlock m) => a -> m Bool
+isPropM a = do
+  let s = getSort a
+  traceSDoc "tc.prop" 80 ("Is " <+> prettyTCM a <+> "of sort" <+> prettyTCM s <+> "in Prop?") do
+  isProp <$> abortIfBlocked s
+
+{-# SPECIALIZE isIrrelevantOrPropM :: Dom Type -> TCM Bool #-}
+isIrrelevantOrPropM
+  :: (LensRelevance a, LensSort a, PrettyTCM a, PureTCM m, MonadBlock m)
+  => a -> m Bool
+isIrrelevantOrPropM x = return (isIrrelevant x) `or2M` isPropM x
+
+allIrrelevantOrPropTel
+  :: (PureTCM m, MonadBlock m)
+  => Telescope -> m Bool
+allIrrelevantOrPropTel =
+  foldrTelescopeM (and2M . isIrrelevantOrPropM . fmap snd) (return True)
+
+-- * Fibrant types
+
+-- | Is a type fibrant (i.e. Type, Prop)?
+
+isFibrant :: (LensSort a, PureTCM m, MonadBlock m) => a -> m Bool
+isFibrant = fromRightM patternViolation . isFibrant'
+
+isFibrant' :: (LensSort a, PureTCM m) => a -> m (Either Blocker Bool)
+isFibrant' s =
+  ifBlocked (getSort s) (\ blocker _ -> return $ Left blocker) \ _ ->
+    return . Right . \case
+      Univ u _       -> univFibrancy u == IsFibrant
+      Inf u _        -> univFibrancy u == IsFibrant
+      SizeUniv{}     -> False
+      LockUniv{}     -> False
+      LevelUniv{}    -> False
+      IntervalUniv{} -> False
+      PiSort{}       -> __IMPOSSIBLE__
+      FunSort{}      -> __IMPOSSIBLE__
+      UnivSort{}     -> __IMPOSSIBLE__
+      MetaS{}        -> __IMPOSSIBLE__
+      DefS{}         -> False
+      DummyS{}       -> False
+
+
+-- | Cofibrant types are those that could be the domain of a fibrant
+--   pi type. (Notion by C. Sattler).
+isCoFibrantSort :: (LensSort a, PureTCM m) => a -> m (Either Blocker Bool)
+isCoFibrantSort s =
+  ifBlocked (getSort s) (\ blocker _ -> return $ Left blocker) \ _ ->
+    return . Right . \case
+      Univ u _       -> univFibrancy u == IsFibrant
+      Inf u _        -> univFibrancy u == IsFibrant
+      SizeUniv{}     -> False
+      LockUniv{}     -> True
+      LevelUniv{}    -> False
+      IntervalUniv{} -> True
+      PiSort{}       -> __IMPOSSIBLE__
+      FunSort{}      -> __IMPOSSIBLE__
+      UnivSort{}     -> __IMPOSSIBLE__
+      MetaS{}        -> __IMPOSSIBLE__
+      DefS{}         -> False
+      DummyS{}       -> False

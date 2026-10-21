@@ -1,97 +1,123 @@
-{-# LANGUAGE CPP                  #-}
+{-# LANGUAGE NondecreasingIndentation #-}
+-- {-# OPTIONS_GHC -ddump-simpl -dsuppress-all -dno-suppress-type-signatures -ddump-to-file -dno-typeable-binds #-}
 
-module Agda.TypeChecking.Rules.LHS where
+module Agda.TypeChecking.Rules.LHS
+  ( checkLeftHandSide
+  , LHSResult(..)
+  , bindAsPatterns
+  , IsFlexiblePattern(..)
+  , DataOrRecord
+  , checkSortOfSplitVar
+  , LetOrClause(LetLHS, ClauseLHS)
+  , buildLHSSubstitutions
+  , checkAbsurdPattern
+  ) where
 
-import Prelude hiding (mapM, sequence)
-
-import Data.Maybe
-
-import Control.Applicative
-import Control.Arrow (first, second, (***))
-import Control.Monad hiding (mapM, forM, sequence)
-import Control.Monad.State hiding (mapM, forM, sequence)
-import Control.Monad.Reader hiding (mapM, forM, sequence)
-import Control.Monad.Trans.Maybe
+import Prelude hiding ( null )
 
 import Data.Function (on)
-import Data.IntMap (IntMap)
-import qualified Data.IntMap as IntMap
-import Data.List (delete, sortBy, stripPrefix, findIndex)
-import Data.Monoid
-import Data.Traversable
+import Data.Maybe
+
+import Control.Monad.Except       ( MonadError(..), ExceptT(..), runExceptT )
+import Control.Monad.Trans.Maybe
+
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IntSet
+import Data.List (findIndex)
+import qualified Data.List as List
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+import Agda.Interaction.Highlighting.Generate
+  ( storeDisambiguatedConstructor, storeDisambiguatedProjection, disambiguateRecordFields)
 import Agda.Interaction.Options
 import Agda.Interaction.Options.Lenses
 
 import Agda.Syntax.Internal as I
 import Agda.Syntax.Internal.Pattern
-import Agda.Syntax.Abstract (IsProjP(..))
 import qualified Agda.Syntax.Abstract as A
-import qualified Agda.Syntax.Abstract.Pattern as A
 import Agda.Syntax.Abstract.Views (asView, deepUnscope)
-import Agda.Syntax.Common as Common
-import Agda.Syntax.Info as A
+import Agda.Syntax.Concrete (FieldAssignment'(..),LensInScope(..))
+import Agda.Syntax.Common hiding (DataOrRecord)
+import qualified Agda.Syntax.Info as A
+import Agda.Syntax.Literal
 import Agda.Syntax.Position
-import Agda.Syntax.Scope.Base (ScopeInfo, emptyScopeInfo)
-
 
 import Agda.TypeChecking.Monad
 
 import qualified Agda.TypeChecking.Monad.Benchmark as Bench
 import Agda.TypeChecking.Conversion
 import Agda.TypeChecking.Constraints
-import Agda.TypeChecking.Datatypes
+import Agda.TypeChecking.CheckInternal (checkInternal)
+import Agda.TypeChecking.Datatypes hiding (isDataOrRecordType)
+import Agda.TypeChecking.Errors (dropTopLevelModule)
 import Agda.TypeChecking.Irrelevance
-import {-# SOURCE #-} Agda.TypeChecking.Empty
+-- Prevent "Ambiguous occurrence ‘DontKnow’" when loading with ghci.
+-- (DontKnow is one of the constructors of ErrorNonEmpty *and* UnifactionResult').
+-- We can't explicitly hide just the constructor here because it isn't in the
+-- hs-boot file.
+import {-# SOURCE #-} Agda.TypeChecking.Empty (ensureEmptyType)
 import Agda.TypeChecking.Patterns.Abstract
 import Agda.TypeChecking.Pretty
-import Agda.TypeChecking.Records
+import Agda.TypeChecking.Records hiding (getRecordConstructor)
 import Agda.TypeChecking.Reduce
-import Agda.TypeChecking.Rewriting
+import Agda.TypeChecking.Sort
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Telescope
+import Agda.TypeChecking.Telescope.Path
 import Agda.TypeChecking.Primitive hiding (Nat)
-import Agda.TypeChecking.Monad.Builtin
+import Agda.TypeChecking.Warnings (warning)
 
-import {-# SOURCE #-} Agda.TypeChecking.Rules.Term (checkExpr)
-import Agda.TypeChecking.Rules.LHS.AsPatterns
-import Agda.TypeChecking.Rules.LHS.Problem hiding (Substitution)
+import {-# SOURCE #-} Agda.TypeChecking.Rules.Term (checkExpr, isType_)
+import Agda.TypeChecking.Rules.LHS.Problem
 import Agda.TypeChecking.Rules.LHS.ProblemRest
 import Agda.TypeChecking.Rules.LHS.Unify
-import Agda.TypeChecking.Rules.LHS.Split
 import Agda.TypeChecking.Rules.LHS.Implicit
-import Agda.TypeChecking.Rules.LHS.Instantiate
-import Agda.TypeChecking.Rules.Data
 
-import Agda.Utils.Except (MonadError(..))
+import Agda.Utils.CallStack ( HasCallStack, withCallerCallStack )
+import Agda.Utils.Function
 import Agda.Utils.Functor
+import Agda.Utils.Lens
 import Agda.Utils.List
-import Agda.Utils.ListT
+import Agda.Utils.List1 (List1, pattern (:|))
+import Agda.Utils.List2 (pattern List2)
+import qualified Agda.Utils.List1 as List1
+import qualified Agda.Utils.List2 as List2
+import Agda.Utils.Either
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.NonemptyList
-import Agda.Utils.Permutation
-import Agda.Utils.Pretty (prettyShow)
+import Agda.Utils.Null
+import qualified Agda.Syntax.Common.Pretty as P
+import Agda.Syntax.Common.Pretty (prettyShow)
+import Agda.Utils.Singleton
 import Agda.Utils.Size
+import Agda.Utils.Tuple
+import Agda.Utils.StrictReader
+import Agda.Utils.StrictWriter
 
-#include "undefined.h"
 import Agda.Utils.Impossible
+import Agda.TypeChecking.Free (anyFreeVar, freeIn)
 
--- | Compute the set of flexible patterns in a list of patterns. The result is
---   the deBruijn indices of the flexible patterns.
-flexiblePatterns :: [NamedArg A.Pattern] -> TCM FlexibleVars
-flexiblePatterns nps = do
-  forMaybeM (zip (downFrom $ length nps) nps) $ \ (i, Arg ai p) -> do
-    runMaybeT $ (\ f -> FlexibleVar (getHiding ai) (getOrigin ai) f (Just i) i) <$> maybeFlexiblePattern p
+-- | Are we checking the LHS of a let-pattern binding or a function clause?
+data LetOrClause
+  = LetLHS
+      -- ^ Checking a pattern bound by a let.
+  | ClauseLHS QName
+      -- ^ Checking the LHS of a clause of the function with the given 'QName'.
+
+-- | Extra read-only state for the LHS checker.
+--
+data LHSContext = LHSContext
+  { lhsRange       :: Range  -- ^ The range of the whole lhs of a clause.
+  , lhsContextSize :: Nat    -- ^ Original size of the context in which the lhs checker runs.
+  }
 
 -- | A pattern is flexible if it is dotted or implicit, or a record pattern
 --   with only flexible subpatterns.
 class IsFlexiblePattern a where
-  maybeFlexiblePattern :: a -> MaybeT TCM FlexibleVarKind
+  maybeFlexiblePattern :: (HasConstInfo m) => a -> MaybeT m FlexibleVarKind
 
-  isFlexiblePattern :: a -> TCM Bool
+  isFlexiblePattern :: (HasConstInfo m) => a -> m Bool
   isFlexiblePattern p =
     maybe False notOtherFlex <$> runMaybeT (maybeFlexiblePattern p)
     where
@@ -103,8 +129,8 @@ class IsFlexiblePattern a where
 
 instance IsFlexiblePattern A.Pattern where
   maybeFlexiblePattern p = do
-    reportSDoc "tc.lhs.flex" 30 $ text "maybeFlexiblePattern" <+> prettyA p
-    reportSDoc "tc.lhs.flex" 60 $ text "maybeFlexiblePattern (raw) " <+> (text . show . deepUnscope) p
+    reportSDoc "tc.lhs.flex" 30 $ "maybeFlexiblePattern" <+> prettyA p
+    reportSDoc "tc.lhs.flex" 60 $ "maybeFlexiblePattern (raw) " <+> (text . show . deepUnscope) p
     case p of
       A.DotP{}  -> return DotFlex
       A.VarP{}  -> return ImplicitFlex
@@ -121,13 +147,14 @@ instance IsFlexiblePattern (I.Pattern' a) where
     case p of
       I.DotP{}  -> return DotFlex
       I.ConP _ i ps
-        | Just ConOSystem <- conPRecord i -> return ImplicitFlex  -- expanded from ImplicitP
-        | Just _            <- conPRecord i -> maybeFlexiblePattern ps
+        | conPRecord i , PatOSystem <- patOrigin (conPInfo i) -> return ImplicitFlex  -- expanded from ImplicitP
+        | conPRecord i -> maybeFlexiblePattern ps
         | otherwise -> mzero
       I.VarP{}  -> mzero
-      I.AbsurdP{} -> mzero
       I.LitP{}  -> mzero
       I.ProjP{} -> mzero
+      I.IApplyP{} -> mzero
+      I.DefP{} -> mzero -- TODO Andrea check semantics
 
 -- | Lists of flexible patterns are 'RecordFlex'.
 instance IsFlexiblePattern a => IsFlexiblePattern [a] where
@@ -136,180 +163,162 @@ instance IsFlexiblePattern a => IsFlexiblePattern [a] where
 instance IsFlexiblePattern a => IsFlexiblePattern (Arg a) where
   maybeFlexiblePattern = maybeFlexiblePattern . unArg
 
-instance IsFlexiblePattern a => IsFlexiblePattern (Common.Named name a) where
+instance IsFlexiblePattern a => IsFlexiblePattern (Named name a) where
   maybeFlexiblePattern = maybeFlexiblePattern . namedThing
 
--- | Update the in patterns according to the given substitution, collecting
---   new dot pattern instantiations in the process.
-updateInPatterns
- :: [Dom Type]              -- ^ the types of the old pattern variables,
-                              --   relative to the new telescope
- -> [NamedArg A.Pattern]    -- ^ old in patterns
- -> [Arg DeBruijnPattern] -- ^ patterns to be substituted, living in the
-                              --   new telescope
- -> TCM ([NamedArg A.Pattern]   -- new in patterns
-        ,[DotPatternInst])        -- new dot pattern instantiations
-updateInPatterns as ps qs = do
-  reportSDoc "tc.lhs.top" 20 $ text "updateInPatterns" <+> nest 2 (vcat
-    [ text "as      =" <+> prettyList (map prettyTCM as)
-    , text "ps      =" <+> prettyList (map prettyA ps)
-    , text "qs      =" <+> prettyList (map pretty qs)
-    ])
-  first (map snd . IntMap.toDescList) <$> updates as ps qs
+-- | Update the given LHS state:
+--   1. simplify problem equations
+--   2. rename telescope variables
+--   3. introduce trailing patterns
+updateLHSState :: LHSState a -> TCM (LHSState a)
+updateLHSState st = do
+  let tel     = st ^. lhsTel
+      problem = st ^. lhsProblem
+  eqs' <- addContext tel $ updateProblemEqs $ problem ^. problemEqs
+  tel' <- useNamesFromProblemEqs eqs' tel
+  updateProblemRest $ set lhsTel tel' $ set (lhsProblem . problemEqs) eqs' st
+
+-- | Update the user patterns in the given problem, simplifying equations
+--   between constructors where possible.
+updateProblemEqs
+ :: [ProblemEq] -> TCM [ProblemEq]
+updateProblemEqs eqs = do
+  reportSDoc "tc.lhs.top" 20 $ vcat
+    [ "updateProblem: equations to update"
+    , nest 2 $ if null eqs then "(none)" else vcat $ map'  prettyTCM eqs
+    ]
+
+  eqs' <- updates eqs
+
+  reportSDoc "tc.lhs.top" 20 $ vcat
+    [ "updateProblem: new equations"
+    , nest 2 $ if null eqs' then "(none)" else vcat $ map'  prettyTCM eqs'
+    ]
+
+  return eqs'
+
   where
-    updates :: [Dom Type] -> [NamedArg A.Pattern] -> [Arg DeBruijnPattern]
-           -> TCM (IntMap (NamedArg A.Pattern), [DotPatternInst])
-    updates as ps qs = mconcat <$> sequence (zipWith3 update as ps qs)
 
-    update :: Dom Type -> NamedArg A.Pattern -> Arg DeBruijnPattern
-           -> TCM (IntMap (NamedArg A.Pattern), [DotPatternInst])
-    update a p q = case unArg q of
-      -- Case: the unifier did not instantiate the variable
-      VarP x     -> return (IntMap.singleton (dbPatVarIndex x) p, [])
-      -- Case: the unifier did instantiate the variable
-      DotP o u   -> case snd $ asView $ namedThing (unArg p) of
-        A.DotP _ _ e -> return (IntMap.empty, [DPI Nothing  (Just e) u a])
-        A.WildP _  -> return (IntMap.empty, [DPI Nothing  Nothing  u a])
-        A.VarP x   -> return (IntMap.empty, [DPI (Just $ A.unBind x) Nothing  u a])
-        p@(A.ConP _ cs qs) | Just c <- getUnambiguous cs -> do
-          -- If the user wrote a constructor pattern, the computed dot pattern
-          -- better have the same constructor as its head.
-          mus <- do
-            isrec <- isRecordConstructor c
-            case isrec of
-              -- don't fail for record constructor, since we can always eta-expand
-              Just _ -> do
-                Def r es  <- ignoreSharing <$> reduce (unEl $ unDom a)
-                let vs = fromMaybe __IMPOSSIBLE__ $ allApplyElims es
-                Just <$> etaExpandRecord r vs u
-              Nothing -> do
-                u <- reduce u
-                case ignoreSharing u of
-                  Con c' _ us | c == conName c' -> do
-                    TelV tel _ <- telView $ unDom a
-                    return $ Just (tel, us)
-                  _ -> return Nothing
-          case mus of
-            Just (ftel, us) -> do
-              qs <- insertImplicitPatterns ExpandLast qs ftel
-              reportSDoc "tc.lhs.imp" 20 $
-                text "insertImplicitPatternsT returned" <+> fsep (map prettyA qs)
+    updates :: [ProblemEq] -> TCM [ProblemEq]
+    updates = concat <.> traverse update
 
-              let instTel EmptyTel _                   = []
-                  instTel (ExtendTel arg tel) (u : us) = arg : instTel (absApp tel u) us
-                  instTel ExtendTel{} []               = __IMPOSSIBLE__
-                  bs0 = instTel ftel (map unArg us)
-                  -- Andreas, 2012-09-19 propagate relevance info to dot patterns
-                  bs  = map (mapRelevance (composeRelevance (getRelevance a))) bs0
-              updates bs qs (map (DotP o . unArg) us `withArgsFrom` teleArgNames ftel)
-            -- If the dot pattern is not a constructor pattern or is headed
-            -- by a different constructor, turn it into a dot pattern
-            -- instantiation (giving a nice error message later).
-            Nothing -> return (IntMap.empty, [DPI Nothing (Just $ A.patternToExpr p) u a])
+    update :: ProblemEq -> TCM [ProblemEq]
+    update eq@(ProblemEq A.WildP{} _ _) = return [eq]
+    update eq@(ProblemEq p@A.ProjP{} _ _) = typeError $ IllformedProjectionPatternAbstract p
+    update eq@(ProblemEq p@(A.AsP info x p') v a) =
+      (ProblemEq (A.VarP x) v a :) <$> update (ProblemEq p' v a)
 
-        p@A.ConP{} -> return (IntMap.empty, [DPI Nothing (Just $ A.patternToExpr p) u a])
-        p@A.LitP{} -> return (IntMap.empty, [DPI Nothing (Just $ A.patternToExpr p) u a])
-        A.AsP         _ _ _ -> __IMPOSSIBLE__
-        A.RecP        _ _   -> __IMPOSSIBLE__
-        A.ProjP       _ _ _ -> __IMPOSSIBLE__
-        A.DefP        _ _ _ -> __IMPOSSIBLE__
-        A.AbsurdP     _     -> __IMPOSSIBLE__
-        A.PatternSynP _ _ _ -> __IMPOSSIBLE__
-        A.EqualP{}          -> __IMPOSSIBLE__
-        A.WithAppP    _ _ _ -> __IMPOSSIBLE__
-      ConP c cpi [] -> do
-        let
-            dpi :: [DotPatternInst]
-            dpi = mkDPI $ patternToTerm $ unArg q
-              where
-                mkDPI v = case namedThing $ unArg p of
-                  A.DotP _ _ e -> [DPI Nothing (Just e) v a]
-                  A.VarP x   -> [DPI (Just $ A.unBind x) Nothing v a]
-                  A.WildP _  -> [DPI Nothing  Nothing v a]
-                  _        -> []
+    update eq@(ProblemEq p v a) = reduce v >>= constructorForm >>= \case
+      Con c ci es -> do
+        let vs = mustAllApplyElims es
+        -- we should only simplify equations between fully applied constructors
+        contype <- getFullyAppliedConType c =<< reduce (unDom a)
+        caseMaybe contype (return [eq]) $ \((d,_,pars),b) -> do
+        TelV ctel _ <- telViewPath b
 
-        return (IntMap.empty,dpi)
-      -- Case: the unifier eta-expanded the variable
-      ConP _c _cpi qs -> do
-        Def r es <- ignoreSharing <$> reduce (unEl $ unDom a)
-        def      <- theDef <$> getConstInfo r
-        let pars = fromMaybe __IMPOSSIBLE__ $ allApplyElims es
-            fs  = killRange $ recFields def
-            tel = recTel def `apply` pars
-            as  = applyPatSubst (parallelS $ map (namedThing . unArg) qs) $ flattenTel tel
-            -- If the user wrote a dot pattern or variable but the unifier
-            -- eta-expanded it, add the corresponding instantiation.
-            dpi :: [DotPatternInst]
-            dpi = mkDPI $ patternToTerm $ unArg q
-              where
-                mkDPI v = case namedThing $ unArg p of
-                  A.DotP _ _ e -> [DPI Nothing (Just e) v a]
-                  A.VarP x     -> [DPI (Just $ A.unBind x) Nothing v a]
-                  _            -> []
-        second (dpi++) <$>
-          updates as (projectInPat p fs) (map (fmap namedThing) qs)
-      AbsurdP{}  -> __IMPOSSIBLE__
-      LitP _     -> __IMPOSSIBLE__
-      ProjP{}    -> __IMPOSSIBLE__
+        -- Andrea 15/10/2020: propagate modality to constructor arguments
+        let updMod = composeModality (getModality a)
+        ctel <- return $ mapModality updMod <$> ctel
 
-    projectInPat :: NamedArg A.Pattern -> [Arg QName] -> [NamedArg A.Pattern]
-    projectInPat p fs = case namedThing (unArg p) of
-      A.VarP x            -> map (makeWildField (PatRange $ getRange x)) fs
-      A.ConP _ _ nps      -> nps
-      A.WildP pi          -> map (makeWildField pi) fs
-      A.DotP pi o e       -> map (makeDotField pi o) fs
-      A.ProjP _ _ _       -> __IMPOSSIBLE__
-      A.DefP _ _ _        -> __IMPOSSIBLE__
-      A.AsP _ _ _         -> __IMPOSSIBLE__
-      A.AbsurdP _         -> __IMPOSSIBLE__
-      A.LitP _            -> __IMPOSSIBLE__
-      A.PatternSynP _ _ _ -> __IMPOSSIBLE__
-      A.RecP _ _          -> __IMPOSSIBLE__
-      A.EqualP{}          -> __IMPOSSIBLE__
-      A.WithAppP _ _ _    -> __IMPOSSIBLE__
-      where
-        makeWildField pi (Arg fi f) = Arg fi $ unnamed $ A.WildP pi
-        makeDotField pi o (Arg fi f) = Arg fi $ unnamed $
-          A.DotP pi o $ A.Underscore underscoreInfo
-          where
-            underscoreInfo = A.MetaInfo
-              { A.metaRange          = getRange pi
-              , A.metaScope          = emptyScopeInfo
-              , A.metaNumber         = Nothing
-              , A.metaNameSuggestion = prettyShow $ qnameName f
-              }
+        let bs = instTel ctel (map' unArg vs)
+
+        p <- expandLitPattern p
+        case p of
+          A.AsP{} -> __IMPOSSIBLE__
+          A.ConP cpi ambC ps -> do
+            (c',_) <- disambiguateConstructor ambC d pars
+
+            -- Issue #3014: If the constructor is forced but the user wrote a
+            -- different constructor,that's an error. We simply keep the
+            -- problem equation, this will result in a proper error message later.
+            if conName c /= conName c' then return [eq] else do
+
+            -- Insert implicit patterns
+            ps <- insertImplicitPatterns ExpandLast ps ctel
+            reportSDoc "tc.lhs.imp" 20 $
+              "insertImplicitPatternsT returned" <+> fsep (map' prettyA ps)
+
+            -- Check argument count and hiding (not just count: #3074)
+            let checkArgs [] [] _ _ = return ()
+                checkArgs (p : ps) (v : vs) nExpected nActual
+                  | getHiding p == getHiding v = checkArgs ps vs (nExpected + 1) (nActual + 1)
+                  | otherwise                  = setCurrentRange p $ typeError WrongHidingInLHS
+                checkArgs [] vs nExpected nActual = typeError $
+                  WrongNumberOfConstructorArguments (conName c) (nExpected + length vs) nActual
+                checkArgs (p : ps) [] nExpected nActual = setCurrentRange p $ typeError $
+                  WrongNumberOfConstructorArguments (conName c) nExpected (nActual + 1 + (length ps))
+
+            checkArgs ps vs 0 0
+
+            updates $ zipWith3 ProblemEq (map' namedArg ps) (map' unArg vs) bs
+
+          A.RecP _ _ fs -> do
+            axs <- map' argFromDom . recFields . theDef <$> getConstInfo d
+
+            -- Andreas, 2018-09-06, issue #3122.
+            -- Associate the concrete record field names used in the record pattern
+            -- to their counterpart in the record type definition.
+            disambiguateRecordFields (map' _nameFieldA fs) (map' unArg axs)
+
+            let cxs = map' (fmap (nameConcrete . qnameName)) axs
+
+            -- In fs omitted explicit fields are replaced by underscores,
+            -- and the fields are put in the correct order.
+            ps <- insertMissingFieldsFail d (const $ A.WildP empty) fs cxs
+
+            -- We also need to insert missing implicit or instance fields.
+            ps <- insertImplicitPatterns ExpandLast ps ctel
+
+            let eqs = zipWith3 ProblemEq (map' namedArg ps) (map' unArg vs) bs
+            updates eqs
+
+          _ -> return [eq]
+
+      Lit l | A.LitP _ l' <- p , l == l' -> return []
+
+      _ | A.EqualP{} <- p -> do
+        itisone <- liftTCM primItIsOne
+        ifM (tryConversion $ equalTerm (unDom a) v itisone) (return []) (return [eq])
+
+      _ -> return [eq]
+
+    instTel :: Telescope -> [Term] -> [Dom Type]
+    instTel EmptyTel _                   = []
+    instTel (ExtendTel arg tel) (u : us) = arg : instTel (absApp tel u) us
+    instTel ExtendTel{} []               = __IMPOSSIBLE__
 
 
 -- | Check if a problem is solved.
 --   That is, if the patterns are all variables,
 --   and there is no 'problemRest'.
-isSolvedProblem :: Problem -> Bool
-isSolvedProblem problem = null (restPats $ problemRest problem) &&
+isSolvedProblem :: Problem a -> Bool
+isSolvedProblem problem = null (problem ^. problemRestPats) &&
   problemAllVariables problem
 
 -- | Check if a problem consists only of variable patterns.
 --   (Includes the 'problemRest').
-problemAllVariables :: Problem -> Bool
+problemAllVariables :: Problem a -> Bool
 problemAllVariables problem =
-    all (isSolved . snd . asView . namedArg) $
-      restPats (problemRest problem) ++ problemInPat problem
+    all isSolved $
+      map' namedArg (problem ^. problemRestPats) ++! problemInPats problem
   where
     -- need further splitting:
     isSolved A.ConP{}        = False
     isSolved A.LitP{}        = False
-    isSolved A.ProjP{}       = False
     isSolved A.RecP{}        = False  -- record pattern
-    isSolved A.AbsurdP{}     = False
     -- solved:
     isSolved A.VarP{}        = True
     isSolved A.WildP{}       = True
     isSolved A.DotP{}        = True
+    isSolved A.AbsurdP{}     = True
+    -- recursive cases
+    isSolved (A.AsP _ _ p)   = isSolved p
     -- impossible:
+    isSolved A.ProjP{}       = __IMPOSSIBLE__
     isSolved A.DefP{}        = __IMPOSSIBLE__
-    isSolved A.AsP{}         = __IMPOSSIBLE__  -- removed by asView
     isSolved A.PatternSynP{} = __IMPOSSIBLE__  -- expanded before
     isSolved A.EqualP{}      = False -- __IMPOSSIBLE__
-    isSolved A.WithAppP{}    = __IMPOSSIBLE__
+    isSolved A.WithP{}       = __IMPOSSIBLE__
 
 -- | For each user-defined pattern variable in the 'Problem', check
 -- that the corresponding data type (if any) does not contain a
@@ -318,272 +327,286 @@ problemAllVariables problem =
 --
 -- Precondition: The problem has to be solved.
 
-noShadowingOfConstructors
-  :: Call -- ^ Trace, e.g., @CheckPatternShadowing clause@
-  -> Problem -> TCM ()
-noShadowingOfConstructors mkCall problem =
-  traceCall mkCall $ do
-    let pat = map (snd . asView . namedArg) $
-                  problemInPat problem
-        tel = map (unEl . snd . unDom) $ telToList $ problemTel problem
-    zipWithM_ noShadowing tel pat
-    return ()
-  where
-  noShadowing t = \case
+noShadowingOfConstructors :: ProblemEq -> TCM ()
+noShadowingOfConstructors problem@(ProblemEq p _ dom@(unDom -> El _ a)) = do
+  let info = dom ^. dInfo
+  case p of
    A.WildP       {} -> return ()
    A.AbsurdP     {} -> return ()
-   A.ConP        {} -> return ()  -- only happens for eta expanded record patterns
-   A.RecP        {} -> return ()  -- record pattern
-   A.ProjP       {} -> return ()  -- projection pattern
    A.DotP        {} -> return ()
    A.EqualP      {} -> return ()
+   A.AsP _ _ p      -> noShadowingOfConstructors $ problem { problemInPat = p }
+   A.ConP        {} -> __IMPOSSIBLE__
+   A.RecP        {} -> __IMPOSSIBLE__
+   A.ProjP       {} -> __IMPOSSIBLE__
    A.DefP        {} -> __IMPOSSIBLE__
-   A.AsP         {} -> __IMPOSSIBLE__ -- removed by asView
    A.LitP        {} -> __IMPOSSIBLE__
    A.PatternSynP {} -> __IMPOSSIBLE__
-   A.WithAppP    {} -> __IMPOSSIBLE__
-   A.VarP (A.BindName x) -> do
+   A.WithP       {} -> __IMPOSSIBLE__
+   -- Andreas, 2017-12-01, issue #2859.
+   -- Due to parameter refinement, there can be (invisible) variable patterns from module
+   -- parameters that shadow constructors.
+   -- Thus, only complain about user written variable that shadow constructors.
+   A.VarP A.BindName{unBind = x} -> when (getOrigin info == UserWritten) $ do
     reportSDoc "tc.lhs.shadow" 30 $ vcat
-      [ text $ "checking whether pattern variable " ++ prettyShow x ++ " shadows a constructor"
-      , nest 2 $ text "type of variable =" <+> prettyTCM t
+      [ text $ "checking whether pattern variable " ++! prettyShow x ++! " shadows a constructor"
+      , nest 2 $ "type of variable =" <+> prettyTCM a
+      , nest 2 $ "position of variable =" <+> pretty (getRange x)
       ]
-    reportSDoc "tc.lhs.shadow" 70 $ nest 2 $ text "t =" <+> pretty t
-    t <- reduce t
-    case ignoreSharing t of
-      Def t _ -> do
-        d <- theDef <$> getConstInfo t
-        case d of
-          Datatype { dataCons = cs } -> do
-            case filter ((A.nameConcrete x ==) . A.nameConcrete . A.qnameName) cs of
-              []      -> return ()
-              (c : _) -> setCurrentRange x $
-                typeError $ PatternShadowsConstructor x c
-          AbstractDefn{} -> return ()
+    reportSDoc "tc.lhs.shadow" 70 $ nest 2 $ "a =" <+> pretty a
+
+    -- Get a conflicting data or record constructor, if any.
+    mc <- runMaybeT do
+
+      -- Is the type of the pattern variable a data or pattern record type?
+      a  <- lift $ reduce a
+      (d, dr) <- MaybeT $ isDataOrRecord a
+      guard $ patternMatchingAllowed dr
+
+      -- Look for a constructor with the same name as the pattern variable.
+      cs <- lift $ getConstructors d
+      MaybeT $ pure $ List.find ((A.nameConcrete x ==) . A.nameConcrete . A.qnameName) cs
+
+    -- Alert if there is a constructor of the same name.
+    whenJust mc \ c -> setCurrentRange x $
+      warning $ PatternShadowsConstructor (nameConcrete x) c
+    --
+    -- Andreas, 2023-09-08, issue #6829:
+    -- I rewrote the code originally dating from 2009, commit:
+    -- https://github.com/agda/agda/commit/5d5095ba080b04f16867d4ed5af4ba7091f1a773
+    -- The code survived for almost 15 years, but it slept through the advent
+    -- of matchable record constructors in 2010 (Agda 2.2.8):
+    -- https://github.com/agda/agda/blob/283730b392d7c21c54b53b0f486802ec143e4af7/doc/release-notes/2.2.8.md#L7-L9
+    -- Here are comments on the last version of the code I'd like to preserve,
+    -- as they reflect some considerations and design decisions:
+    --
             -- Abstract constructors cannot be brought into scope,
             -- even by a bigger import list.
             -- Thus, they cannot be confused with variables.
             -- Alternatively, we could do getConstInfo in ignoreAbstractMode,
             -- then Agda would complain if a variable shadowed an abstract constructor.
-          Axiom       {} -> return ()
-          Function    {} -> return ()
-          Record      {} -> return ()
-          Constructor {} -> __IMPOSSIBLE__
           -- TODO: in the future some stuck primitives might allow constructors
-          Primitive   {} -> return ()
-      Var   {} -> return ()
-      Pi    {} -> return ()
-      Sort  {} -> return ()
-      MetaV {} -> return ()
       -- TODO: If the type is a meta-variable, should the test be
       -- postponed? If there is a problem, then it will be caught when
       -- the completed module is type checked, so it is safe to skip
       -- the test here. However, users may be annoyed if they get an
       -- error in code which has already passed the type checker.
-      Lam   {} -> __IMPOSSIBLE__
-      Lit   {} -> __IMPOSSIBLE__
-      Level {} -> __IMPOSSIBLE__
-      Con   {} -> __IMPOSSIBLE__
-      Shared{} -> __IMPOSSIBLE__
-      DontCare{} -> __IMPOSSIBLE__
 
 -- | Check that a dot pattern matches it's instantiation.
-checkDotPattern :: DotPatternInst -> TCM ()
-checkDotPattern (DPI _ (Just e) v (Dom{domInfo = info, unDom = a})) =
+checkDotPattern :: DotPattern -> TCM ()
+checkDotPattern (Dot e v dom@(unDom -> a)) =
   traceCall (CheckDotPattern e v) $ do
   reportSDoc "tc.lhs.dot" 15 $
-    sep [ text "checking dot pattern"
+    sep [ "checking dot pattern"
         , nest 2 $ prettyA e
-        , nest 2 $ text "=" <+> prettyTCM v
-        , nest 2 $ text ":" <+> prettyTCM a
+        , nest 2 $ "=" <+> prettyTCM v
+        , nest 2 $ ":" <+> prettyTCM a
         ]
-  applyRelevanceToContext (getRelevance info) $ do
+  applyDomToContext dom $ do
     u <- checkExpr e a
-    reportSDoc "tc.lhs.dot" 50 $
-      sep [ text "equalTerm"
-          , nest 2 $ pretty a
-          , nest 2 $ pretty u
-          , nest 2 $ pretty v
-          ]
-    -- Should be ok to do noConstraints here
-    noConstraints $ equalTerm a u v
-checkDotPattern (DPI _ Nothing _ _) = return ()
+    unless (isIrrelevant dom) do
+      reportSDoc "tc.lhs.dot" 50 $
+        sep [ "equalTerm"
+            , nest 2 $ pretty a
+            , nest 2 $ pretty u
+            , nest 2 $ pretty v
+            ]
+      equalTerm a u v
 
--- | Temporary data structure for 'checkLeftoverPatterns'
-type Projectn  = (ProjOrigin, QName)
-type Projectns = [Projectn]
+checkAbsurdPattern :: AbsurdPattern -> TCM ()
+checkAbsurdPattern (Absurd r a) = do
+  ensureEmptyType r a
+  erased        <- hasQuantity0 <$> viewTC eQuantity
+  erasedMatches <- optErasedMatches <$> pragmaOptions
+  when (not erased && not (emEmpty erasedMatches) && hasQuantity0 a) $
+    typeError . SplitError .
+      ErasedDatatype ErasedMatchesDisabledEmpty =<<
+      buildClosure (unDom a)
 
--- | Checks whether the dot patterns left over after splitting can be covered
---   by shuffling around the dots from implicit positions. Returns the updated
---   user patterns (without dot patterns).
-checkLeftoverDotPatterns
-  :: [NamedArg A.Pattern] -- ^ Leftover patterns after splitting is completed
-  -> [Int]                -- ^ De Bruijn indices of leftover variable patterns
-                          --   computed by splitting
-  -> [Dom Type]           -- ^ Types of leftover patterns
-  -> [DotPatternInst]     -- ^ Instantiations computed by unifier
-  -> TCM ()
-checkLeftoverDotPatterns ps vs as dpi = do
-  reportSDoc "tc.lhs.dot" 15 $ text "checking leftover dot patterns..."
-  idv <- sortBy (compare `on` length . snd) . concat <$>
-           traverse gatherImplicitDotVars dpi
-  reportSDoc "tc.lhs.dot" 30 $ nest 2 $
-    text "implicit dotted variables:" <+>
-    prettyList (map (\(i,fs) -> prettyTCM $ Var i (map (uncurry Proj) fs)) idv)
-  checkUserDots ps vs as idv
-  reportSDoc "tc.lhs.dot" 15 $ text "all leftover dot patterns ok!"
+checkAnnotationPattern :: AnnotationPattern -> TCM ()
+checkAnnotationPattern (Ann t a) = do
+  reportSDoc "tc.lhs.ann" 15 $
+    sep [ "checking type annotation in pattern"
+        , nest 2 $ prettyA t
+        , nest 2 $ "=" <+> prettyTCM a
+        ]
+  b <- isType_ t
+  equalType a b
+
+-- | After splitting is complete, we transfer the origins
+--   We also transfer the locations of absurd patterns, since these haven't
+--   been introduced yet in the internal pattern.
+transferOrigins :: [NamedArg A.Pattern]
+                -> [NamedArg DeBruijnPattern]
+                -> TCM [NamedArg DeBruijnPattern]
+transferOrigins ps qs = do
+  reportSDoc "tc.lhs.origin" 40 $ vcat
+    [ "transferOrigins"
+    , nest 2 $ vcat
+      [ "ps  =   " <+> prettyA ps
+      , "qs  =   " <+> pretty qs
+      ]
+    ]
+  transfers ps qs
 
   where
-    checkUserDots :: [NamedArg A.Pattern] -> [Int] -> [Dom Type]
-                  -> [(Int,Projectns)]
-                  -> TCM ()
-    checkUserDots []     []     []     idv = return ()
-    checkUserDots []     (_:_)  _      idv = __IMPOSSIBLE__
-    checkUserDots []     _      (_:_)  idv = __IMPOSSIBLE__
-    checkUserDots (_:_)  []     _      idv = __IMPOSSIBLE__
-    checkUserDots (_:_)  _      []     idv = __IMPOSSIBLE__
-    checkUserDots (p:ps) (v:vs) (a:as) idv = do
-      idv' <- checkUserDot p v a idv
-      checkUserDots ps vs as idv'
+    transfers :: [NamedArg A.Pattern]
+              -> [NamedArg DeBruijnPattern]
+              -> TCM [NamedArg DeBruijnPattern]
+    transfers [] qs
+      | all notVisible qs = return $ map' (setOrigin Inserted) qs
+      | otherwise         = __IMPOSSIBLE__
+    transfers (p : ps) [] = __IMPOSSIBLE__
+    transfers (p : ps) (q : qs)
+      | matchingArgs p q = do
+          q' <- mapNameOf (maybe id (const . Just) $ getNameOf p) -- take NamedName from p if present
+              . setOrigin (getOrigin p)
+            <$> (traverse $ traverse $ transfer $ namedArg p) q
+          (q' :) <$> transfers ps qs
+      | otherwise = (setOrigin Inserted q :) <$> transfers (p : ps) qs
 
-    checkUserDot :: NamedArg A.Pattern -> Int -> Dom Type
-                 -> [(Int,Projectns)]
-                 -> TCM [(Int,Projectns)]
-    checkUserDot p v a idv = case namedArg p of
-      A.DotP i o e | o == Inserted -> return idv
-      -- Jesper, 2016-12-08 (Issue 1605): if the origin is Inserted, this
-      -- means the dot pattern was created by expanding '...', so we don't
-      -- have to complain here.
-      A.DotP i o e -> do
-        reportSDoc "tc.lhs.dot" 30 $ nest 2 $
-          text "checking user dot pattern: " <+> prettyA e
-        caseMaybeM (undotImplicitVar (v,[],unDom a) idv)
-          (traceCall (CheckPattern (namedArg p) EmptyTel (unDom a)) $
-             typeError $ UninstantiatedDotPattern e)
-          (\idv' -> do
-            u <- checkExpr e (unDom a)
-            reportSDoc "tc.lhs.dot" 30 $ nest 2 $
-              text "checked expression: " <+> prettyTCM u
-            noConstraints $ equalTerm (unDom a) u (var v)
-            return idv')
-      A.VarP _     -> return idv
-      A.WildP _    -> return idv
-      A.AbsurdP _  -> return idv
-      -- Andreas, 2017-01-18, issue #2413, AsP is not __IMPOSSIBLE__
-      A.AsP _ _ p0 -> checkUserDot (setNamedArg p p0) v a idv
-      A.ConP _ _ _ -> __IMPOSSIBLE__
-      A.LitP _     -> __IMPOSSIBLE__
-      A.ProjP _ _ _-> __IMPOSSIBLE__
-      A.DefP _ _ _ -> __IMPOSSIBLE__
-      A.RecP _ _   -> __IMPOSSIBLE__
-      A.PatternSynP _ _ _ -> __IMPOSSIBLE__
-      A.EqualP{}   -> __IMPOSSIBLE__
-      A.WithAppP    _ _ _ -> __IMPOSSIBLE__
+    transfer :: A.Pattern -> DeBruijnPattern -> TCM DeBruijnPattern
+    transfer p q = case (asView p , q) of
 
-    gatherImplicitDotVars :: DotPatternInst -> TCM [(Int,Projectns)]
-    gatherImplicitDotVars (DPI _ (Just _) _ _) = return [] -- Not implicit
-    gatherImplicitDotVars (DPI _ Nothing u _)  = gatherVars u
-      where
-        gatherVars :: Term -> TCM [(Int,Projectns)]
-        gatherVars u = case ignoreSharing u of
-          Var i es -> return $ (i,) <$> maybeToList (allProjElims es)
-          Con c _ us -> ifM (isEtaCon $ conName c)
-                      {-then-} (concat <$> traverse (gatherVars . unArg) us)
-                      {-else-} (return [])
-          _        -> return []
+      ((asB , A.ConP pi _ ps) , ConP c (ConPatternInfo i r ft mb l prio) qs) -> do
+        let cpi = ConPatternInfo (PatternInfo PatOCon asB) r ft mb l prio
+        ConP c cpi <$> transfers ps qs
 
-    lookupImplicitDotVar :: (Int,Projectns) -> [(Int,Projectns)] -> Maybe Projectns
-    lookupImplicitDotVar (i,fs) [] = Nothing
-    lookupImplicitDotVar (i,fs) ((j,gs):js)
-     -- Andreas, 2016-09-20, issue #2196
-     -- We need to ignore the ProjOrigin!
-     | i == j , Just hs <- stripPrefixBy ((==) `on` snd) fs gs = Just hs
-     | otherwise = lookupImplicitDotVar (i,fs) js
+      ((asB , A.RecP _kwr pi fs) , ConP c (ConPatternInfo i r ft mb l prio) qs) -> do
+        let Def d _  = unEl $ unArg $ fromMaybe __IMPOSSIBLE__ mb
+            axs = map' (nameConcrete . qnameName . unArg) (conFields c) `withArgsFrom` qs
+            cpi = ConPatternInfo (PatternInfo PatORec asB) r ft mb l prio
+        ps <- insertMissingFieldsFail d (const $ A.WildP empty) fs axs
+        ConP c cpi <$> transfers ps qs
 
-    undotImplicitVar :: (Int,Projectns,Type) -> [(Int,Projectns)]
-                     -> TCM (Maybe [(Int,Projectns)])
-    undotImplicitVar (i,fs,a) idv = do
-     reportSDoc "tc.lhs.dot" 40 $ vcat
-       [ text "undotImplicitVar"
-       , nest 2 $ vcat
-         [ text "i  =" <+> pshow i
-         , text "fs =" <+> sep (map (prettyTCM . snd) fs)
-         , text "a  =" <+> prettyTCM a
-         , text "raw=" <+> pretty a
-         , text "idv=" <+> pshow idv
-         ]
-       ]
-     case lookupImplicitDotVar (i,fs) idv of
-      Nothing -> return Nothing
-      Just [] -> return $ Just $ delete (i,fs) idv
-      Just rs -> caseMaybeM (isEtaRecordType a) (return Nothing) $ \(d,pars) -> do
-        gs <- recFields . theDef <$> getConstInfo d
-        let u = Var i (map (uncurry Proj) fs)
-        is <- forM gs $ \(Arg _ g) -> do
-                (_,_,b) <- fromMaybe __IMPOSSIBLE__ <$> projectTyped u a ProjSystem g
-                return (i,fs++[(ProjSystem,g)],b)
-        undotImplicitVars is idv
+      ((asB , p) , ConP c (ConPatternInfo i r ft mb l prio) qs) -> do
+        let cpi = ConPatternInfo (PatternInfo (patOrig p) asB) r ft mb l prio
+        return $ ConP c cpi qs
 
-    undotImplicitVars :: [(Int,Projectns,Type)] -> [(Int,Projectns)]
-                      -> TCM (Maybe [(Int,Projectns)])
-    undotImplicitVars []     idv = return $ Just idv
-    undotImplicitVars (i:is) idv =
-      caseMaybeM (undotImplicitVar i idv)
-        (return Nothing)
-        (\idv' -> undotImplicitVars is idv')
+      ((asB , p) , VarP _ x) -> return $! VarP (PatternInfo (patOrig p) asB) x
+
+      ((asB , p) , DotP _ u) -> return $! DotP (PatternInfo (patOrig p) asB) u
+
+      ((asB , p) , LitP (LitPatternInfo _ prio) l) ->
+        return $! LitP (LitPatternInfo (PatternInfo (patOrig p) asB) prio) l
+
+      _ -> return q
+
+    patOrig :: A.Pattern -> PatOrigin
+    patOrig (A.VarP x)      = PatOVar (A.unBind x)
+    patOrig A.DotP{}        = PatODot
+    patOrig A.ConP{}        = PatOCon
+    patOrig A.RecP{}        = PatORec
+    patOrig A.WildP{}       = PatOWild
+    patOrig A.AbsurdP{}     = PatOAbsurd
+    patOrig A.LitP{}        = PatOLit
+    patOrig A.EqualP{}      = PatOCon --TODO: origin for EqualP
+    patOrig A.AsP{}         = __IMPOSSIBLE__
+    patOrig A.ProjP{}       = __IMPOSSIBLE__
+    patOrig A.DefP{}        = __IMPOSSIBLE__
+    patOrig A.PatternSynP{} = __IMPOSSIBLE__
+    patOrig A.WithP{}       = __IMPOSSIBLE__
+
+    matchingArgs :: NamedArg A.Pattern -> NamedArg DeBruijnPattern -> Bool
+    matchingArgs p q
+      -- The arguments match if
+      -- 1. they are both projections,
+      | isJust (A.isProjP p) = isJust (isProjP q)
+      -- 2. or they are both visible,
+      | visible p && visible q = True
+      -- 3. or they have the same hiding and the argument is not named,
+      | sameHiding p q && isNothing (getNameOf p) = True
+      -- 4. or they have the same hiding and the same name.
+      | sameHiding p q && namedSame p q = True
+      -- Otherwise this argument was inserted by the typechecker.
+      | otherwise = False
 
 
--- | Bind the variables in a left hand side and check that 'Hiding' of
---   the patterns matches the hiding info in the type.
---
---   Precondition: the patterns should
---   all be 'A.VarP', 'A.WildP', or 'A.AbsurdP' and the
---   telescope should have the same size as the pattern list.
---   There could also be 'A.ConP's resulting from eta expanded implicit record
---   patterns.
-bindLHSVars :: [NamedArg A.Pattern] -> Telescope -> TCM a -> TCM a
-bindLHSVars []        tel@ExtendTel{}  _   = do
-  reportSDoc "impossible" 10 $
-    text "bindLHSVars: no patterns left, but tel =" <+> prettyTCM tel
-  __IMPOSSIBLE__
-bindLHSVars (_ : _)   EmptyTel         _   = __IMPOSSIBLE__
-bindLHSVars []        EmptyTel         ret = ret
-bindLHSVars (p : ps) tel0@(ExtendTel a tel) ret = do
-  -- see test/Fail/WronHidingInLHS:
-  unless (sameHiding p a) $ typeError WrongHidingInLHS
+-- | If a user-written variable occurs more than once, it should be bound
+--   to the same internal variable (or term) in all positions.
+--   Returns the list of patterns with the duplicate user patterns removed.
+checkPatternLinearity :: [ProblemEq] -> TCM [ProblemEq]
+checkPatternLinearity eqs = do
+  reportSDoc "tc.lhs.linear" 30 $ "Checking linearity of pattern variables"
+  check Map.empty eqs
+  where
+    check :: Map A.BindName (Term, Type) -> [ProblemEq] -> TCM [ProblemEq]
+    check _ [] = return []
+    check vars (eq@(ProblemEq p u a) : eqs) = do
+      reportSDoc "tc.lhs.linear" 40 $ sep
+        [ "linearity: checking pattern "
+        , prettyA p
+        , " equal to term "
+        , prettyTCM u
+        , " of type "
+        , prettyTCM a
+        ]
+      case p of
+        A.VarP x -> do
+          let y = A.unBind x
+          reportSLn "tc.lhs.linear" 60 $
+            "pattern variable " ++! prettyShow (A.nameConcrete y) ++! " with id " ++! show (A.nameId y)
+          case Map.lookup x vars of
+            Just (v , b) -> do
+              traceCall (CheckPatternLinearityType $ A.nameConcrete y) $
+                noConstraints $ equalType (unDom a) b
+              traceCall (CheckPatternLinearityValue $ A.nameConcrete y) $
+                noConstraints $ equalTerm (unDom a) u v
+              check vars eqs
+            Nothing -> (eq:) <$> do
+              check (Map.insert x (u,unDom a) vars) eqs
+        A.AsP _ x p ->
+          check vars $ [ProblemEq (A.VarP x) u a, ProblemEq p u a] ++! eqs
+        A.WildP{}       -> continue
+        A.DotP{}        -> continue
+        A.AbsurdP{}     -> continue
+        A.ConP{}        -> __IMPOSSIBLE__
+        A.ProjP{}       -> __IMPOSSIBLE__
+        A.DefP{}        -> __IMPOSSIBLE__
+        A.LitP{}        -> __IMPOSSIBLE__
+        A.PatternSynP{} -> __IMPOSSIBLE__
+        A.RecP{}        -> __IMPOSSIBLE__
+        A.EqualP{}      -> __IMPOSSIBLE__
+        A.WithP{}       -> __IMPOSSIBLE__
 
-  case namedArg p of
-    A.VarP x      -> addContext (A.unBind x, a) $ bindLHSVars ps (absBody tel) ret
-    A.WildP _     -> bindDummy (absName tel)
-                 -- @bindDummy underscore@ does not fix issue 819, but
-                 -- introduces unwanted underscores in error messages
-                 -- (Andreas, 2015-05-28)
-    A.DotP _ _ _  -> bindDummy (absName tel)
-    A.AbsurdP pi  -> __IMPOSSIBLE__
-    -- Andreas, 2017-01-18, issue #2413
-    -- A.AsP is not __IMPOSSIBLE__
-    A.AsP _ _ p0    -> bindLHSVars (setNamedArg p p0 : ps) tel0 ret
-    A.ConP{}        -> __IMPOSSIBLE__
-    A.RecP{}        -> __IMPOSSIBLE__
-    A.ProjP{}       -> __IMPOSSIBLE__
-    A.DefP{}        -> __IMPOSSIBLE__
-    A.LitP{}        -> __IMPOSSIBLE__
-    A.PatternSynP{} -> __IMPOSSIBLE__
-    A.EqualP{}      -> __IMPOSSIBLE__
-    A.WithAppP{}    -> __IMPOSSIBLE__
-    where
-      bindDummy s = do
-        x <- if isUnderscore s then freshNoName_ else unshadowName =<< freshName_ ("." ++ argNameToString s)
-        addContext (x, a) $ bindLHSVars ps (absBody tel) ret
+      where continue = (eq:) <$> check vars eqs
+
+-- | Construct the context for a left hand side, making up out-of-scope names
+--   for unnamed variables.
+computeLHSContext :: [Maybe A.Name] -> Telescope -> TCM Context
+computeLHSContext = go CxEmpty []
+  where
+    go cxt _ []        tel@ExtendTel{} = do
+      reportSDoc "impossible" 10 $
+        "computeLHSContext: no patterns left, but tel =" <+> prettyTCM tel
+      __IMPOSSIBLE__
+    go cxt _ (_ : _)   EmptyTel = __IMPOSSIBLE__
+    go cxt _ []        EmptyTel = return cxt
+    go cxt taken (x : xs) tel0@(ExtendTel a tel) = do
+        name <- maybe (dummyName taken $ absName tel) return x
+        go (CxExtendVar name a cxt) (name : taken) xs (absBody tel)
+
+    dummyName taken s =
+      if isUnderscore s then freshNoName_
+      else setNotInScope <$> freshName_ (argNameToString s)
 
 -- | Bind as patterns
 bindAsPatterns :: [AsBinding] -> TCM a -> TCM a
 bindAsPatterns []                ret = ret
 bindAsPatterns (AsB x v a : asb) ret = do
-  reportSDoc "tc.lhs.as" 10 $ text "as pattern" <+> prettyTCM x <+>
-    sep [ text ":" <+> prettyTCM a
-        , text "=" <+> prettyTCM v
+  reportSDoc "tc.lhs.as" 10 $ "as pattern" <+> prettyTCM x <+>
+    sep [ ":" <+> prettyTCM a
+        , "=" <+> prettyTCM v
         ]
-  addLetBinding defaultArgInfo x v a $ bindAsPatterns asb ret
+  addLetBinding' NoAxiom Inserted x v a $ bindAsPatterns asb ret
+
+-- | Since with-abstraction can change the type of a variable, we have to
+--   recheck the stripped with patterns when checking a with function.
+recheckStrippedWithPattern :: ProblemEq -> TCM ()
+recheckStrippedWithPattern (ProblemEq p v a)
+  | A.WildP{} <- p = return ()
+  | otherwise      = checkInternal v CmpLeq (unDom a)
+      `catchError` \_ -> typeError $ IllTypedPatternAfterWithAbstraction p
 
 -- | Result of checking the LHS of a clause.
 data LHSResult = LHSResult
@@ -593,8 +616,13 @@ data LHSResult = LHSResult
   , lhsVarTele      :: Telescope
     -- ^ Δ : The types of the pattern variables, in internal dependency order.
     -- Corresponds to 'clauseTel'.
+    -- Like the other components (e.g. `lhsBodyType`), this telescope lives
+    -- in the ambient context.
+    -- To print it, we need /not/ drop Δ from the ambient context.
   , lhsPatterns     :: [NamedArg DeBruijnPattern]
     -- ^ The patterns in internal syntax.
+  , lhsHasAbsurd    :: Bool
+    -- ^ Whether the LHS has at least one absurd pattern.
   , lhsBodyType     :: Arg Type
     -- ^ The type of the body. Is @bσ@ if @Γ@ is defined.
     -- 'Irrelevant' to indicate the rhs must be checked in irrelevant mode.
@@ -607,18 +635,71 @@ data LHSResult = LHSResult
     -- ^ As-bindings from the left-hand side. Return instead of bound since we
     -- want them in where's and right-hand sides, but not in with-clauses
     -- (Issue 2303).
-  , lhsPartialSplit :: [Int]
+  , lhsPartialSplit :: IntSet
     -- ^ have we done a partial split?
+  , lhsIndexedSplit :: Bool
+    -- ^ have we split on an indexed type?
   }
 
 instance InstantiateFull LHSResult where
-  instantiateFull' (LHSResult n tel ps t sub as psplit) = LHSResult n
+  instantiateFull' (LHSResult n tel ps abs t sub as psplit ixsplit) = LHSResult n
     <$> instantiateFull' tel
     <*> instantiateFull' ps
+    <*> instantiateFull' abs
     <*> instantiateFull' t
     <*> instantiateFull' sub
     <*> instantiateFull' as
     <*> pure psplit
+    <*> pure ixsplit
+
+-- | Compute substitution from the out patterns @ps@
+--
+---  We have two slightly different cases here: normal function and
+--   with-function. In both cases the goal is to build a substitution
+--   from the context Γ of the previous checkpoint to the current lhs
+--   context Δ:
+--
+--      Δ ⊢ paramSub : Γ
+--
+--    * Normal function, f
+--
+--      Γ = cxt = module parameter telescope of f
+--      Ψ = non-parameter arguments of f (we have f : Γ Ψ → A)
+--      Δ   ⊢ patSub  : Γ Ψ
+--      Γ Ψ ⊢ weakSub : Γ
+--      paramSub = patSub ∘ weakSub
+--
+--    * With-function
+--
+--      Γ = lhs context of the parent clause (cxt = [])
+--      Ψ = argument telescope of with-function
+--      Θ = inserted implicit patterns not in Ψ (#2827)
+--          (this happens if the goal computes to an implicit
+--           function type after some matching in the with-clause)
+--
+--      Ψ   ⊢ withSub : Γ
+--      Δ   ⊢ patSub  : Ψ Θ
+--      Ψ Θ ⊢ weakSub : Ψ
+--      paramSub = patSub ∘ weakSub ∘ withSub
+--
+--      To compute Θ we can look at the arity of the with-function
+--      and compare it to numPats. This works since the with-function
+--      type is fully reduced.
+buildLHSSubstitutions :: Context -> NAPs -> IsWithFunction (Arity, Substitution)
+  -> (Substitution, Substitution)
+buildLHSSubstitutions cxt ps isWithFun = do
+  let notProjPats = takeWhile (isNothing . isProjP) ps
+      numPats = length notProjPats
+      patSub = map' (patternToTerm . namedArg) (reverse notProjPats) ++#
+        EmptyS impossible
+      (weakSub, withSub) = case isWithFun of
+        NoWithFunction             ->
+          (wkS (numPats - length cxt) idS, idS)
+        WithFunction (arity, withSub) ->
+          -- if numPats < arity, Θ is empty
+          (wkS (max 0 $ numPats - arity) idS, withSub)
+      paramSub = patSub `composeS` weakSub `composeS` withSub
+  (patSub, paramSub)
 
 -- | Check a LHS. Main function.
 --
@@ -626,608 +707,1501 @@ instance InstantiateFull LHSResult where
 --   the type @a@ of the defined function, and calls continuation @ret@
 --   if successful.
 
-checkLeftHandSide
-  :: Call
-     -- ^ Trace, e.g. @CheckPatternShadowing clause@
-  -> Maybe QName
-     -- ^ The name of the definition we are checking.
+checkLeftHandSide :: forall a.
+     Call
+     -- ^ Trace, e.g. 'CheckLHS' or 'CheckPattern'.
+  -> Range
+     -- ^ 'Range' of the entire left hand side, for error reporting.
+  -> LetOrClause
+     -- ^ Are we checking a let-pattern or a function clause?
   -> [NamedArg A.Pattern]
      -- ^ The patterns.
   -> Type
      -- ^ The expected type @a = Γ → b@.
-  -> Maybe Substitution
+  -> IsWithFunction Substitution
      -- ^ Module parameter substitution from with-abstraction.
-  -> [A.StrippedDotPattern]
-     -- ^ Dot patterns that have been stripped away by with-desugaring.
+  -> [ProblemEq]
+     -- ^ Patterns that have been stripped away by with-desugaring.
+     -- ^ These should not contain any proper matches.
   -> (LHSResult -> TCM a)
-     -- ^ Continuation.
+     -- ^ Continuation, called in the context constructed from
+     --   the 'lhsVarTele' via 'computeLHSContext'.
+     --   All components of 'LHSResult' live in this context, including 'lhsVarTele'.
   -> TCM a
-checkLeftHandSide c f ps a withSub' strippedDots = Bench.billToCPS [Bench.Typing, Bench.CheckLHS] $ \ ret -> do
+checkLeftHandSide call lhsRng f ps a withSub' strippedPats =
+ Bench.billToCPS [Bench.Typing, Bench.CheckLHS] $
+ traceCallCPS call $ \ ret -> do
 
   -- To allow module parameters to be refined by matching, we're adding the
   -- context arguments as wildcard patterns and extending the type with the
   -- context telescope.
-  cxt <- reverse <$> getContext
-  let tel = telFromList' prettyShow cxt
-      cps = [ unnamed . A.VarP . A.BindName . fst <$> setOrigin Inserted (argFromDom d)
-            | d <- cxt ]
-  problem0 <- problemFromPats (cps ++ ps) (telePi tel a)
-  -- Andreas, 2013-03-15 deactivating the following test allows
-  -- flexible arity
-  -- unless (noProblemRest problem) $ typeError $ TooManyArgumentsInLHS a
+  --
+  -- To pick up instances from {{}}-fields in a record module, we have
+  -- to preserve which variable is the 'self' variable of that record.
+  cxt <- fmap (mapOrigin \case{ RecordSelf -> RecordSelf ; _ -> Inserted }) <$>
+         getContext
+  let tel = contextToTel cxt
+      cps = [ argFromDom dom $> unnamed (A.VarP $ A.mkBindName $ unDom dom)
+            | (_,dom) <- contextVars cxt ]
+      eqs0 = zipWith3 ProblemEq (map' namedArg cps) (map' var $ downFrom $ size tel) (flattenTel tel)
 
-  -- We need to grab all let-bindings here (while we still have the old
-  -- context). They will be rebound below once we have the new context set up.
-  -- Subtle: if we're checking a with the context will be empty so we can't use
-  -- 'getOpen'. On the other hand, if we're checking a with the let bindings
-  -- lives in the right context already so we can use 'openThing'.
-  let openLet | isNothing withSub' = getOpen
-              | otherwise          = return . openThing
-  oldLets <- asks $ Map.toList . envLetBindings
-  reportSDoc "tc.lhs.top" 70 $ vcat
-    [ text "context =" <+> inTopContext (prettyTCM tel)
-    , text "cIds    =" <+> (text . show =<< getContextId)
-    , text "oldLets =" <+> text (show oldLets) ]
-  oldLets <- sequence [ (x,) <$> openLet b | (x, b) <- oldLets ]
+  let finalChecks :: LHSState a -> TCM a
+      finalChecks (LHSState delta qs0 (Problem eqs rps _) b psplit ixsplit _prio) = do
+
+        reportSDoc "tc.lhs.top" 20 $ vcat
+          [ "lhs: final checks with remaining equations"
+          , nest 4 $ if null eqs then "(none)" else addContext delta $ vcat $ map' prettyTCM eqs
+          , nest 2 $ "qs0 =" <+> addContext delta (prettyTCMPatternList qs0)
+          ]
+
+        unless (null rps) __IMPOSSIBLE__
+
+        addContext delta $ do
+          mapM_ noShadowingOfConstructors eqs
+
+          -- When working --without-K or --cubical=compatible, we have
+          -- to check that the target type can be used at the “ambient”
+          -- modality. For --cubical=compatible, this just improves an
+          -- error message (printing the type rather than the generated
+          -- RHS). For --without-K, it implements the same check without
+          -- necessarily generating --cubical code.
+          -- The reason for this check is that a clause
+          --    foo : x ≡ y → ... → T y
+          --    foo refl ... = ...
+          -- in Cubical mode, gets elaborated to an extra clause of the
+          -- form
+          --    foo (transp p φ x) ... = transp (λ i → T (p i)) φ (foo x ...)
+          -- (approximately), where T is the target type. That is: to
+          -- implement the substitution T[y/x], we use an actual
+          -- transport. See #5448.
+
+        arity_a <- arityPiPath a
+
+        reportSDoc "tc.lhs.top" 30 $ vcat
+          [ nest 2 $ "a        =" <+> prettyTCM a
+          , nest 2 $ "arity_a  =" <+> prettyTCM arity_a
+          , nest 2 $ "withSub' =" <+> prettyTCM withSub'
+          ]
+
+        let (patSub, paramSub) = buildLHSSubstitutions cxt qs0 $
+              fmap (arity_a,) withSub'
+
+        eqs <- addContext delta $ checkPatternLinearity eqs
+
+        leftovers@(LeftoverPatterns patVars asb0 dots absurds annps otherPats)
+          <- addContext delta $ getLeftoverPatterns eqs
+
+        reportSDoc "tc.lhs.leftover" 30 $ vcat
+          [ "leftover patterns: " , nest 2 (addContext delta $ prettyTCM leftovers) ]
+
+        unless (null otherPats) __IMPOSSIBLE__
+
+        -- Get the user-written names for the pattern variables
+        let (vars, asb1) = getUserVariableNames delta patVars
+            asb          = asb0 ++! asb1
+
+        -- Rename internal patterns with these names
+        let makeVar     = maybe deBruijnVar $ deBruijnNamedVar . nameToArgName
+            ren         = parallelS $ zipWith' makeVar (reverse vars) [0..]
+
+        qs <- transferOrigins (cps ++! ps) $ applySubst ren qs0
+
+        let hasAbsurd = not . null $ absurds
+
+        let lhsResult = LHSResult (length cxt) delta qs hasAbsurd b patSub asb (IntSet.fromList $ catMaybes psplit) ixsplit
+
+        -- Debug output
+        reportSDoc "tc.lhs.top" 10 $
+          vcat [ "checked lhs:"
+               , nest 2 $ vcat
+                 [ "delta   = " <+> prettyTCM delta
+                 , "dots    = " <+> addContext delta (brackets $ fsep $ punctuate comma $ map' prettyTCM dots)
+                 , "asb     = " <+> addContext delta (brackets $ fsep $ punctuate comma $ map' prettyTCM asb)
+                 , "absurds = " <+> addContext delta (brackets $ fsep $ punctuate comma $ map' prettyTCM absurds)
+                 , "qs      = " <+> addContext delta (prettyList $ map' pretty qs)
+                 , "b       = " <+> addContext delta (prettyTCM b)
+                 ]
+               ]
+        reportSDoc "tc.lhs.top" 30 $
+          nest 2 $ vcat
+                 [ "vars   = " <+> pretty vars
+                 , "b      = " <+> pretty b
+                 ]
+        reportSDoc "tc.lhs.top" 20 $ nest 2 $ "patSub   = " <+> pretty patSub
+        reportSDoc "tc.lhs.top" 20 $ nest 2 $ "paramSub = " <+> pretty paramSub
+
+        newCxt <- computeLHSContext vars delta
+
+        updateContext paramSub (const newCxt) $ do
+
+          reportSDoc "tc.lhs.top" 10 $ "bound pattern variables"
+          reportSDoc "tc.lhs.top" 60 $ nest 2 $ "context = " <+> (pretty =<< getContextTelescope)
+          reportSDoc "tc.lhs.top" 10 $ nest 2 $ "type  = " <+> prettyTCM b
+          reportSDoc "tc.lhs.top" 60 $ nest 2 $ "type  = " <+> pretty b
+
+          bindAsPatterns asb $ do
+
+            -- Check dot patterns
+            mapM_ checkDotPattern dots
+            mapM_ checkAbsurdPattern absurds
+            mapM_ checkAnnotationPattern annps
+
+          -- Issue2303: don't bind asb' for the continuation (return in lhsResult instead)
+          ret lhsResult
+
+  st0 <- initLHSState tel eqs0 ps a finalChecks
+
+  -- after we have introduced variables, we can add the patterns stripped by
+  -- with-desugaring to the state.
+  let withSub = case withSub' of
+        NoWithFunction -> __IMPOSSIBLE__
+        WithFunction sub -> sub
+  withEqs <- updateProblemEqs $ applySubst withSub strippedPats
+  -- Jesper, 2017-05-13: re-check the stripped patterns here!
+  inTopContext $ addContext (st0 ^. lhsTel) $
+    forM_ withEqs recheckStrippedWithPattern
+
+  let st = over (lhsProblem . problemEqs) (++! withEqs) st0
 
   -- doing the splits:
-  inTopContext $ do
-    LHSState problem@(Problem pxs qs delta rest) dpi psplit sbe
-      <- checkLHS f $ LHSState problem0 [] [] []
+  let initLHSContext = LHSContext { lhsRange = lhsRng, lhsContextSize = size cxt }
+  (result, block) <- unsafeInTopContext $ runWriterT $ (`runReaderT` initLHSContext) $ checkLHS f st
+  return result
 
-    -- check linearity of the pattern,
-    -- we only care about user-written variables here.
-    let eraseInserted p
-          | getOrigin p == Inserted = (fmap . fmap) (const $ A.WildP patNoRange) p
-          | otherwise               = p
-        userpxs = A.mapNamedArgPattern eraseInserted pxs
+-- | Check that this split will generate a modality-correct internal
+-- clause when --cubical=compatible is used. This means that the type of
+-- anything which might be transported must be modality-correct. This is
+-- necessarily an approximate check. We assume that any argument which
+-- (a) comes after and (b) mentions a dotted argument will be
+-- transported, which is probably an overestimate.
+conSplitModalityCheck ::
+     Range
+       -- ^ Range of the whole left hand side, for error reporting.
+  -> Modality
+       -- ^ Modality to check at.
+  -> PatternSubstitution
+      -- ^ Substitution resulting from index unification. @Γ ⊢ ρ : Δ'@,
+      -- where @Δ'@ is the context we're in, and @Γ@ is the clause telescope
+      -- before unification.
+  -> Int       -- ^ Variable @x@ at which we split.
+  -> Telescope -- ^ The telescope @Γ@ itself.
+  -> Type      -- ^ Target type of the clause.
+  -> TCM ()
+conSplitModalityCheck lhsRng mod rho blocking gamma target = when (any ((/= defaultModality) . getModality) gamma) $ do
+  reportSDoc "tc.lhs.top" 30 $ vcat
+    [ "LHS modality check for modality: " <+> prettyTCM mod
+    , "rho:    " <+> inTopContext (prettyTCM rho)
+    , "gamma:  " <+> inTopContext (prettyTCM gamma)
+    , "target: " <+> prettyTCM target
+    , "target (raw): " <+> pretty target
+    , "Δ'target: " <+> prettyTCM (applyPatSubst rho target)
+    , "blocking:" <+> prettyTCM blocking
+    ]
+  whenJust (firstForced rho (length gamma)) \ ix -> do
+      -- We've found a forced argument. This means that the unifier has
+      -- decided to kill a unification variable, and any of its
+      -- occurrences in the generated term will be replaced by an
+      -- occurrence of a path, and any terms whose types mention that
+      -- variable will be transported.
+      let
+        (gamma0, delta) = splitTelescopeAt (length gamma - ix) gamma
+        name = inTopContext . addContext gamma . nameOfBV
+        delta'target = applyPatSubst rho target
+      reportSDoc "tc.lhs.top" 30 $ vcat
+        [ "found forced argument!"
+        , "forced: " <+> prettyTCM ix
+        , "before: " <+> inTopContext (prettyTCM gamma0)
+        , "after:  " <+> inTopContext (addContext gamma0 (prettyTCM delta))
+        ]
+      forced <- name ix
+      forM_ (zip' [ix - 1, ix - 2 ..] (telToList delta)) $ \(arg, d) -> do
+        -- Example: The first argument after the first forced variable. So
+        -- we have e.g.:
+        --   Γ = Γ₀.x.Δ
+        --   Δ' ⊢ ρ : Γ₀.x.Δ
+        --   Γ₀ ⊢ x : Type
+        -- but we need
+        --   Δ' ⊢ x : Type,
+        -- since Δ' is the context we are in. Then we have
+        --   Γ ⊢ x[wkS |Δ|] : Type
+        -- and consequently
+        --   Δ' ⊢ x[wkS |Δ|][ρ] : Type
+        let
+          rho' = composeS rho (wkS (arg + 1) idS)
+        ty' <- reduce (applyPatSubst rho' (unEl (snd (unDom d))))
+        let
+          -- It's actually rather tricky to know when, exactly, a
+          -- transport will be needed in a position that forces an
+          -- usable-at-modality check. Our current heuristic is:
+          --
+          -- The variable we're looking at has a fibrant type, with the
+          -- first forced variable free.
+          -- The variable appears free in the result type.
+          docheck = and
+            [ ix `freeIn` applySubst (wkS (arg + 1) idS) (unEl (snd (unDom d)))
+            , arg /= blocking
+            , arg `freeIn` target
+            ]
+        reportSDoc "tc.lhs.top" 30 $ vcat
+          [ "arg:        " <+> pretty arg
+          , "arg type:   " <+> prettyTCM (applySubst (wkS (arg + 1) idS) (unEl (snd (unDom d))))
+          , "check       " <+> pretty docheck
+          ]
+        argn <- name arg
+        when docheck $
+          usableAtModality (IndexedClauseArg forced argn) mod ty'
 
-    A.checkPatternLinearity userpxs $ \ys ->
-      typeError $ RepeatedVariablesInPattern ys
+  -- ALways check the target clause type. Specifically, we check it both
+  -- in Δ' and in Γ. The check in Δ' will sometimes let slip by a
+  -- quantity violation which is masked by an indexed match (recall that
+  -- the unifier likes to replace @0-variables for @ω-variables). A
+  -- concrete case where this happens is #5468. Check in Δ' first since
+  -- that will have the forced variable names.
+  setCurrentRange lhsRng do
+    usableAtModality IndexedClause mod (unEl (applyPatSubst rho target))
+    inTopContext $ addContext gamma $ usableAtModality IndexedClause mod (unEl target)
+  where
+    -- Find the first dotted pattern in the substitution. "First" =
+    -- "earliest bound", so counts down from the length of the
+    -- telescope.
+    firstForced :: PatternSubstitution -> Int -> Maybe Int
+    firstForced pat level
+      | level >= 0 = case lookupS pat level of
+        DotP{} -> Just level
+        _ -> firstForced pat (level - 1)
+      | otherwise = Nothing
 
-    -- check linearity of the pattern,
-    -- we only care about user-written variables here.
-    let eraseInserted p
-          | getOrigin p == Inserted = (fmap . fmap) (const $ A.WildP patNoRange) p
-          | otherwise               = p
-        userpxs = A.mapNamedArgPattern eraseInserted pxs
+-- | Determine which splits should be tried.
+splitStrategy :: [ProblemEq] -> [ProblemEq]
+splitStrategy = filter shouldSplit
+  where
+    shouldSplit :: ProblemEq -> Bool
+    shouldSplit problem@(ProblemEq p v a) = case p of
+      A.LitP{}    -> True
+      A.RecP{}    -> True
+      A.ConP{}    -> True
+      A.EqualP{}  -> True
 
-    A.checkPatternLinearity userpxs $ \ys ->
-      typeError $ RepeatedVariablesInPattern ys
+      A.VarP{}    -> False
+      A.WildP{}   -> False
+      A.DotP{}    -> False
+      A.AbsurdP{} -> False
 
-    unless (null $ restPats rest) $ typeError $ TooManyArgumentsInLHS a
+      A.AsP _ _ p  -> shouldSplit $ problem { problemInPat = p }
 
-    addContext delta $ do
-      noShadowingOfConstructors c problem
-      noPatternMatchingOnCodata qs
+      A.ProjP{}       -> __IMPOSSIBLE__
+      A.DefP{}        -> __IMPOSSIBLE__
+      A.PatternSynP{} -> __IMPOSSIBLE__
+      A.WithP{}       -> __IMPOSSIBLE__
 
-    -- f is Nothing when checking let pattern-bindings. In that case there can
-    -- be no copatterns, so we don't need to worry about self.
-    let self = Def (fromMaybe __IMPOSSIBLE__ f) []
-    asb <- addContext delta $ recoverAsPatterns delta (telePi tel a) self (cps ++ ps) qs
-
-    reportSDoc "tc.lhs.top" 10 $
-      vcat [ text "checked lhs:"
-           , nest 2 $ vcat
-             [ text "pxs   = " <+> fsep (map prettyA pxs)
-             , text "delta = " <+> prettyTCM delta
-             , text "dpi   = " <+> addContext delta (brackets $ fsep $ punctuate comma $ map prettyTCM dpi)
-             , text "asb   = " <+> addContext delta (brackets $ fsep $ punctuate comma $ map prettyTCM asb)
-             , text "qs    = " <+> prettyList (map pretty qs)
-             ]
-           ]
-
-    let b' = restType rest
-    bindLHSVars (filter (isNothing . isProjP) pxs) delta $ do
-      let -- Find the variable patterns that have been refined
-          refinedParams = [ AsB x v (unDom a) | DPI (Just x) _ v a <- dpi ]
-          asb'          = refinedParams ++ asb
-
-      reportSDoc "tc.lhs.top" 10 $ text "asb' = " <+> (brackets $ fsep $ punctuate comma $ map prettyTCM asb')
-
-      reportSDoc "tc.lhs.top" 10 $ text "bound pattern variables"
-      reportSDoc "tc.lhs.top" 60 $ nest 2 $ text "context = " <+> (pretty =<< getContextTelescope)
-      reportSDoc "tc.lhs.top" 10 $ nest 2 $ text "type  = " <+> prettyTCM b'
-      reportSDoc "tc.lhs.top" 60 $ nest 2 $ text "type  = " <+> pretty b'
-
-      let notProj ProjP{} = False
-          notProj _       = True
-                      -- Note: This works because we can't change the number of
-                      --       arguments in the lhs of a with-function relative to
-                      --       the parent function.
-          numPats   = length $ takeWhile (notProj . namedArg) qs
-          -- In the case of a non-with function the pattern substitution
-          -- should be weakened by the number of non-parameter patterns to
-          -- get the paramSub.
-          withSub = fromMaybe (wkS (numPats - length cxt) idS) withSub'
-          -- At this point we need to update the module parameters for all
-          -- parent modules.
-          patSub   = (map (patternToTerm . namedArg) $ reverse $ take numPats qs) ++# (EmptyS __IMPOSSIBLE__)
-          paramSub = composeS patSub withSub
-          lhsResult = LHSResult (length cxt) delta qs b' patSub asb' (catMaybes psplit)
-      reportSDoc "tc.lhs.top" 20 $ nest 2 $ text "patSub   = " <+> pretty patSub
-      reportSDoc "tc.lhs.top" 20 $ nest 2 $ text "withSub  = " <+> pretty withSub
-      reportSDoc "tc.lhs.top" 20 $ nest 2 $ text "paramSub = " <+> pretty paramSub
-
-      let newLets = [ AsB x (applySubst paramSub v) (applySubst paramSub $ unDom a) | (x, (v, a)) <- oldLets ]
-      reportSDoc "tc.lhs.top" 50 $ text "old let-bindings:" <+> text (show oldLets)
-      reportSDoc "tc.lhs.top" 50 $ text "new let-bindings:" <+> (brackets $ fsep $ punctuate comma $ map prettyTCM newLets)
-
-      bindAsPatterns newLets $
-        applyRelevanceToContext (getRelevance b') $ updateModuleParameters paramSub $ do
-        bindAsPatterns asb' $ do
-
-          -- Check dot patterns
-          mapM_ checkDotPattern dpi
-          mapM_ (uncurry isEmptyType) sbe
-          checkLeftoverDotPatterns pxs (downFrom $ size delta) (flattenTel delta) dpi
-
-          -- Type check dot patterns that have been thrown away by
-          -- with-desugaring.
-          mapM_ checkStrippedDotPattern $ applySubst paramSub strippedDots
-
-
-        -- Issue2303: don't bind asb' for the continuation (return in lhsResult instead)
-        ret lhsResult
+type CheckLHSM = ReaderT LHSContext (WriterT Blocked_ TCM)
 
 -- | The loop (tail-recursive): split at a variable in the problem until problem is solved
-checkLHS
-  :: Maybe QName       -- ^ The name of the definition we are checking.
-  -> LHSState          -- ^ The current state.
-  -> TCM LHSState      -- ^ The final state after all splitting is completed
-checkLHS f st@(LHSState problem dpi psplit sbe) = do
+checkLHS ::
+     forall a.
+     LetOrClause      -- ^ Are we checking a let-pattern or a function clause?
+  -> LHSState a       -- ^ The current state.
+  -> CheckLHSM a
+checkLHS mf = updateModality checkLHS_ where
 
-  problem <- insertImplicitProblem problem
-  -- Note: inserting implicits no longer preserve solvedness,
-  -- since we might insert eta expanded record patterns.
-  if isSolvedProblem problem then return $ st { lhsProblem = problem } else do
+ {-# INLINE updateModality #-}
+    -- If the target type is irrelevant or in Prop,
+    -- we need to check the lhs in irr. cxt. (see Issue 939).
+ updateModality cont = \st@(LHSState tel ip problem target psplit _ _prio) -> do
+      let m = getModality target
+      applyModalityToContext m $ cont st
 
-    unlessM (optPatternMatching <$> gets getPragmaOptions) $
+ checkLHS_ st@(LHSState tel ip problem target psplit ixsplit prio) = do
+  reportSDoc "tc.lhs" 40 $ "tel is" <+> prettyTCM tel
+  reportSDoc "tc.lhs" 40 $ "ip is" <+> pretty ip
+  reportSDoc "tc.lhs" 40 $ "target is" <+> addContext tel (prettyTCM target)
+  if isSolvedProblem problem then
+    liftTCM $ (problem ^. problemCont) st
+  else do
+
+    reportSDoc "tc.lhs.top" 30 $ vcat
+      [ "LHS state: " , nest 2 (prettyTCM st) ]
+
+    unlessM (optPatternMatching <$> getsTC getPragmaOptions) $
       unless (problemAllVariables problem) $
-        typeError $ GenericError $ "Pattern matching is disabled"
+        typeError NeedOptionPatternMatching
 
-    foldListT trySplit nothingToSplit $ splitProblem f problem
+    let splitsToTry = splitStrategy $ problem ^. problemEqs
+
+    foldr trySplit trySplitRest splitsToTry >>= \case
+      Right st' -> checkLHS mf st'
+      -- If no split works, give error from first split.
+      -- This is conservative, but might not be the best behavior.
+      -- It might be better to print all the errors instead.
+      Left (err:_) -> throwError err
+      Left []      -> __IMPOSSIBLE__
+
   where
-    nothingToSplit :: TCM LHSState
-    nothingToSplit = do
-      reportSLn "tc.lhs.split" 50 $ "checkLHS: nothing to split in problem " ++ show problem
-      nothingToSplitError problem
 
-    -- Split problem rest (projection pattern, does not fail as there is no call to unifier)
-    trySplit :: SplitProblem -> TCM LHSState -> TCM LHSState
-    trySplit (SplitRest projPat o projType) _ = do
+    trySplit :: ProblemEq
+             -> CheckLHSM (Either [TCErr] (LHSState a))
+             -> CheckLHSM (Either [TCErr] (LHSState a))
+    trySplit eq tryNextSplit = runExceptT (splitArg eq) >>= \case
+      Right st' -> return $ Right st'
+      Left err  -> first (err:) <$> tryNextSplit
 
-      -- Compute the new problem
-      let Problem ps1 ip delta (ProblemRest (p:ps2) b) = problem
-          -- ps'      = ps1 ++ [p]
-          ps'      = ps1 -- drop the projection pattern (already splitted)
-          rest     = ProblemRest ps2 (projPat $> projType)
-          ip'      = ip ++ [fmap (Named Nothing . ProjP o) projPat]
-          problem' = Problem ps' ip' delta rest
-      -- Jump the trampolin
-      st' <- updateProblemRest (LHSState problem' dpi psplit sbe)
-      -- If the field is irrelevant, we need to continue in irr. cxt.
-      -- (see Issue 939).
-      applyRelevanceToContext (getRelevance projPat) $ do
-        checkLHS f st'
+    -- If there are any remaining user patterns, try to split on them
+    trySplitRest :: CheckLHSM (Either [TCErr] (LHSState a))
+    trySplitRest = case problem ^. problemRestPats of
+      []    -> return $ Left []
+      (p:_) -> first singleton <$> runExceptT (splitRest p)
 
-    trySplit (Split p0 (Arg ai (PartialFocus ts ip a)) p1) ret = do
-      tel <- getContextTelescope
-      reportSDoc "tc.top.tel" 10 $ text "pfocus tel = " <+> prettyTCM tel
-      tInterval <- elInf primInterval
-      (gamma,sigma) <- bindLHSVars (problemInPat p0) (problemTel p0) $ do
-         ts <- forM ts $ \ (t,u) -> do
-                 reportSDoc "tc.lhs.split.partial" 50 $ text (show (t,u))
-                 t <- checkExpr t tInterval
-                 u <- checkExpr u tInterval
-                 reportSDoc "tc.lhs.split.partial" 10 $ prettyTCM t <+> prettyTCM u
-                 u <- intervalView =<< reduce u
-                 case u of
+    splitArg :: ProblemEq -> ExceptT TCErr CheckLHSM (LHSState a)
+    -- Split on constructor/literal pattern
+    splitArg (ProblemEq p v (unDom -> a)) = traceCall (CheckPattern p tel a) $ do
+
+      reportSDoc "tc.lhs.split" 30 $ sep
+        [ "split looking at pattern"
+        , nest 2 $ "p =" <+> prettyA p
+        ]
+
+      -- in order to split, v must be a variable.
+      i <- liftTCM $ addContext tel $ ifJustM (isEtaVar v a) return $
+             softTypeError $ SplitOnNonVariable v a
+
+      let pos = size tel - (i + 1)
+          (delta1, tel'@(ExtendTel dom adelta2)) = splitTelescopeAt pos tel -- TODO:: tel' defined but not used
+
+      p <- expandLitPattern p
+
+      -- Andreas, 2026-01-20, issue #8327
+      -- Exit early when we are checking a let-pattern and encounter a non-record pattern.
+      -- This is mainly to serve the correct error message to the user.
+      let notRecPat cont = case mf of
+            -- We are checking a let-pattern which only admits record constructors
+            LetLHS -> typeError ShouldBeRecordPattern
+            -- We are checking a clause which allows any kind of pattern.
+            ClauseLHS{} -> cont
+      let splitOnPat = \case
+            (A.LitP _ l)      -> notRecPat $ splitLit delta1 dom adelta2 l
+            p@A.RecP{}        -> splitCon delta1 dom adelta2 p Nothing
+            p@(A.ConP _ c ps) -> splitCon delta1 dom adelta2 p $ Just c
+            p@(A.EqualP _ ts) -> notRecPat $ splitPartial delta1 dom adelta2 ts
+            A.AsP _ _ p       -> splitOnPat p
+
+            A.VarP{}        -> __IMPOSSIBLE__
+            A.WildP{}       -> __IMPOSSIBLE__
+            A.DotP{}        -> __IMPOSSIBLE__
+            A.AbsurdP{}     -> __IMPOSSIBLE__
+            A.ProjP{}       -> __IMPOSSIBLE__
+            A.DefP{}        -> __IMPOSSIBLE__
+            A.PatternSynP{} -> __IMPOSSIBLE__
+            A.WithP{}       -> __IMPOSSIBLE__
+      splitOnPat p
+
+
+    splitRest :: NamedArg A.Pattern -> ExceptT TCErr CheckLHSM (LHSState a)
+    splitRest p = setCurrentRange p $ do
+      reportSDoc "tc.lhs.split" 20 $ sep
+        [ "splitting problem rest"
+        , nest 2 $ "projection pattern =" <+> prettyA p
+        , nest 2 $ "eliminates type    =" <+> prettyTCM target
+        ]
+      reportSDoc "tc.lhs.split" 80 $ sep
+        [ nest 2 $ text $ "projection pattern (raw) = " ++! show p
+        ]
+
+      -- @p@ should be a projection pattern projection from @target@
+      (orig, ambProjName) <- ifJust (A.isProjP p) return $ addContext tel $ do
+        block <- isBlocked target
+        softTypeError $ CannotEliminateWithPattern block p (unArg target)
+
+      (projName, comatchingAllowed, recName, projType, ai) <- suspendErrors $ do
+        -- Andreas, 2018-10-18, issue #3289: postfix projections do not have hiding
+        -- information for their principal argument; we do not parse @{r}.p@ and the like.
+        let h = if orig == ProjPostfix then Nothing else Just $ getHiding p
+        addContext tel $ disambiguateProjection h ambProjName target
+
+      unless comatchingAllowed $ do
+        hardTypeError $ ComatchingDisabledForRecord recName
+
+      -- Compute the new rest type by applying the projection type to 'self'.
+      -- Note: we cannot be in a let binding.
+      let f = case mf of
+            LetLHS -> __IMPOSSIBLE__
+            ClauseLHS x -> x
+      let self = Def f $ patternsToElims ip
+      target' <- traverse (`piApplyM` self) projType
+
+      -- Compute the new state
+      let projP    = applyWhen (orig == ProjPostfix) (setHiding NotHidden) $
+                       Arg ai $ Named Nothing (ProjP orig projName)
+          ip'      = ip ++! [projP]
+          -- drop the projection pattern (already splitted)
+          problem' = over problemRestPats (drop 1) problem
+          -- Update the modalities of telescope variables,
+          -- resurrecting irrelevant variables in case of an irrelevant copattern
+          m        = getModality target'
+          tel'     = over listTel (map' $ inverseApplyModalityButNotQuantity m) tel
+      liftTCM $ updateLHSState (LHSState tel' ip' problem' target' psplit ixsplit prio)
+
+
+    -- Split a Partial.
+    --
+    -- Example for splitPartial:
+    -- @
+    --   g : ∀ i j → Partial (i ∨ j) A
+    --   g i j (i = 1) = a i j
+    --   g i j (j = 1) = b i j
+    -- @
+    -- leads to, in the first clause:
+    -- @
+    --   dom   = IsOne (i ∨ j)
+    --   ts    = [(i, 1)]
+    --   phi   = i
+    --   sigma = [1/i]
+    -- @
+    -- Final clauses:
+    -- @
+    --   g : ∀ i j → Partial (i ∨ j) A
+    --   g 1? j  .itIsOne = a 1 j
+    --   g i  1? .itIsOne = b i 1
+    -- @
+    -- Herein, ? indicates a 'conPFallThrough' pattern.
+    --
+    -- Example for splitPartial:
+    -- @
+    --   h : ∀ i j → Partial (i & ¬ j) A
+    --   h i j (i = 1) (j = 0)
+    --   -- ALT: h i j (i & ¬ j = 1)
+    -- @
+    -- gives
+    -- @
+    --   dom = IsOne (i & ¬ j)
+    --   ts  = [(i,1), (j,0)]  -- ALT: [(i & ¬ j, 1)]
+    --   phi = i & ¬ j
+    --   sigma = [1/i,0/j]
+    -- @
+    --
+    -- Example for splitPartial:
+    -- @
+    --   g : ∀ i j → Partial (i ∨ j) A
+    --   g i j (i ∨ j = 1) = a i j
+    -- @
+    -- leads to, in the first clause:
+    -- @
+    --   dom   = IsOne (i ∨ j)
+    --   ts    = [(i ∨ j, 1)]
+    --   phi   = i ∨ j
+    --   sigma = fails because several substitutions [[1/i],[1/j]] correspond to phi
+    -- @
+
+    splitPartial ::
+         Telescope
+            -- The types of arguments before the one we split on.
+      -> Dom Type
+            -- The type of the argument we split on.
+      -> Abs Telescope
+            -- The types of arguments after the one we split on.
+      -> List1 (A.Expr, A.Expr)
+            -- [(φ₁ = b1),..,(φn = bn)]
+      -> ExceptT TCErr CheckLHSM (LHSState a)
+
+    splitPartial delta1 dom adelta2 ts = do
+
+      unless (domIsFinite dom) $ liftTCM $ addContext delta1 $
+        softTypeError $ SplitOnPartial dom
+
+      tInterval <- liftTCM $ primIntervalType
+
+      names <- liftTCM $ addContext tel $ do
+        LeftoverPatterns{patternVariables = vars} <- getLeftoverPatterns $ problem ^. problemEqs
+        return $! take' (size delta1) $ fst $ getUserVariableNames tel vars
+
+      -- Problem: The context does not match the checkpoints in checkLHS,
+      --          however we still need a proper checkpoint substitution
+      --          for checkExpr below.
+      --
+      -- Solution: partial splits are not allowed when there are
+      --           constructor patterns (checked in checkDef), so
+      --           newContext is an extension of the definition
+      --           context.
+      --
+      -- i.e.: Given
+      --
+      --             Γ = context where def is checked, also last checkpoint.
+      --
+      --       Then
+      --
+      --             newContext = Γ Ξ
+      --             cpSub = raiseS |Ξ|
+      --
+      lhsCxtSize <- asks lhsContextSize -- size of the context before checkLHS call.
+      reportSDoc "tc.lhs.split.partial" 10 $ "lhsCxtSize =" <+> prettyTCM lhsCxtSize
+
+      newContext <- liftTCM $ computeLHSContext names delta1
+      reportSDoc "tc.lhs.split.partial" 10 $ "newContext =" <+> prettyTCM newContext
+
+      let cpSub = raiseS $ size newContext - lhsCxtSize
+
+      (gamma,sigma) <- liftTCM $ updateContext cpSub (const newContext) $ do
+         ts <- forM ts $ \ (lhs, rhs) -> do
+                 reportSDoc "tc.lhs.split.partial" 10 $ "currentCxt =" <+> (prettyTCM =<< getContext)
+                 reportSDoc "tc.lhs.split.partial" 10 $ text "t, u (Expr) =" <+> prettyTCM (lhs, rhs)
+                 t <- checkExpr lhs tInterval
+                 u <- checkExpr rhs tInterval
+                 reportSDoc "tc.lhs.split.partial" 10 $ text "t, u        =" <+> pretty (t, u)
+                 reduce u >>= intervalView >>= \case
                    IZero -> primINeg <@> pure t
                    IOne  -> return t
-                   _     -> typeError $ GenericError $ "Only 0 or 1 allowed on the rhs of face"
-         phi <- case ts of
-                   [] -> do
-                     a <- ignoreSharing <$> reduce (unEl a)
-                     misone <- getBuiltinName' builtinIsOne
-                     case a of
-                       Def q [Apply phi] | Just q == misone -> return (unArg phi)
-                       _           -> typeError $ GenericError $ show a ++ " is not IsOne."
-                                        -- TODO Andrea type error or something.
-                   _  -> foldl (\ x y -> primIMin <@> x <@> y) primIOne (map pure ts)
+                   _     -> typeError $ ExpectedIntervalLiteral rhs
+         -- Example: ts = (i=0) (j=1) will result in phi = ¬ i & j
+         phi <- foldl (\ x y -> primIMin <@> x <@> y) primIOne (fmap pure ts)
+         reportSDoc "tc.lhs.split.partial" 10 $ text "phi           =" <+> prettyTCM phi
+         reportSDoc "tc.lhs.split.partial" 30 $ text "phi           =" <+> pretty phi
          phi <- reduce phi
-         refined <- forallFaceMaps phi (\ bs m t -> typeError $ GenericError $ "face blocked on meta")
-                            (\ sigma -> (,sigma) <$> getContextTelescope)
+         reportSDoc "tc.lhs.split.partial" 10 $ text "phi (reduced) =" <+> prettyTCM phi
+         refined <- forallFaceMaps phi (\ bs m t -> patternViolation m)
+                            (\_ sigma -> (,sigma) <$> getContextTelescope)
          case refined of
            [(gamma,sigma)] -> return (gamma,sigma)
-           []              -> typeError $ GenericError $ "The face constraint is unsatisfiable."
-           _               -> typeError $ GenericError $ "Cannot have disjunctions in a face constraint."
-      itisone <- primItIsOne
+           []              -> typeError FaceConstraintUnsatisfiable
+           _               -> typeError FaceConstraintDisjunction
+      itisone <- liftTCM primItIsOne
       -- substitute the literal in p1 and dpi
-      reportSDoc "tc.lhs.faces" 10 $ text $ show sigma
+      reportSDoc "tc.lhs.faces" 60 $ text $ show sigma
 
-      let delta1 = problemTel p0
-          oix = size (problemTel $ unAbs p1) -- de brujin index of IsOne
-          Just o_n = flip findIndex ip (\ x -> case namedThing (unArg x) of
-                                           VarP x -> dbPatVarIndex x == oix
-                                           _      -> False)
-          delta2' = absApp (fmap problemTel p1) itisone
+      let oix = size adelta2 -- de brujin index of IsOne
+          o_n = fromMaybe __IMPOSSIBLE__ $
+            findIndex (\ x -> case namedThing (unArg x) of
+                                   VarP _ x -> dbPatVarIndex x == oix
+                                   _        -> False) ip
+          delta2' = absApp adelta2 itisone
           delta2 = applySubst sigma delta2'
           mkConP (Con c _ [])
              = ConP c (noConPatternInfo { conPType = Just (Arg defaultArgInfo tInterval)
                                               , conPFallThrough = True })
                           []
-          mkConP (Var i []) = VarP (DBPatVar "x" i)
+          mkConP (Var i []) = VarP defaultPatternInfo (DBPatVar "x" i)
           mkConP _          = __IMPOSSIBLE__
           rho0 = fmap mkConP sigma
 
-          rho    = liftS (size delta2) $ consS (DotP Inserted itisone) rho0
-          -- Andreas, 2015-06-13 Literals are closed, so need to raise them!
-          -- rho    = liftS (size delta2) $ singletonS 0 (Lit lit)
-          -- rho    = [ var i | i <- [0..size delta2 - 1] ]
-          --       ++ [ raise (size delta2) $ Lit lit ]
-          --       ++ [ var i | i <- [size delta2 ..] ]
-          ip'      = applySubst rho ip
-          rest'    = applyPatSubst rho (problemRest problem)
+          rho    = liftS (size delta2) $ consS (DotP defaultPatternInfo itisone) rho0
 
-      (p0',newDpi) <- do
-         let delta1 = problemTel p0
-         addContext gamma $ updateInPatterns
-                            (applyPatSubst rho0 $ flattenTel delta1)
-                            (problemInPat p0)
-                            (applySubst rho0 $ teleArgs delta1)
-      let dpi' = applyPatSubst rho dpi ++ newDpi
-          sbe' = map (second $ applyPatSubst rho) sbe
-          ps' = p0' ++ problemInPat (absBody p1)
-
-      reportSDoc "tc.lhs.split.problem" 10 $ sep
-        [ text "ip  = " <+> (text . show) ip
-        , text "ip' = " <+> (text . show) ip'
-        ]
-
-      -- Compute the new problem
-      let
           delta'   = abstract gamma delta2
-          problem' = Problem ps' ip' delta' rest'
-      reportSDoc "tc.lhs.split.partial" 20 $ text (show problem')
-      st' <- updateProblemRest (LHSState problem' dpi' (psplit ++ [Just o_n]) sbe')
-      checkLHS f st'
+          eqs'     = applyPatSubst rho $ problem ^. problemEqs
+          ip'      = applySubst rho ip
+          target'  = applyPatSubst rho target
 
-    -- Split on literal pattern (does not fail as there is no call to unifier)
+      -- Compute the new state
+      let problem' = set problemEqs eqs' problem
+      reportSDoc "tc.lhs.split.partial" 60 $ text (show problem')
+      liftTCM $ updateLHSState (LHSState delta' ip' problem' target' (psplit ++! [Just o_n]) ixsplit prio)
 
-    trySplit (Split p0 (Arg _ (LitFocus lit ip a)) p1) _ = do
 
-      -- substitute the literal in p1 and dpi
-      let delta1 = problemTel p0
-          delta2 = absApp (fmap problemTel p1) (Lit lit)
-          rho    = singletonS (size delta2) (LitP lit)
-          -- Andreas, 2015-06-13 Literals are closed, so need to raise them!
+    splitLit :: Telescope      -- The types of arguments before the one we split on
+             -> Dom Type       -- The type of the literal we split on
+             -> Abs Telescope  -- The types of arguments after the one we split on
+             -> Literal        -- The literal written by the user
+             -> ExceptT TCErr CheckLHSM (LHSState a)
+    splitLit delta1 dom@(unDom -> a) adelta2 lit = do
+      let info = dom ^. dInfo
+      let delta2 = absApp adelta2 (Lit lit)
+          delta' = abstract delta1 delta2
+          rho    = singletonS (size delta2) (litP lit)
+          -- Andreas, 2015-06-13 Literals are closed, so no need to raise them!
           -- rho    = liftS (size delta2) $ singletonS 0 (Lit lit)
           -- rho    = [ var i | i <- [0..size delta2 - 1] ]
-          --       ++ [ raise (size delta2) $ Lit lit ]
-          --       ++ [ var i | i <- [size delta2 ..] ]
-          dpi'     = applyPatSubst rho dpi
-          sbe'     = map (second $ applyPatSubst rho) sbe
+          --       ++! [ raise (size delta2) $ Lit lit ]
+          --       ++! [ var i | i <- [size delta2 ..] ]
+          eqs'     = applyPatSubst rho $ problem ^. problemEqs
           ip'      = applySubst rho ip
-          rest'    = applyPatSubst rho (problemRest problem)
+          target'  = applyPatSubst rho target
 
-      -- Compute the new problem
-      let ps'      = problemInPat p0 ++ problemInPat (absBody p1)
-          delta'   = abstract delta1 delta2
-          problem' = Problem ps' ip' delta' rest'
-      st' <- updateProblemRest (LHSState problem' dpi' psplit sbe')
-      checkLHS f st'
+      -- Andreas, 2010-09-07 cannot split on irrelevant args
+      unless (usableRelevance info) $
+        addContext delta1 $ softTypeError $ SplitOnIrrelevant dom
 
-    -- Split on absurd pattern (adding type to list of types that should be empty)
-    trySplit (Split p0 (Arg info (AbsurdFocus pi i a)) p1) _ = do
-      let tel = problemTel problem
-      reportSDoc "tc.lhs.split.absurd" 10 $ sep
-        [ text "splitting on absurd pattern"
-        , nest 2 $ text "tel  =" <+> prettyTCM tel
-        , nest 2 $ text "var  =" <+> addContext tel (prettyTCM $ var i)
-        , nest 2 $ text "type =" <+> addContext tel (prettyTCM a)
+      -- Andreas, 2018-10-17, we can however split on erased things
+      -- if there is a single constructor (checked in Coverage).
+      --
+      -- Thus, no checking of (usableQuantity info) here.
+
+      unlessM (splittableCohesion info) $
+        addContext delta1 $ softTypeError $ SplitOnUnusableCohesion dom
+
+      unless (splittablePolarity (getModalPolarity info)) $
+        addContext delta1 $ softTypeError $ SplitOnUnusablePolarity dom
+
+      -- check that a is indeed the type of lit (otherwise fail softly)
+      -- if not, fail softly since it could be instantiated by a later split.
+      suspendErrors $ addContext delta1 $ equalType a =<< litType lit
+
+      -- Compute the new state
+      let problem' = set problemEqs eqs' problem
+      liftTCM $ updateLHSState (LHSState delta' ip' problem' target' psplit ixsplit prio)
+
+
+    splitCon :: Telescope      -- The types of arguments before the one we split on
+             -> Dom Type       -- The type of the constructor we split on
+             -> Abs Telescope  -- The types of arguments after the one we split on
+             -> A.Pattern      -- The pattern written by the user
+             -> Maybe AmbiguousQName  -- @Just c@ for a (possibly ambiguous) constructor @c@, or
+                                      -- @Nothing@ for a record pattern
+             -> ExceptT TCErr CheckLHSM (LHSState a)
+    splitCon delta1 dom@(unDom -> a) adelta2 focusPat ambC = do
+      let info = dom ^. dInfo
+      let delta2 = absBody adelta2
+
+      reportSDoc "tc.lhs.split" 10 $ vcat
+        [ "checking lhs"
+        , nest 2 $ "tel =" <+> prettyTCM tel
+        , nest 2 $ "rel =" <+> text (show $ getRelevance info)
+        , nest 2 $ "mod =" <+> text (show $ getModality  info)
         ]
-      let rho = liftS i $ consS (AbsurdP $ VarP $ DBPatVar absurdPatternName 0) $ raiseS 1
-      checkLHS f $ st
-            { lhsProblem = problem
-              { problemInPat  = (problemInPat p0) ++
-                                [Arg info $ unnamed $ A.WildP pi] ++
-                                problemInPat (absBody p1)
-              , problemOutPat = applySubst rho $ problemOutPat problem
-              }
-            , lhsShouldBeEmptyTypes = (getRange pi , a) : lhsShouldBeEmptyTypes st
-            }
 
-    -- Split on constructor pattern (unifier might fail)
-    trySplit (Split p0 (Arg info
-               (Focus { focusCon      = c
-                      , focusPatOrigin= porigin
-                      , focusConArgs  = qs
-                      , focusRange    = r
-                      , focusOutPat   = ip
-                      , focusDatatype = d
-                      , focusParams   = vs
-                      , focusIndices  = ws
-                      , focusType     = a
-                      }
-               )) p1) tryNextSplit = do
-      traceCall (CheckPattern (A.ConP (ConPatInfo porigin $ PatRange r) (unambiguous c) qs)
-                                       (problemTel p0)
-                                       (El Prop $ Def d $ map Apply $ vs ++ ws)) $ do
-
-        let delta1 = problemTel p0
-            delta2 = problemTel $ absBody p1
-        let typeOfSplitVar = Arg info a
-
-        reportSDoc "tc.lhs.split" 10 $ sep
-          [ text "checking lhs"
-          , nest 2 $ text "tel =" <+> prettyTCM (problemTel problem)
-          , nest 2 $ text "rel =" <+> (text $ show $ getRelevance info)
+      reportSDoc "tc.lhs.split" 15 $ vcat
+        [ "split problem"
+        , nest 2 $ vcat
+          [ "delta1 = " <+> prettyTCM delta1
+          , "a      = " <+> addContext delta1 (prettyTCM a)
+          , "delta2 = " <+> addContext delta1
+                              (addContext ("x" :: String, dom) (prettyTCM delta2))
           ]
+        ]
 
-        reportSDoc "tc.lhs.split" 15 $ sep
-          [ text "split problem"
-          , nest 2 $ vcat
-            [ text "delta1 = " <+> prettyTCM delta1
-            , text "typeOfSplitVar =" <+> addContext delta1 (prettyTCM typeOfSplitVar)
-            , text "focusOutPat =" <+> pretty ip
-            , text "delta2 = " <+> addContext delta1 (addContext ("x",domFromArg typeOfSplitVar) (prettyTCM delta2))
-            ]
-          ]
+      -- We cannot split on (shape-)irrelevant arguments.
+      reportSLn "tc.lhs.split" 30 $ "split ConP: relevance is " ++! show (getRelevance info)
+      unless (usableRelevance info) $ addContext delta1 $
+        softTypeError $ SplitOnIrrelevant dom
 
-        c <- either
-               (sigError __IMPOSSIBLE_VERBOSE__ (typeError $ AbstractConstructorNotInScope c))
-               (return . (`withRangeOf` c))
-               =<< getConForm c
-        ca <- defType <$> getConInfo c
+      -- Andreas, 2018-10-17, we can however split on erased things
+      -- if there is a single constructor (checked in Coverage).
+      --
+      -- Thus, no checking of (usableQuantity info) here.
 
-        reportSDoc "tc.lhs.split" 20 $ nest 2 $ vcat
-          [ text "ca =" <+> prettyTCM ca
-          , text "vs =" <+> prettyList (map prettyTCM vs)
-          ]
+      unlessM (splittableCohesion info) $
+        addContext delta1 $ softTypeError $ SplitOnUnusableCohesion dom
 
-        -- Lookup the type of the constructor at the given parameters
-        let a = ca `piApply` vs
+      unless (splittablePolarity (getModalPolarity info)) $
+        addContext delta1 $ softTypeError $ SplitOnUnusablePolarity dom
 
-        -- It will end in an application of the datatype
-        (gamma', ca, d', us) <- do
-          TelV gamma' ca@(El _ def) <- telView a
-          let Def d' es = ignoreSharing def
-              Just us   = allApplyElims es
-          return (gamma', ca, d', us)
+      -- Should we attempt to compute a left inverse for this clause? When
+      -- --cubical=compatible --flat-split is given, we don't generate a
+      -- left inverse (at all). This means that, when the coverage checker
+      -- gets to the clause this was in, it won't generate a (malformed!)
+      -- transpX clause for @♭ matching.
+      -- TODO(Amy): properly support transpX when @♭ stuff is in the
+      -- context.
+      let genTrx = boolToMaybe ((getCohesion info == Flat)) SplitOnFlat
 
-        -- This should be the same datatype as we split on
-        unless (d == d') $ typeError $ ShouldBeApplicationOf ca d'
+      -- We should be at a data/record type
+      (dr, d, s, pars, ixs) <- addContext delta1 $ isDataOrRecordType a
+      let isRec = case dr of
+            IsData{}   -> False
+            IsRecord{} -> True
 
-        reportSDoc "tc.lhs.top" 20 $ addContext delta1 $ nest 2 $ vcat
-          [ text "gamma' =" <+> prettyTCM gamma'
-          ]
+      checkMatchingAllowed mf d dr  -- No splitting on e.g. coinductive constructors.
 
-        -- Andreas 2010-09-07  propagate relevance info to new vars
-        let updRel = composeRelevance (getRelevance info)
-        gamma' <- return $ mapRelevance updRel <$> gamma'
+      -- Issue #7503: use principal sort for checking if split is ok
+      let a' = set lensSort s a
+      addContext delta1 $ checkSortOfSplitVar dr a' delta2 (Just target)
 
-        -- Insert implicit patterns
-        qs' <- insertImplicitPatterns ExpandLast qs gamma'
-        reportSDoc "tc.lhs.imp" 20 $
-          text "insertImplicitPatternsT returned" <+> fsep (map prettyA qs')
+      -- Jesper, 2019-09-13: if the data type we split on is a strict
+      -- set, we locally enable --with-K during unification.
+      withKIfStrict <- reduce (getSort a) <&> \ dsort ->
+        applyWhen (isStrictDataSort dsort) $ locallyTC eSplitOnStrict $ const True
 
-        unless ((size qs' :: Int) == size gamma') $
-          typeError $ WrongNumberOfConstructorArguments (conName c) (size gamma') (size qs')
+      -- The constructor should construct an element of this datatype
+      (c :: ConHead, b :: Type) <- liftTCM $ addContext delta1 $ case ambC of
+        Just ambC -> disambiguateConstructor ambC d pars
+        Nothing   -> getRecordConstructor d pars a
 
-        let gamma = useNamesFromPattern qs' gamma'
+      -- Don't split on lazy (non-eta) constructor
+      case focusPat of
+        A.ConP cpi _ _ | A.conPatLazy cpi == A.ConPatLazy ->
+          unlessM (isEtaRecord d) $ softTypeError $ ForcedConstructorNotInstantiated focusPat
+        _ -> return ()
 
-        -- Get the type of the datatype.
-        da <- (`piApply` vs) . defType <$> getConstInfo d
-        reportSDoc "tc.lhs.split" 30 $ text "  da = " <+> prettyTCM da
+      -- The type of the constructor will end in an application of the datatype
+      (TelV gamma (El _ ctarget), boundary) <- liftTCM $ telViewPathBoundary b
+      let Def d' es' = ctarget
+          cixs = drop (size pars) $ mustAllApplyElims es'
 
-        -- Compute the flexible variables
-        flex <- flexiblePatterns (problemInPat p0 ++ qs')
-        reportSDoc "tc.lhs.split" 30 $ text "computed flexible variables"
+      -- Δ₁Γ ⊢ boundary
+      reportSDoc "tc.lhs.split.con" 50 $ text "  boundary = " <+> prettyTCM boundary
 
-        -- Compute the constructor indices by dropping the parameters
-        let us' = drop (size vs) us
+      unless (d == d') {-'-} __IMPOSSIBLE__
 
-        -- Raise given indices over constructor telescope
-        let ws' = raise (size gamma) ws
+      -- Get names for the constructor arguments from the user patterns
+      gamma <- liftTCM $ case focusPat of
+        A.ConP _ _ ps -> do
+          ps <- insertImplicitPatterns ExpandLast ps gamma
+          return $ useNamesFromPattern ps gamma
+        A.RecP _ _ fs -> do
+          RecordDefn def <- theDef <$> getConstInfo d
+          let axs = map' argFromDom $ recordFieldNames def
+          ps <- insertMissingFieldsFail d (const $ A.WildP empty) fs axs
+          ps <- insertImplicitPatterns ExpandLast ps gamma
+          return $ useNamesFromPattern ps gamma
+        _ -> __IMPOSSIBLE__
 
-        reportSDoc "tc.lhs.top" 15 $ addContext delta1 $
-          sep [ text "preparing to unify"
-              , nest 2 $ vcat
-                [ text "c      =" <+> prettyTCM c <+> text ":" <+> prettyTCM a
-                , text "d      =" <+> prettyTCM (Def d (map Apply $ vs++ws)) <+> text ":" <+> prettyTCM da
-                , text "gamma  =" <+> prettyTCM gamma
-                , text "gamma' =" <+> prettyTCM gamma'
-                , text "vs     =" <+> brackets (fsep $ punctuate comma $ map prettyTCM vs)
-                , text "us'    =" <+> addContext gamma (brackets (fsep $ punctuate comma $ map prettyTCM us'))
-                , text "ws     =" <+> brackets (fsep $ punctuate comma $ map prettyTCM ws)
-                ]
+      -- Andreas 2010-09-07  propagate relevance info to new vars
+      -- Andreas 2018-10-17  propagate modality
+      let updMod = composeModality (getModality info)
+      gamma <- return $ mapModality updMod <$> gamma
+
+      -- Get the type of the datatype.
+      da <- (`piApply` pars) . defType <$> getConstInfo d
+      reportSDoc "tc.lhs.split" 30 $ "  da = " <+> prettyTCM da
+
+      reportSDoc "tc.lhs.top" 15 $ addContext delta1 $
+        sep [ "preparing to unify"
+            , nest 2 $ vcat
+              [ "c      =" <+> prettyTCM c <+> ":" <+> prettyTCM b
+              , "d      =" <+> prettyTCM (Def d (map' Apply pars)) <+> ":" <+> prettyTCM da
+              , "isRec  =" <+> (text . show) isRec
+              , "gamma  =" <+> prettyTCM gamma
+              , "pars   =" <+> brackets (fsep $ punctuate comma $ map' prettyTCM pars)
+              , "ixs    =" <+> brackets (fsep $ punctuate comma $ map' prettyTCM ixs)
+              , "cixs   =" <+> addContext gamma (brackets (fsep $ punctuate comma $ map' prettyTCM cixs))
               ]
-
-        -- Unify constructor target and given type (in Δ₁Γ)
-        -- Given: Δ₁ ⊢ D vs : Φ → Setᵢ
-        --        Δ₁ ⊢ c    : Γ → D vs' us'
-        --        Δ₁ ⊢ ws   : Φ
-        --        Δ₁Γ ⊢ ws' : Φ
-        -- (where vs' = raise Γ vs and ws' = raise Γ ws)
-        -- unification of us' and ws' in context Δ₁Γ gives us a telescope Δ₁'
-        -- and a substitution ρ₀ such that
-        --        Δ₁' ⊢ ρ₀ : Δ₁Γ
-        --        Δ₁' ⊢ (us')ρ₀ ≡ (ws')ρ₀ : Φρ₀
-        -- We can split ρ₀ into two parts ρ₁ and ρ₂, giving
-        --        Δ₁' ⊢ ρ₁ : Δ₁
-        --        Δ₁' ⊢ ρ₂ : Γρ₁
-        -- Application of the constructor c gives
-        --        Δ₁' ⊢ c ρ₂ : (D vs' us')(ρ₁;ρ₂)
-        -- We have
-        --        us'(ρ₁;ρ₂)
-        --         ≡ us'ρ₀      (since ρ₀=ρ₁;ρ₂)
-        --         ≡ ws'ρ₀      (by unification)
-        --         ≡ ws ρ₁      (since ws doesn't actually depend on Γ)
-        -- so     Δ₁' ⊢ c ρ₂ : D (vs)ρ₁ (ws)ρ₁
-        -- Putting this together with ρ₁ gives ρ₃ = ρ₁;c ρ₂
-        --        Δ₁' ⊢ ρ₁;c ρ₂ : Δ₁(x : D vs ws)
-        -- and lifting over Δ₂ gives the final substitution ρ = ρ₃;Δ₂
-        -- from Δ' = Δ₁';Δ₂ρ₃
-        --        Δ' ⊢ ρ : Δ₁(x : D vs ws)Δ₂
-
-        res <- unifyIndices
-                 (delta1 `abstract` gamma)
-                 flex
-                 (raise (size gamma) da)
-                 us'
-                 ws'
-        case res of
-
-         -- Mismatch.  Report and abort.
-         NoUnify neg -> typeError $ ImpossibleConstructor (conName c) neg
-
-         -- Unclear situation.  Try next split.
-         -- If no split works, give error from first split.
-         -- This is conservative, but might not be the best behavior.
-         -- It might be better to collect all the errors and print all of them.
-         DontKnow errs -> tryNextSplit
-           `catchError` \ _ -> typeError $ SplitError $
-             UnificationStuck (conName c) (delta1 `abstract` gamma) us' ws' errs
-
-         -- Success.
-         Unifies (delta1',rho0,es) -> do
-
-          reportSDoc "tc.lhs.top" 15 $ text "unification successful"
-          reportSDoc "tc.lhs.top" 20 $ nest 2 $ vcat
-            [ text "delta1' =" <+> prettyTCM delta1'
-            , text "rho0    =" <+> addContext delta1' (prettyTCM rho0)
-            , text "es      =" <+> addContext delta1' (prettyTCM $ (fmap . fmap . fmap) patternToTerm es)
             ]
+                 -- We ignore forcing for make-case
+      cforced <- ifM (viewTC eMakeCase) (return []) $
+                 {-else-} defForced <$> getConstInfo (conName c)
 
-          -- compute in patterns for delta1'
-          let newPats  = applySubst rho0 $ teleArgs $ delta1 `abstract` gamma
-              -- oldTypes are the types of the old pattern variables, but relative
-              -- to the *new* telescope delta1'. These are needed to compute the
-              -- correct types of new dot pattern instantiations.
-              oldTypes = applyPatSubst rho0 $ flattenTel $ delta1 `abstract` gamma
-          (p0',newDpi) <- addContext delta1' $ updateInPatterns
-                            oldTypes
-                            (problemInPat p0 ++ qs')
-                            newPats
+      let delta1Gamma = delta1 `abstract` gamma
+          da'  = raise (size gamma) da
+          ixs' = raise (size gamma) ixs
+          -- Variables in Δ₁ are not forced, since the unifier takes care to not introduce forced
+          -- variables.
+          forced = replicate (size delta1) NotForced ++! cforced
 
-          reportSDoc "tc.lhs.top" 20 $ addContext delta1' $ nest 2 $ vcat
-            [ text "p0'     =" <+> text (show $ deepUnscope p0')
-            , text "newDpi  =" <+> brackets (fsep $ punctuate comma $ map prettyTCM newDpi)
+      -- All variables are flexible.
+      let flex = allFlexVars forced $ delta1Gamma
+
+      -- Unify constructor target and given type (in Δ₁Γ)
+      -- Given: Δ₁  ⊢ D pars : Φ → Setᵢ
+      --        Δ₁  ⊢ c      : Γ → D pars cixs
+      --        Δ₁  ⊢ ixs    : Φ
+      --        Δ₁Γ ⊢ cixs   : Φ
+      -- unification of ixs and cixs in context Δ₁Γ gives us a telescope Δ₁'
+      -- and a substitution ρ₀ such that
+      --        Δ₁' ⊢ ρ₀ : Δ₁Γ
+      --        Δ₁' ⊢ (ixs)ρ₀ ≡ (cixs)ρ₀ : Φρ₀
+      -- We can split ρ₀ into two parts ρ₁ and ρ₂, giving
+      --        Δ₁' ⊢ ρ₁ : Δ₁
+      --        Δ₁' ⊢ ρ₂ : Γρ₁
+      -- Application of the constructor c gives
+      --        Δ₁' ⊢ (c Γ)(ρ₀) : (D pars cixs)(ρ₁;ρ₂)
+      -- We have
+      --        cixs(ρ₁;ρ₂)
+      --         ≡ cixs(ρ₀)   (since ρ₀=ρ₁;ρ₂)
+      --         ≡ ixs(ρ₀)    (by unification)
+      --         ≡ ixs(ρ₁)    (since ixs doesn't actually depend on Γ)
+      -- so     Δ₁' ⊢ (c Γ)(ρ₀) : (D pars ixs)ρ₁
+      -- Putting this together with ρ₁ gives ρ₃ = ρ₁;c ρ₂
+      --        Δ₁' ⊢ ρ₁;(c Γ)(ρ₀) : Δ₁(x : D vs ws)
+      -- and lifting over Δ₂ gives the final substitution ρ = ρ₃;Δ₂
+      -- from Δ' = Δ₁';Δ₂ρ₃
+      --        Δ' ⊢ ρ : Δ₁(x : D vs ws)Δ₂
+
+      -- Andrea 2019-07-17 propagate the Cohesion to the equation telescope
+      -- TODO: should we propagate the modality in general?
+      -- See also Coverage checking.
+      da' <- addContext delta1Gamma $ do
+             let updCoh = composeCohesion (getCohesion info)
+             TelV tel dt <- telView da'
+             return $ abstract (mapCohesion updCoh <$> tel) dt
+
+      let stuck b errs = softTypeError $ SplitError $
+            UnificationStuck b (conName c) (delta1 `abstract` gamma) cixs ixs' errs
+
+      liftTCM (withKIfStrict $ unifyIndices genTrx delta1Gamma flex da' cixs ixs') >>= \case
+
+        -- Mismatch.  Report and abort.
+        NoUnify neg -> hardTypeError $ ImpossibleConstructor (conName c) neg
+
+        UnifyBlocked block -> stuck (Just block) []
+
+        -- Unclear situation.  Try next split.
+        UnifyStuck errs -> stuck Nothing errs
+
+        -- Success.
+        Unifies (delta1',rho0,es) -> do
+
+          reportSDoc "tc.lhs.top" 15 $ "unification successful"
+          reportSDoc "tc.lhs.top" 20 $ nest 2 $ vcat
+            [ "delta1' =" <+> prettyTCM delta1'
+            , "rho0    =" <+> addContext delta1' (prettyTCM rho0)
+            , "es      =" <+> addContext delta1' (prettyTCM $ (fmap . fmap . fmap) patternToTerm es)
             ]
 
           -- split substitution into part for Δ₁ and part for Γ
           let (rho1,rho2) = splitS (size gamma) rho0
 
           reportSDoc "tc.lhs.top" 20 $ addContext delta1' $ nest 2 $ vcat
-            [ text "rho1    =" <+> prettyTCM rho1
-            , text "rho2    =" <+> prettyTCM rho2
+            [ "rho1    =" <+> prettyTCM rho1
+            , "rho2    =" <+> prettyTCM rho2
             ]
 
           -- Andreas, 2010-09-09, save the type.
           -- It is relative to Δ₁, but it should be relative to Δ₁'
-          let storedPatternType = applyPatSubst rho1 typeOfSplitVar
-          -- Also remember if we are a record pattern and from an implicit pattern.
-          isRec <- isRecord d
-          let cpi = ConPatternInfo (isRec $> porigin) False (Just storedPatternType)
+          let a' = applyPatSubst rho1 a
 
-          -- compute final context and permutation
-          let crho2   = ConP c cpi $ applySubst rho2 $
-                          teleNamedArgs gamma `useOriginFrom` qs'
-              rho3    = consS crho2 rho1
+          -- Also remember if we are a record pattern.
+          let cpi = ConPatternInfo { conPInfo   = PatternInfo PatOCon []
+                                   , conPRecord = isRec
+                                   , conPFallThrough = False
+                                   , conPType   = Just $ Arg info a'
+                                   , conPLazy   = False  -- Don't mark eta-record matches as lazy (#4254)
+                                   , conPPrio   = prio
+                                   }
+
+          -- compute final context and substitution
+          let crho    = ConP c cpi $ applySubst rho0 $ (telePatterns gamma boundary)
+              rho3    = consS crho rho1
               delta2' = applyPatSubst rho3 delta2
               delta'  = delta1' `abstract` delta2'
               rho     = liftS (size delta2) rho3
 
           reportSDoc "tc.lhs.top" 20 $ addContext delta1' $ nest 2 $ vcat
-            [ text "crho2   =" <+> prettyTCM crho2
-            , text "rho3    =" <+> prettyTCM rho3
-            , text "delta2' =" <+> prettyTCM delta2'
+            [ "crho    =" <+> prettyTCM crho
+            , "rho3    =" <+> prettyTCM rho3
+            , "delta2' =" <+> prettyTCM delta2'
             ]
-
           reportSDoc "tc.lhs.top" 70 $ addContext delta1' $ nest 2 $ vcat
-            [ text "crho2   =" <+> pretty crho2
-            , text "rho3    =" <+> pretty rho3
-            , text "delta2' =" <+> pretty delta2'
+            [ "crho    =" <+> pretty crho
+            , "rho3    =" <+> pretty rho3
+            , "delta2' =" <+> pretty delta2'
             ]
 
           reportSDoc "tc.lhs.top" 15 $ nest 2 $ vcat
-            [ text "delta'  =" <+> prettyTCM delta'
-            , text "rho     =" <+> addContext delta' (prettyTCM rho)
+            [ "delta'  =" <+> prettyTCM delta'
+            , "rho     =" <+> addContext delta' (prettyTCM rho)
             ]
 
-          -- compute new in patterns
-          let ps'  = p0' ++ problemInPat (absBody p1)
-
-          reportSDoc "tc.lhs.top" 15 $ addContext delta' $
-            nest 2 $ vcat
-              [ text "ps'    =" <+> brackets (fsep $ punctuate comma $ map prettyA ps')
-              ]
-
-          -- The final dpis are the new ones plus the old ones substituted by ρ
-          let dpi' = applyPatSubst rho dpi ++ raise (size delta2') newDpi
-              sbe' = map (second $ applyPatSubst rho) sbe
-
-          reportSDoc "tc.lhs.top" 15 $ addContext delta' $
-            nest 2 $ vcat
-              [ text "dpi'    =" <+> brackets (fsep $ punctuate comma $ map prettyTCM dpi')
-              , text "sbe'    =" <+> brackets (fsep $ punctuate comma $ map prettyTCM sbe')
-              ]
-
-          -- Apply the substitution
+          -- Compute the new out patterns and target type.
           let ip'      = applySubst rho ip
-              rest'    = applyPatSubst rho (problemRest problem)
+              target'  = applyPatSubst rho target
 
-          reportSDoc "tc.lhs.top" 15 $ addContext delta' $
-            nest 2 $ vcat
-              [ text "ip' =" <+> pretty ip ]
+          -- Update the problem equations
+          let eqs' = applyPatSubst rho $ problem ^. problemEqs
+              problem' = set problemEqs eqs' problem
 
-          -- Construct the new problem
-          let problem' = Problem ps' ip' delta' rest'
+          -- The result type's quantity is set to 0 for erased
+          -- constructors, but not if the match is made in an erased
+          -- position, or if the original constructor definition is
+          -- not erased.
+          cq <- getQuantity <$> getOriginalConstInfo (conName c)
+          let target'' = mapQuantity updResMod target'
+                where
+                  erased = case getQuantity info of
+                    Quantity0{} -> True
+                    Quantity1{} -> __IMPOSSIBLE__
+                    Quantityω{} -> False
+                  -- either sets to Quantity0 or is the identity.
+                  updResMod q =
+                    case cq of
+                     _ | erased  -> q
+                     Quantity0{} -> composeQuantity cq q
+                                 -- zero-out, preserves origin
+                     Quantity1{} -> __IMPOSSIBLE__
+                     Quantityω{} -> q
+
+          unless (null ixs) $
+            whenM (withoutKOption `or2M` cubicalCompatibleOption) $ do
+              mod <- currentModality
+              lhsRng <- asks lhsRange
+              liftTCM $ addContext delta' $
+                conSplitModalityCheck lhsRng mod rho (length delta2) tel (unArg target)
 
           -- if rest type reduces,
           -- extend the split problem by previously not considered patterns
-          st'@(LHSState problem'@(Problem ps' ip' delta' rest') dpi' psplit sbe')
-            <- updateProblemRest $ LHSState problem' dpi' psplit sbe'
+          st' <- liftTCM $ updateLHSState $ LHSState delta' ip' problem' target'' psplit (ixsplit || not (null ixs)) prio
 
           reportSDoc "tc.lhs.top" 12 $ sep
-            [ text "new problem from rest"
+            [ "new problem from rest"
             , nest 2 $ vcat
-              [ text "ps'     =" <+> fsep (map prettyA ps')
-              , text "delta'  =" <+> prettyTCM delta'
-              , text "ip'     =" <+> pretty ip'
+              [ "delta'  =" <+> prettyTCM (st' ^. lhsTel)
+              , "eqs'    =" <+> addContext (st' ^. lhsTel) (prettyTCM $ st' ^. (lhsProblem . problemEqs))
+              , "ip'     =" <+> addContext (st' ^. lhsTel) (pretty $ st' ^. lhsOutPat)
               ]
             ]
-          checkLHS f st'
+          return st'
 
 
--- | Ensures that we are not performing pattern matching on codata.
+-- | Ensures that we are not performing pattern matching on coinductive constructors.
 
-noPatternMatchingOnCodata :: [NamedArg DeBruijnPattern] -> TCM ()
-noPatternMatchingOnCodata = mapM_ (check . namedArg)
+checkMatchingAllowed :: (MonadTCError m)
+  => LetOrClause   -- ^ Are we checking a clause lhs or a let-pattern?
+  -> QName         -- ^ The name of the data or record type the constructor belongs to.
+  -> DataOrRecord  -- ^ Information about data or (co)inductive (no-)eta-equality record.
+  -> m ()
+checkMatchingAllowed mf d = \case
+  IsRecord InductionAndEta { recordInduction=ind, recordEtaEquality=eta }
+    | Just CoInductive <- ind -> typeError SplitOnCoinductive
+    | not $ patternMatchingAllowed eta -> typeError $ SplitOnNonEtaRecord d
+    | otherwise -> return ()
+  IsData -> case mf of
+    -- Andreas, 2026-01-20, issue #8327
+    -- Exit early when we are checking a let-pattern and encounter a non-record pattern.
+    -- This is mainly to serve the correct error message to the user.
+    LetLHS -> typeError ShouldBeRecordPattern
+    ClauseLHS{} -> return ()
+
+-- | When working with a monad @m@ implementing @MonadTCM@ and @MonadError TCErr@,
+--   @suspendErrors f@ performs the TCM action @f@ but catches any errors and throws
+--   them in the monad @m@ instead.
+suspendErrors :: (MonadTCM m, MonadError TCErr m) => TCM a -> m a
+suspendErrors f = do
+  ok <- liftTCM $ (Right <$> f) `catchError` (return . Left)
+  either throwError return ok
+
+-- | A more direct implementation of the specification
+--   @softTypeError err == suspendErrors (typeError err)@
+softTypeError :: (HasCallStack, ReadTCState m, MonadError TCErr m, MonadTCEnv m) => TypeError -> m a
+softTypeError err = withCallerCallStack $ \loc ->
+  throwError =<< typeError' loc err
+
+-- | A convenient alias for @liftTCM . typeError@. Throws the error directly
+--   in the TCM even if there is a surrounding monad also implementing
+--   @MonadError TCErr@.
+hardTypeError :: (HasCallStack, MonadTCM m) => TypeError -> m a
+hardTypeError = withCallerCallStack $ \loc -> liftTCM . typeError' loc
+
+type DataOrRecord = DataOrRecord' InductionAndEta
+
+-- | Check if the type is a data or record type and return its name,
+--   definition, sort, parameters, and indices. Fails softly if the type could become
+--   a data/record type by instantiating a variable/metavariable, or fail hard
+--   otherwise.
+isDataOrRecordType
+  :: (MonadTCM m, PureTCM m)
+  => Type
+  -> ExceptT TCErr m (DataOrRecord, QName, Sort, Args, Args)
+       -- ^ The 'Args' are parameters and indices.
+
+isDataOrRecordType a0 = ifBlocked a0 blocked $ \case
+  ReallyNotBlocked -> \ a -> case unEl a of
+
+    -- Subcase: split type is a Def.
+    Def d es -> liftTCM (getConstInfo d) >>= \def -> case theDef def of
+
+      Datatype{dataPars = np, dataSort = s} -> do
+
+        whenM (isInterval a) $ hardTypeError =<< notData
+
+        let (pars, ixs) = splitAt' np $ mustAllApplyElims es
+        return (IsData, d, s, pars, ixs)
+
+      Record{ recInduction, recEtaEquality' } -> do
+        let pars = mustAllApplyElims es
+        s <- shouldBeSort =<< defType def `piApplyM` pars
+        return (IsRecord InductionAndEta {recordInduction=recInduction, recordEtaEquality=recEtaEquality' }, d, s, pars, [])
+
+      -- Issue #2253: the data type could be abstract.
+      AbstractDefn{} -> hardTypeError $ SplitOnAbstract d
+
+      -- the type could be an axiom
+      Axiom{} -> hardTypeError =<< notData
+
+      -- Can't match before we have the definition
+      DataOrRecSig{} -> hardTypeError $ SplitOnUnchecked d
+
+      -- Issue #2997: the type could be a Def that does not reduce for some reason
+      -- (abstract, failed termination checking, NON_TERMINATING, ...)
+      Function{}    -> hardTypeError =<< notData
+
+      Constructor{} -> __IMPOSSIBLE__
+
+      -- Issue #3620: Some primitives are types too.
+      -- Not data though, at least currently 11/03/2018.
+      Primitive{}   -> hardTypeError =<< notData
+
+      PrimitiveSort{} -> hardTypeError =<< notData
+
+      GeneralizableVar{} -> __IMPOSSIBLE__
+
+    -- variable: fail softly
+    Var{}      -> softTypeError =<< notData
+    MetaV{}    -> __IMPOSSIBLE__  -- That is handled in @blocked@.
+
+    -- pi or sort: fail hard
+    Pi{}       -> hardTypeError =<< notData
+    Sort{}     -> hardTypeError =<< notData
+
+    Lam{}      -> __IMPOSSIBLE__
+    Lit{}      -> __IMPOSSIBLE__
+    Con{}      -> __IMPOSSIBLE__
+    Level{}    -> __IMPOSSIBLE__
+    DontCare{} -> __IMPOSSIBLE__
+    Dummy s _  -> __IMPOSSIBLE_VERBOSE__ (show s)
+
+  -- neutral type: fail softly
+  StuckOn{}     -> \ _a -> softTypeError =<< notData
+  AbsurdMatch{} -> \ _a -> softTypeError =<< notData
+
+  -- missing clauses: fail hard
+  -- TODO: postpone checking of the whole clause until later?
+  MissingClauses{} -> \ _a -> hardTypeError =<< notData
+
+  -- underapplied type: should not happen
+  Underapplied{} -> __IMPOSSIBLE__
+
   where
-  check (VarP {})   = return ()
-  check (DotP {})   = return ()
-  check (AbsurdP{}) = return ()
-  check (ProjP{})   = return ()
-  check (LitP {})   = return ()  -- Literals are assumed not to be coinductive.
-  check (ConP con _ ps) = do
-    TelV _ t <- telView' . defType <$> do getConstInfo $ conName con
-    c <- isCoinductive t
-    case c of
-      Nothing    -> __IMPOSSIBLE__
-      Just False -> mapM_ (check . namedArg) ps
-      Just True  -> typeError $
-        GenericError "Pattern matching on coinductive types is not allowed"
+  notData      = liftTCM $ SplitError . NotADatatype <$> buildClosure a0
+  blocked b _a = softTypeError =<< do liftTCM $ SplitError . BlockedType b <$> buildClosure a0
 
--- | Type check dot pattern stripped from a with function.
-checkStrippedDotPattern :: A.StrippedDotPattern -> TCM ()
-checkStrippedDotPattern (A.StrippedDot e v a) = do
-  reportSDoc "tc.with.dot" 30 $ vcat
-    [ text "Checking stripped dot pattern"
-    , nest 2 $ vcat [ text "e =" <+> prettyTCM e
-                    , text "v =" <+> prettyTCM v
-                    , text "a =" <+> prettyTCM a
-                    , text "Γ =" <+> (inTopContext . prettyTCM =<< getContextTelescope) ] ]
-  u <- checkExpr e a
-  equalTerm a u v
+-- | Get the constructor of the given record type together with its type.
+--   Throws an error if the type is not a record type.
+getRecordConstructor
+  :: QName  -- ^ Name @d@ of the record type
+  -> Args   -- ^ Parameters @pars@ of the record type
+  -> Type   -- ^ The record type @Def d pars@ (for error reporting)
+  -> TCM (ConHead, Type)
+getRecordConstructor d pars a = do
+  con <- (theDef <$> getConstInfo d) >>= \case
+    Record{recConHead = con} -> return $ killRange con
+    _ -> typeError $ ShouldBeRecordType a
+  b <- (`piApply` pars) . defType <$> getConstInfo (conName con)
+  return (con, b)
+
+
+-- | Disambiguate a projection based on the record type it is supposed to be
+--   projecting from. Returns the unambiguous projection name and its type.
+--   Throws an error if the type is not a record type.
+disambiguateProjection
+  :: Maybe Hiding   -- ^ Hiding info of the projection's principal argument.
+                    --   @Nothing@ if 'Postfix' projection.
+  -> AmbiguousQName -- ^ Name of the projection to be disambiguated.
+  -> Arg Type       -- ^ Record type we are projecting from.
+  -> TCM (QName, Bool, QName, Arg Type, ArgInfo)
+       -- ^ @Bool@ signifies whether copattern matching is allowed at
+       --   the inferred record type.
+disambiguateProjection h ambD b = do
+  -- If the target is not a record type, that's an error.
+  -- It could be a meta, but since we cannot postpone lhs checking, we crash here.
+  caseEitherM (liftTCM $ tryRecordType $ unArg b) notRecord
+    \ (r, vs, RecordData{ _recFields = fs, _recInduction = ind, _recEtaEquality' = eta }) -> do
+      reportSDoc "tc.lhs.split" 20 $ sep
+        [ "we are of record type r  = " <> pure (P.pretty r)
+        , "applied to parameters vs = " <> prettyTCM vs
+        , "and have fields       fs = " <> pure (P.pretty $ map' argFromDom fs)
+        ]
+      let comatching = ind == Just CoInductive
+                    || copatternMatchingAllowed eta
+      -- Try the projection candidates.
+      -- First, we try to find a disambiguation that doesn't produce
+      -- any new constraints.
+      tryDisambiguate False fs r vs comatching $ \ _ ->
+          -- If this fails, we try again with constraints, but we require
+          -- the solution to be unique.
+          tryDisambiguate True fs r vs comatching $ \case
+            (err:_, [] ) -> throwError err
+            ([]   , [] ) -> __IMPOSSIBLE__
+            (_    , [_]) -> __IMPOSSIBLE__
+            (_    , (d,_) : (d1,_) : disambs) ->
+              typeError $ AmbiguousProjection d $ d1 :| map' fst disambs
+  where
+    ds = getAmbiguous ambD
+    tryDisambiguate constraintsOk fs r vs comatching failure = do
+      -- Note that tryProj wraps TCM in an ExceptT, collecting errors
+      -- instead of throwing them to the user immediately.
+      disambiguations :: List1 (Either TCErr (QName, (Arg Type, ArgInfo, Maybe TCState)))
+        <- mapM (runExceptT . tryProj constraintsOk fs r vs) ds
+      case List1.partitionEithers disambiguations of
+        (_ , (d, (a, ai, mst)) : disambs) | constraintsOk <= null disambs -> do
+          mapM_ putTC mst -- Activate state changes
+          -- From here, we have the correctly disambiguated projection.
+          -- For highlighting, we remember which name we disambiguated to.
+          -- This is safe here (fingers crossed) as we won't decide on a
+          -- different projection even if we backtrack and come here again.
+          liftTCM $ storeDisambiguatedProjection d
+          return (d, comatching, r, a, ai)
+        other -> failure other
+
+    notRecord blk = wrongProj (Just (getBlocker blk)) $ List1.head ds
+
+    wrongProj :: (MonadTCM m, MonadError TCErr m, ReadTCState m) => Maybe Blocker -> QName -> m a
+    wrongProj blk d = softTypeError =<< do
+      liftTCM $ if isAmbiguous ambD then CannotEliminateWithProjection blk b True <$> dropTopLevelModule d
+                else pure $ CannotEliminateWithProjection blk b False d
+
+    tryProj
+      :: Bool                 -- Are we allowed to create new constraints?
+      -> [Dom QName]          -- Fields of record type under consideration.
+      -> QName                -- Name of record type we are eliminating.
+      -> Args                 -- Parameters of record type we are eliminating.
+      -> QName                -- Candidate projection.
+      -> ExceptT TCErr TCM (QName, (Arg Type, ArgInfo, Maybe TCState))
+           -- TCState contains possibly new constraints/meta solutions.
+    tryProj constraintsOk fs r vs d0 = isProjection d0 >>= \case
+      -- Not a projection
+      Nothing -> wrongProj Nothing d0
+      Just proj -> do
+        let d = projOrig proj
+
+        -- Andreas, 2015-05-06 issue 1413 projProper=Nothing is not impossible
+        qr <- maybe (wrongProj Nothing d) return $ projProper proj
+
+        -- If projIndex==0, then the projection is already applied
+        -- to the record value (like in @open R r@), and then it
+        -- is no longer a projection but a record field.
+        when (null $ projLams proj) $ wrongProj Nothing d
+        reportSLn "tc.lhs.split" 90 "we are a projection pattern"
+        -- If the target is not a record type, that's an error.
+        -- It could be a meta, but since we cannot postpone lhs checking, we crash here.
+        reportSDoc "tc.lhs.split" 20 $ sep
+          [ text $ "proj                  d0 = " ++! prettyShow d0
+          , text $ "original proj         d  = " ++! prettyShow d
+          ]
+        -- Get the field decoration.
+        -- If the projection pattern name @d@ is not a field name,
+        -- we have to try the next projection name.
+        -- If this was not an ambiguous projection, that's an error.
+        argd <- maybe (wrongProj Nothing d) return $ List.find ((d ==) . unDom) fs
+
+        -- Issue4998: This used to use the hiding from the principal argument, but this is not
+        -- relevant for the ArgInfo of the clause rhs. We return that separately so we can set the
+        -- correct hiding for the projection pattern in splitRest above.
+        let ai = getArgInfo argd
+
+        reportSDoc "tc.lhs.split" 20 $ vcat
+          [ text $ "original proj relevance  = " ++! show (getRelevance argd)
+          , text $ "original proj quantity   = " ++! show (getQuantity  argd)
+          ]
+        -- Andreas, 2016-12-31, issue #2374:
+        -- We can also disambiguate by hiding info.
+        -- Andreas, 2018-10-18, issue #3289: postfix projections have no hiding info.
+        unless (caseMaybe h True $ sameHiding $ projArgInfo proj) $
+          softTypeError $ WrongHidingInProjection d
+
+        -- Andreas, 2016-12-31, issue #1976: Check parameters.
+        let chk = checkParameters qr r vs
+        mst <- suspendErrors $
+          if constraintsOk then Just . snd <$> localTCStateSaving chk
+          else Nothing <$ nonConstraining chk
+
+        -- Get the type of projection d applied to "self"
+        dType <- liftTCM $ defType <$> getConstInfo d  -- full type!
+        reportSDoc "tc.lhs.split" 20 $ sep
+          [ "we are being projected by dType = " <+> prettyTCM dType
+          ]
+        projType <- liftTCM $ dType `piApplyM` vs
+        return (d0, (Arg ai projType, projArgInfo proj, mst))
+
+-- | Disambiguate a constructor based on the data type it is supposed to be
+--   constructing. Returns the unambiguous constructor name and its type.
+--   Precondition: type should be a data/record type.
+disambiguateConstructor
+  :: AmbiguousQName    -- ^ The name of the constructor to be disambiguated.
+  -> QName             -- ^ Name of the datatype.
+  -> Args              -- ^ Parameters of the datatype
+  -> TCM (ConHead, Type)
+disambiguateConstructor ambC d0 pars = do
+  reduce (Def d0 $ map Apply pars) >>= \case
+    Def d es | Just vs <- allApplyElims es -> do
+      def <- theDef <$> getConstInfo d
+      uncurry (disambiguateConstructor' ambC d vs) case def of
+        Datatype{} -> (IsData, dataCons def)
+        Record  {} -> (IsRecord_, [conName $ recConHead def])
+        _ -> __IMPOSSIBLE__
+    _ -> __IMPOSSIBLE__
+
+-- | Disambiguate a constructor based on the data type it is supposed to be
+--   constructing. Returns the unambiguous constructor name and its type.
+--   Precondition: type should be a data/record type.
+disambiguateConstructor'
+  :: AmbiguousQName      -- ^ The name of the constructor to be disambiguated.
+  -> QName               -- ^ Name of the datatype.
+  -> Args                -- ^ Parameters of the datatype
+  -> DataOrRecord_       -- ^ Whether it is really a datatype or rather a record type.
+  -> [QName]             -- ^ The constructor(s) of the data/record type.
+  -> TCM (ConHead, Type)
+disambiguateConstructor' ambC d pars dataOrRec cons = do
+  -- First, try do disambiguate with nonConstraining,
+  -- if that fails, try again allowing constraint/solution generation.
+  tryDisambiguate False \ _ ->
+    tryDisambiguate True \case
+        ([]   , [] ) -> __IMPOSSIBLE__
+        (err:_, [] ) -> throwError err
+        -- If all disambiguations point to the same original constructor
+        -- meaning that only the parameters may differ,
+        -- then throw more specific error.
+        (_    , [_]) -> typeError $ CantResolveOverloadedConstructorsTargetingSameDatatype d cs
+        (_    , (d0@((c,_,_) :| _) : d1 : ds)) -> typeError $
+          AmbiguousConstructor c $ fmap (conName . snd3) $ List2.concat21 $ List2 d0 d1 ds
+
+  where
+    cs = getAmbiguous ambC
+    tryDisambiguate
+      :: Bool
+           -- May we constrain/solve metas to arrive at unique disambiguation?
+      -> ( ( [TCErr]
+           , [List1 (QName, ConHead, (Type, Maybe TCState))]
+           )
+           -> TCM (ConHead, Type) )
+           -- Failure continuation, taking possible disambiguations
+           -- grouped by the original constructor name in 'ConHead'.
+      -> TCM (ConHead, Type)
+           -- Unique disambiguation and its type.
+    tryDisambiguate constraintsOk failure = do
+      reportSDoc "tc.lhs.disamb" 30 $ sep $ List.concat $
+        [ [ "tryDisambiguate" ]
+        , if constraintsOk then [ "(allowing new constraints)" ] else empty
+        , map' (nest 2 . pretty) $ List1.toList cs
+        , [ "against" ]
+        , map' (nest 2 . pretty) cons
+        ]
+      disambiguations <- mapM (runExceptT . tryCon constraintsOk) cs
+      -- Q: can we be more lazy, like using the ListT monad?
+      -- Andreas, 2020-06-17: Not really, since we need to make sure
+      -- that only a single candidate remains, and if not,
+      -- report all alternatives in the error message.
+      let (errs, fits0) = List1.partitionEithers disambiguations
+      reportSDoc "tc.lhs.disamb" 40 $ vcat $ do
+        let hideSt (c0,c,(a,mst)) = (c0, c, (a, ("(state change)" :: String) <$ mst))
+        "remaining candidates: " : map' (nest 2 . prettyTCM . hideSt) fits0
+      dedupCons fits0 >>= \case
+
+        -- Single candidate remains.
+        [ (c0,c,(a,mst)) :| [] ] -> do
+          reportSDoc "tc.lhs.disamb" 30 $ sep $
+            [ "tryDisambiguate suceeds with"
+            , pretty c0
+            , ":"
+            , prettyTCM a
+            ]
+          -- Andreas, 2020-06-16, issue #4135
+          -- If disambiguation succeeded with new constraints/solutions,
+          -- put them into action.
+          whenJust mst putTC
+          -- If there are multiple candidates for the constructor pattern, exactly one of
+          -- which type checks, remember our choice for highlighting info.
+          when (isAmbiguous ambC) $ liftTCM $
+            storeDisambiguatedConstructor (conInductive c) c0
+          return (c,a)
+
+        -- Either no candidate constructor in 'cs' type checks, or multiple candidates
+        -- type check.
+        groups -> failure (errs, groups)
+
+    abstractConstructor c = softTypeError $
+      AbstractConstructorNotInScope c
+
+    wrongDatatype c = softTypeError $
+      ConstructorPatternInWrongDatatype c d dataOrRec
+
+    tryCon
+      :: Bool        -- Are we allowed to constrain metas?
+      -> QName       -- Candidate constructor.
+      -> ExceptT TCErr TCM (QName, ConHead, (Type, Maybe TCState))
+           -- If this candidate succeeds, return its disambiguation
+           -- its type, and maybe the state obtained after checking it
+           -- (which may contain new constraints/solutions).
+    tryCon constraintsOk c = getConstInfo' c >>= \case
+      Left (SigUnknown err)     -> __IMPOSSIBLE_VERBOSE__ err
+      Left SigCubicalNotErasure -> __IMPOSSIBLE__
+      Left SigAbstract          -> abstractConstructor c
+      Right def                 -> do
+        let con = conSrcCon (theDef def) `withRangeOf` c
+        unless (conName con `elem` cons) $ wrongDatatype c
+
+        -- Andreas, 2013-03-22 fixing issue 279
+        -- To resolve ambiguous constructors, Agda always looks up
+        -- their original definition and reconstructs the parameters
+        -- from the type @Def d vs@ we check against.
+        -- However, the constructor could come from a module instantiation
+        -- with some of the parameters already fixed.
+        -- Agda did not make sure the two parameter lists coincide,
+        -- so we add a check here.
+        -- I guess this issue could be solved more systematically,
+        -- but the extra check here is non-invasive to the existing code.
+        -- Andreas, 2016-12-31 fixing issue #1975
+        -- Do this also for constructors which were originally ambiguous.
+        let chk = checkConstructorParameters c d pars
+        mst <- suspendErrors $
+          if constraintsOk then Just . snd <$> localTCStateSaving chk
+          else Nothing <$ nonConstraining chk
+
+        -- Get the type from the original constructor.
+        -- Andreas, 2020-06-17 TODO:
+        -- Couldn't we return this type from checkConstructorParameters?
+        cType <- (`piApply` pars) . defType <$> getConInfo con
+
+        return (c, con, (cType, mst))
+
+    -- This deduplication identifies different names of the same
+    -- constructor, ensuring that the "ambiguous constructor" error
+    -- does not fire for the case described in #4130.
+    --
+    -- Andreas, 2020-06-17, issue #4135:
+    -- However, we need to distinguish different occurrences
+    -- of the same original constructor if it is used
+    -- with different data parameters, as recorded in the @Type@.
+    dedupCons ::
+      forall a.       [ (a, ConHead, (Type, Maybe TCState)) ]
+         -> TCM [ List1 (a, ConHead, (Type, Maybe TCState)) ]
+    dedupCons cands = do
+      -- Group candidates by original constructor name.
+      let groups = List1.groupWith (conName . snd3) cands
+      -- Eliminate duplicates (same type) from groups.
+      mapM (List1.nubM (cmpM `on` thd3)) groups
+      where
+      -- The types come possibly with their own state.
+      cmpM (a1, mst1) (a2, mst2) = do
+        let cmpTypes = tryConversion $ equalType a1 a2
+        case (mst1, mst2) of
+          (Nothing, Nothing) -> cmpTypes
+          (Just st, Nothing) -> inState st cmpTypes
+          (Nothing, Just st) -> inState st cmpTypes
+          -- Andreas, 2020-06-17, issue #4135.
+          -- If the state has diverged into two states we give up.
+          -- For instance, one state may say `?0 := true`
+          -- and the other `?0 := false`.
+          -- The types may be both `D ?0`, which is the same
+          -- but diverges in the different states.
+          -- We do not check states for equality.
+          --
+          -- Of course, this is conservative and not maximally extensional.
+          -- We might throw an ambiguity error too eagerly,
+          -- but this can always be worked around.
+          (Just{},  Just{})  -> return False
+      inState st m = localTCState $ do putTC st; m
+
+-- | @checkConstructorParameters c d pars@ checks that the data/record type
+--   behind @c@ is has initial parameters (coming e.g. from a module instantiation)
+--   that coincide with an prefix of @pars@.
+checkConstructorParameters :: MonadTCM tcm => QName -> QName -> Args -> tcm ()
+checkConstructorParameters c d pars = do
+  dc <- liftTCM $ getConstructorData c
+  checkParameters dc d pars
+
+-- | Check that given parameters match the parameters of the inferred
+--   constructor or projection.
+checkParameters
+  :: MonadTCM tcm
+  => QName  -- ^ The record or data type name of the chosen constructor or projection.
+  -> QName  -- ^ The record or data type name as supplied by the type signature.
+  -> Args   -- ^ The parameters.
+  -> tcm ()
+checkParameters dc d pars = liftTCM $ do
+  def <- getConstInfo dc
+  -- Only a copy stemming from a module instantiation can have parameters
+  -- that are already fixed; for anything else there is nothing to check.
+  -- (This also avoids the context churn below in the common case.)
+  when (defCopy def) $ do
+    -- Andreas, 2026-09-25, issue #7664:
+    -- Saturate @dc@ with fresh parameters before reducing.
+    -- Reducing @Def dc []@ is not enough: a copy does unfold when underapplied
+    -- (issue #8545), but reduction stops at the leading lambdas it produces,
+    -- so a /chain/ of copies would not be unfolded all the way down to @d@.
+    TelV tel _ <- telView $ defType def
+    let n = size tel
+    addContext tel $ do
+      a <- reduce $ Def dc $ map Apply $ teleArgs tel
+      case a of
+        Def d0 es -> do
+          let pars' = raise n pars
+              vs0   = mustAllApplyElims es
+              -- Andreas, 2026-09-25, issue #7664:
+              -- A parameter of @d@ that still mentions one of the fresh
+              -- variables is not fixed by the module instantiation: the caller
+              -- may choose it freely, but consistently.
+              -- To ensure consistency of the choices, we would need full-blown
+              -- unification.  We abstain from implementing this here.
+              -- Rather, we simply overwrite the constructor parameters
+              -- that still contain fresh variables with the respective
+              -- data parameter so that the subsequent 'compareArgs'
+              -- never fails at these positions.
+              -- This means that 'checkParameters' still lets through
+              -- some constructors with the wrong parameter instantiation.
+              -- That we actually need to jump through hoops here lies in
+              -- our handling of module applications that do not make
+              -- proper copies of the module, but just fake them using 'defCopy'.
+              vs | n == 0    = vs0  -- Nothing supplied by us, nothing to neutralize.
+                 | otherwise = zipWith (\ v p -> if anyFreeVar (< n) v then p else v)
+                                 vs0 pars'
+          reportSDoc "tc.lhs.split" 40 $ vcat $
+            [ "checkParameters"
+            , nest 2 $ "d                   =" <+> (text . prettyShow) d
+            , nest 2 $ "d0 (should be == d) =" <+> (text . prettyShow) d0
+            , nest 2 $ "dc                  =" <+> (text . prettyShow) dc
+            , nest 2 $ "vs0                 =" <+> prettyTCM vs0
+            , nest 2 $ "vs                  =" <+> prettyTCM vs
+            , nest 2 $ "pars                =" <+> prettyTCM pars
+            ]
+          unless (d0 == d) __IMPOSSIBLE__
+          -- @pars@ include the module parameters of @d@,
+          -- so we need the uninstantiated type of @d@ here (not @typeOfConst d@).
+          t <- defType <$> getConstInfo d
+          compareArgs [] [] t (Def d []) vs (take' (length vs) pars')
+        _ -> return ()
+
+checkSortOfSplitVar :: (MonadTCM m, PureTCM m, MonadError TCErr m,
+                        LensSort a, PrettyTCM a, LensSort ty, PrettyTCM ty)
+                    => DataOrRecord -> a -> Telescope -> Maybe ty -> m ()
+checkSortOfSplitVar dr a tel mtarget = do
+  let s = getSort a
+  sa <- liftTCM $ reduce s
+  case sortUniv sa of
+    Just UType{} -> whenM isTwoLevelEnabled checkFibrantSplit
+    Just UProp{} -> checkPropSplit
+    Just USSet{} -> return ()
+    Nothing      -> softTypeError =<< do
+      liftTCM $ SortOfSplitVarError <$> isBlocked sa <*> sep
+        [ "Cannot split on datatype in sort" , prettyTCM s]
+
+  where
+    checkPropSplit
+      | IsRecord InductionAndEta { recordInduction=Nothing } <- dr = return ()
+      | Just target <- mtarget = do
+        reportSDoc "tc.sort.check" 20 $ "target prop:" <+> prettyTCM target
+        checkIsProp target
+      | otherwise              = do
+          reportSDoc "tc.sort.check" 20 $ "no target prop"
+          splitOnPropError dr
+
+    checkIsProp t = runBlocked (isPropM t) >>= \case
+      Left b      -> splitOnPropError dr -- TODO
+      Right False -> splitOnPropError dr
+      Right True  -> return ()
+
+    checkFibrantSplit
+      | IsRecord _ <- dr       = return ()
+      | Just target <- mtarget = do
+        reportSDoc "tc.sort.check" 20 $ "target:" <+> prettyTCM target
+        checkIsFibrant target
+        let
+          loop EmptyTel = pure ()
+          loop (ExtendTel a tel) = do
+            checkIsCoFibrant (unDom a)
+            underAbstractionAbs a tel loop
+        loop tel
+      | otherwise              = do
+          reportSDoc "tc.sort.check" 20 $ "no target"
+          splitOnFibrantError Nothing
+
+    -- Cofibrant types are those that could be the domain of a fibrant
+    -- pi type. (Notion by C. Sattler).
+    checkIsCoFibrant t = isCoFibrantSort t >>= \case
+      Left b      -> splitOnFibrantError' t $ Just b
+      Right False -> unlessM (isInterval t) $
+                       splitOnFibrantError' t $ Nothing
+      Right True  -> return ()
+
+    checkIsFibrant t = isFibrant' t >>= \case
+      Left b      -> splitOnFibrantError $ Just b
+      Right False -> splitOnFibrantError Nothing
+      Right True  -> return ()
+
+    splitOnPropError dr = softTypeError $ SplitInProp dr
+
+    splitOnFibrantError' t mb = softTypeError =<< do
+      liftTCM $ SortOfSplitVarError mb <$> fsep
+        [ "Cannot eliminate fibrant type" , prettyTCM a
+        , "unless context type", prettyTCM t, "is also fibrant."
+        ]
+
+    splitOnFibrantError mb = softTypeError =<< do
+      liftTCM $ SortOfSplitVarError mb <$> fsep
+        [ "Cannot eliminate fibrant type" , prettyTCM a
+        , "unless target type is also fibrant"
+        ]

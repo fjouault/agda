@@ -1,5 +1,5 @@
--- {-# LANGUAGE CPP #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 {-# LANGUAGE ImplicitParams             #-}
 
 module Agda.Termination.CallMatrix where
@@ -11,9 +11,6 @@ module Agda.Termination.CallMatrix where
 --   , tests
 --   ) where
 
-import Data.Semigroup
-import Data.Foldable (Foldable)
-import Data.Traversable (Traversable)
 
 import Agda.Termination.CutOff
 import Agda.Termination.Order as Order
@@ -22,10 +19,10 @@ import Agda.Termination.Semiring (HasZero(..))
 
 import Agda.Utils.Favorites (Favorites)
 import qualified Agda.Utils.Favorites as Fav
-import Agda.Utils.Monad
+
 import Agda.Utils.Null
 import Agda.Utils.PartialOrd
-import Agda.Utils.Pretty hiding ((<>))
+import Agda.Syntax.Common.Pretty
 import Agda.Utils.Singleton
 
 ------------------------------------------------------------------------
@@ -103,6 +100,8 @@ deriving instance NotWorse CallMatrix
 instance HasZero a => Diagonal (CallMatrix' a) a where
   diagonal = diagonal . mat
 
+mapCallMatrix :: (Matrix ArgumentIndex a -> Matrix ArgumentIndex a) -> CallMatrix' a -> CallMatrix' a
+mapCallMatrix f (CallMatrix m) = CallMatrix (f m)
 
 -- | Call matrix multiplication and call combination.
 
@@ -166,6 +165,9 @@ instance Monoid cinfo => CallComb (CallMatrixAug cinfo) where
 noAug :: Monoid cinfo => CallMatrix -> CallMatrixAug cinfo
 noAug m = CallMatrixAug m mempty
 
+mapCallMatrixAug :: (CallMatrix -> CallMatrix) -> CallMatrixAug cinfo -> CallMatrixAug cinfo
+mapCallMatrixAug f (CallMatrixAug m i) = CallMatrixAug (f m) i
+
 ------------------------------------------------------------------------
 -- * Sets of incomparable call matrices augmented with path information.
 ------------------------------------------------------------------------
@@ -174,6 +176,10 @@ noAug m = CallMatrixAug m mempty
 --   Use overloaded 'null', 'empty', 'singleton', 'mappend'.
 newtype CMSet cinfo = CMSet { cmSet :: Favorites (CallMatrixAug cinfo) }
   deriving ( Show, Semigroup, Monoid, Null, Singleton (CallMatrixAug cinfo) )
+
+mapCMSet :: (Favorites (CallMatrixAug cinfo) -> Favorites (CallMatrixAug cinfo))
+  -> CMSet cinfo -> CMSet cinfo
+mapCMSet f (CMSet s) = CMSet (f s)
 
 -- | Call matrix set product is the Cartesian product.
 
@@ -209,4 +215,4 @@ instance Pretty cinfo => Pretty (CallMatrixAug cinfo) where
 
 instance Pretty cinfo => Pretty (CMSet cinfo) where
   pretty = vcat . punctuate newLine . map pretty . toList
-    where newLine = text "\n"
+    where newLine = "\n"

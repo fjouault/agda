@@ -1,157 +1,136 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
-module Agda.Compiler.Common where
+module Agda.Compiler.Common
+  ( module Agda.Compiler.Common
+  , IsMain(..)
+  )
+  where
 
+import Prelude hiding ((!!))
 
-#if __GLASGOW_HASKELL__ <= 708
-import Prelude hiding (foldl, mapM_, mapM, sequence, concat)
-#endif
-
-import Data.List as List
-import Data.Map (Map)
+import Data.List (sortBy, isPrefixOf)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.HashMap.Strict as HMap
 import Data.Char
-import Data.Function
-import Data.Semigroup
-import Data.Monoid hiding ((<>))
+import Data.Function (on)
 
 import Control.Monad
-import Control.Monad.State  hiding (mapM_, forM_, mapM, forM, sequence)
+import Control.Monad.State
 
 import Agda.Syntax.Common
-import qualified Agda.Syntax.Abstract.Name as A
-import qualified Agda.Syntax.Concrete.Name as C
 import Agda.Syntax.Internal as I
+import Agda.Syntax.TopLevelModuleName
 
-import Agda.Interaction.FindFile
-import Agda.Interaction.Imports
 import Agda.Interaction.Options
+import Agda.Interaction.Imports  ( CheckResult, crInterface, crSource, Source(..) )
+import Agda.Interaction.Library
 
-import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Pretty hiding ((<>))
-import Agda.TypeChecking.Reduce
-import Agda.TypeChecking.Substitute
-import Agda.TypeChecking.Telescope
+import Agda.TypeChecking.Monad as TCM
 
 import Agda.Utils.FileName
-import qualified Agda.Utils.HashMap as HMap
-import Agda.Utils.Lens
+import Agda.Utils.List
+import Agda.Utils.List1          ( pattern (:|) )
 import Agda.Utils.Maybe
-import Agda.Utils.Monad
-import Agda.Utils.Pretty hiding ((<>))
+import Agda.Utils.WithDefault    ( lensCollapseDefault )
+import Agda.Utils.Tuple.Strict (Pair(..))
+import Agda.Utils.Tuple.Strict qualified as Strict
+import Agda.Utils.Maybe.Strict qualified as Strict
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
-data IsMain = IsMain | NotMain
-  deriving (Eq, Show)
-
-instance Semigroup IsMain where
-  NotMain <> _ = NotMain
-  _       <> NotMain = NotMain
-  IsMain  <> IsMain = IsMain
-
-instance Monoid IsMain where
-  mempty = IsMain
-  mappend = (<>)
-
-doCompile :: forall r. Monoid r => IsMain -> Interface -> (IsMain -> Interface -> TCM r) -> TCM r
-doCompile isMain i f = do
-  -- The Agda.Primitive module is implicitly assumed to be always imported,
-  -- even though it not necesseraly occurs in iImportedModules.
-  -- TODO: there should be a better way to get hold of Agda.Primitive?
-  [agdaPrimInter] <- filter (("Agda.Primitive"==) . prettyShow . iModuleName)
-    . map miInterface . Map.elems
-      <$> getVisitedModules
-  flip evalStateT Set.empty $ mappend <$> comp NotMain agdaPrimInter <*> comp isMain i
+doCompile :: Monoid r => (IsMain -> Interface -> TCM r) -> IsMain -> Interface -> TCM r
+doCompile f isMain i = do
+  flip evalStateT Set.empty $ compilePrim $ doCompile' f isMain i
   where
-    comp :: IsMain -> Interface -> StateT (Set ModuleName) TCM r
-    comp isMain i = do
-      alreadyDone <- Set.member (iModuleName i) <$> get
-      if alreadyDone then return mempty else do
-        imps <- lift $
-          map miInterface . catMaybes <$>
-            mapM (getVisitedModule . toTopLevelModuleName . fst) (iImportedModules i)
-        ri <- mconcat <$> mapM (comp NotMain) imps
-        lift $ setInterface i
-        r <- lift $ f isMain i
-        modify (Set.insert $ iModuleName i)
-        return $ mappend ri r
+  -- The Agda.Primitive module is only loaded if the --no-load-primitives flag was not given,
+  -- thus, only try to compile it if we have visited it.
+  compilePrim cont = do
+    agdaPrim <- lift $ do
+      agdaPrim <- TCM.topLevelModuleName agdaPrim
+      Map.lookup agdaPrim <$> getVisitedModules
+    case agdaPrim of
+      Nothing   -> cont
+      Just prim ->
+        mappend <$> doCompile' f NotMain (miInterface prim) <*> cont
+    where
+    agdaPrim = RawTopLevelModuleName
+      { rawModuleNameRange = mempty
+      , rawModuleNameParts = "Agda" :| "Primitive" : []
+      , rawModuleNameInferred = False
+      }
+      -- N.B. The Range in TopLevelModuleName is ignored for Ord, so we can set it to mempty.
+
+-- This helper function is called for both `Agda.Primitive` and the module in question.
+-- It's also called for each imported module, recursively. (Avoiding duplicates).
+doCompile'
+  :: Monoid r
+  => (IsMain -> Interface -> TCM r) -> (IsMain -> Interface -> StateT (Set ModuleName) TCM r)
+doCompile' f isMain i = do
+  alreadyDone <- gets (Set.member (iModuleName i))
+  if alreadyDone then return mempty else do
+    imps <- lift $
+      map' miInterface . catMaybes <$>
+        mapM (getVisitedModule . fst) (iImportedModules i)
+    ri <- mconcat <$> mapM (doCompile' f NotMain) imps
+    lift $ setInterface i
+    r <- lift $ f isMain i
+    modify (Set.insert $ iModuleName i)
+    return $ mappend ri r
 
 setInterface :: Interface -> TCM ()
 setInterface i = do
-  opts <- gets (stPersistentOptions . stPersistentState)
+  opts <- getsTC (stPersistentOptions . stPersistentState)
   setCommandLineOptions opts
-  mapM_ setOptionsFromPragma (iPragmaOptions i)
-  stImportedModules .= Set.fromList (map fst $ iImportedModules i)
-  stCurrentModule   .= Just (iModuleName i)
+  mapM_ setOptionsFromPragma (iDefaultPragmaOptions i ++! iFilePragmaOptions i)
+  -- One could perhaps make the following command lazy. Note, however,
+  -- that it doesn't suffice to replace setTCLens' with setTCLens,
+  -- because the stPreImportedModules field is strict.
+  stImportedModules `setTCLens'`
+    Set.fromList (map' fst (iImportedModules i))
+  stCurrentModule `setTCLens'`
+    Strict.Just (iModuleName i :!: iTopLevelModuleName i)
 
-curIF :: TCM Interface
+curIF :: ReadTCState m => m Interface
 curIF = do
-  mName <- use stCurrentModule
-  case mName of
-    Nothing   -> __IMPOSSIBLE__
-    Just name -> do
-      mm <- getVisitedModule (toTopLevelModuleName name)
-      case mm of
-        Nothing -> __IMPOSSIBLE__
-        Just mi -> return $ miInterface mi
+  name <- curMName
+  maybe __IMPOSSIBLE__ miInterface <$> getVisitedModule name
 
+curMName :: ReadTCState m => m TopLevelModuleName
+curMName = Strict.maybe __IMPOSSIBLE__ Strict.snd <$> useTC stCurrentModule
 
-curSig :: TCM Signature
-curSig = iSignature <$> curIF
-
-curMName :: TCM ModuleName
-curMName = sigMName <$> curSig
-
-curDefs :: TCM Definitions
-curDefs = fmap (HMap.filter (not . defNoCompilation)) $ (^. sigDefinitions) <$> curSig
+curDefs :: ReadTCState m => m Definitions
+curDefs = HMap.filter (not . defNoCompilation) . (^. sigDefinitions) . iSignature <$> curIF
 
 sortDefs :: Definitions -> [(QName, Definition)]
 sortDefs defs =
   -- The list is sorted to ensure that the order of the generated
   -- definitions does not depend on things like the number of bits
   -- in an Int (see Issue 1900).
-  List.sortBy (compare `on` fst) $
+  sortBy (compare `on` fst) $
   HMap.toList defs
 
-sigMName :: Signature -> ModuleName
-sigMName sig = case Map.keys (sig ^. sigSections) of
-  []    -> __IMPOSSIBLE__
-  m : _ -> m
-
-
-compileDir :: TCM FilePath
+compileDir :: HasOptions m => m FilePath
 compileDir = do
   mdir <- optCompileDir <$> commandLineOptions
-  case mdir of
-    Just dir -> return dir
-    Nothing  -> __IMPOSSIBLE__
+  maybe __IMPOSSIBLE__ return mdir
 
 
 repl :: [String] -> String -> String
 repl subs = go where
-  go ('<':'<':c:'>':'>':s) | 0 <= i && i < length subs = subs !! i ++ go s
+  go ('<':'<':c:'>':'>':s) | 0 <= i && i < length subs = subs !! i ++! go s
      where i = ord c - ord '0'
   go (c:s) = c : go s
   go []    = []
 
 
--- | Copy pasted from MAlonzo....
---   Move somewhere else!
-conArityAndPars :: QName -> TCM (Nat, Nat)
-conArityAndPars q = do
-  def <- getConstInfo q
-  n   <- typeArity (defType def)
-  let Constructor{ conPars = np } = theDef def
-  return (n - np, np)
-
 -- | Sets up the compilation environment.
-inCompilerEnv :: Interface -> TCM a -> TCM a
-inCompilerEnv mainI cont = do
+inCompilerEnv :: CheckResult -> TCM a -> TCM a
+inCompilerEnv checkResult cont = do
+  let mainI = crInterface checkResult
+      checkedSource = crSource checkResult
+
   -- Preserve the state (the compiler modifies the state).
   -- Andreas, 2014-03-23 But we might want to collect Benchmark info,
   -- so use localTCState.
@@ -162,14 +141,14 @@ inCompilerEnv mainI cont = do
     -- Compute the output directory. Note: using commandLineOptions would make
     -- the current pragma options persistent when we setCommandLineOptions
     -- below.
-    opts <- gets $ stPersistentOptions . stPersistentState
+    opts <- getsTC $ stPersistentOptions . stPersistentState
     compileDir <- case optCompileDir opts of
-      Just dir -> return dir
-      Nothing  -> do
-        -- The default output directory is the project root.
-        let tm = toTopLevelModuleName $ iModuleName mainI
-        f <- findFile tm
-        return $ filePath $ C.projectRoot f tm
+        Just dir -> pure dir
+        Nothing  -> do
+          -- The default output directory is the project root.
+          let tm = iTopLevelModuleName mainI
+          f <- srcFilePath $ srcOrigin checkedSource
+          pure $ filePath $ projectRoot f tm
     setCommandLineOptions $
       opts { optCompileDir = Just compileDir }
 
@@ -177,27 +156,42 @@ inCompilerEnv mainI cont = do
     -- Unfortunately, a pragma option is stored in the interface file as
     -- just a list of strings, thus, the solution is a bit of hack:
     -- We match on whether @["--no-main"]@ is one of the stored options.
-    when (["--no-main"] `elem` iPragmaOptions mainI) $
-      stPragmaOptions %= \ o -> o { optCompileNoMain = True }
+    let iFilePragmaStrings = map' pragmaStrings . iFilePragmaOptions
+    when (["--no-main"] `elem` iFilePragmaStrings mainI) $
+      setTCLens (stPragmaOptions . lensOptCompileMain . lensCollapseDefault) False
 
-    setScope (iInsideScope mainI) -- so that compiler errors don't use overly qualified names
-    ignoreAbstractMode $ do
-      cont
+    -- Perhaps all pragma options from the top-level module should be
+    -- made available to the compiler in a suitable way. Here are more
+    -- hacks:
+    when (any (any (flip elem ["--cubical", "--cubical=full"])) $ iFilePragmaStrings mainI) $
+      setTCLens (stPragmaOptions . lensOptCubical) $ Just CFull
+    when (any (any (flip elem ["--erased-cubical", "--cubical=erased"])) $ iFilePragmaStrings mainI) $
+      setTCLens (stPragmaOptions . lensOptCubical) $ Just CErased
+    when (any ("--cubical=no-glue" `elem`) $ iFilePragmaStrings mainI) $
+      setTCLens (stPragmaOptions . lensOptCubical) $ Just CWithoutGlue
+
+    setScope $ iInsideScope mainI -- so that compiler errors don't use overly qualified names
+    -- András, 2025-08-30: this is a fresh creation of a scope from an interface
+    -- so inverse scopes don't yet exist.
+    recomputeInverseScope
+    ignoreAbstractMode cont
   -- keep generated warnings
-  let newWarnings = stPostTCWarnings $  stPostScopeState $ s
-  stTCWarnings .= newWarnings
+  let newWarnings = s ^. stTCWarnings
+  stTCWarnings `setTCLens` newWarnings
   return a
 
-topLevelModuleName :: ModuleName -> TCM ModuleName
+topLevelModuleName ::
+  ReadTCState m => ModuleName -> m TopLevelModuleName
 topLevelModuleName m = do
-  -- get the names of the visited modules
-  visited <- List.map (iModuleName . miInterface) . Map.elems <$>
-    getVisitedModules
+  -- Interfaces of visited modules.
+  visited <- map' miInterface . Map.elems <$> getVisitedModules
   -- find the module with the longest matching prefix to m
-  let ms = sortBy (compare `on` (length . mnameToList)) $
-       List.filter (\ m' -> mnameToList m' `isPrefixOf` mnameToList m) visited
-  case ms of
-    (m' : _) -> return m'
+  let is = sortBy (compare `on` (length . mnameToList . iModuleName)) $
+           filter' (\i -> mnameToList (iModuleName i) `isPrefixOf`
+                          mnameToList m)
+             visited
+  case is of
+    (i : _) -> return (iTopLevelModuleName i)
     -- if we did not get anything, it may be because m is a section
     -- (a module _ ), see e.g. #1866
     []       -> curMName

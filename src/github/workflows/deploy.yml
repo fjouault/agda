@@ -1,0 +1,419 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '.github/workflows/deploy.yml'
+      # Andreas, 2026-09-12, don't include the template of this workflow
+      # since it has no effect on the workflow run.
+      # - 'src/github/workflows/deploy.yml'
+    tags:
+      - v[2-9]+.*
+
+  workflow_run:
+    workflows: ["Build, Test, and Benchmark"]
+    branches: [master]
+    types:
+      - completed
+
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Andreas, 2022-10-18
+        # We stick to '-latest' virtual environments here in the sense of
+        # "most canonical", since this is the deploy action.
+        # As of today (2024-02-05), the actual version information can be found in
+        # https://github.com/actions/runner-images#available-images
+        # Andreas, 2025-10-04
+        # When you change the following values, also UPDATE the conditionals below.
+        os:
+          - windows-latest
+          - macos-15
+          - macos-26-intel
+          - ubuntu-latest
+        ghc-ver: ['9.14.1']
+        cabal-ver: [latest]
+
+    env:
+      ARGS: "--disable-executable-profiling --disable-library-profiling --flags=use-xdg-data-home --constraint='zlib +bundled-c-zlib'"
+      # Liang-Ting Chen (2021-01-01):
+      # Cabal cannot compile statically with text-icu (required by the flag `enable-cluster-counting`),
+      # see https://github.com/4e6/text-icu-static-example
+      #
+      # ASR (2022-06-01): The flag `--enable-split-sections` generates the warning
+      # "-split-sections is not useful on this platform since it always uses subsections via symbols"
+      # on MacOS (Issue #5940).
+      LINUX_ARGS: "--flags=optimise-heavily --enable-executable-static  --enable-split-sections"
+      MACOS_ARGS: "--flags=optimise-heavily"
+      WIN64_ARGS: "--flags=optimise-heavily --enable-split-sections"
+
+    runs-on: ${{ matrix.os }}
+    steps:
+
+    - &checkout
+      name: Minimal checkout of the master branch
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 1
+        submodules: false
+
+    - name: Set up build variables
+      id: vars
+      # We would like to disable SC2129 "Consider using { cmd1; cmd2; } >> file"
+      # for the entire script but just placing it in the beginning does not work.
+      # # shellcheck disable=SC2129
+      # We first set the variables to defaults and then override them with OS-specific variants.
+      # Note that we only use filenames without spaces so we do not have to quote them.
+      # We will sometimes do so nevertheless to pacify shellcheck.
+      # We also use ${{ env.ARGS }} instead of ${ARGS} to skip the "did you mean ${args}?" warning.
+      run: |
+        bindist=Agda
+        exe=agda
+        content_type=application/x-xz
+
+        if [[ "${{ runner.os }}" == Windows ]]; then
+
+          args="${{ env.ARGS}} ${WIN64_ARGS}"
+          content_type=application/zip
+          exe=agda.exe
+          filename=win64.zip
+
+          compress_cmd="cd ${bindist} && 7z a ${filename} -bb -mx=9 && mv ${filename} .."
+
+        elif [[ "${{ matrix.os }}" == macos-26-intel ]]; then
+
+          args="${{ env.ARGS }} ${MACOS_ARGS}"
+          filename=macOS-x64.tar.xz
+
+          compress_cmd="tar -a -cvf ${filename} -C ${bindist} ${exe}"
+
+        elif [[ "${{ matrix.os }}" == macos-15 ]]; then
+
+          args="${{ env.ARGS }} ${MACOS_ARGS}"
+          filename=macOS-arm64.tar.xz
+
+          compress_cmd="tar -a -cvf ${filename} -C ${bindist} ${exe}"
+
+        elif [[ "${{ runner.os }}" == Linux ]]; then
+
+          args="${{ env.ARGS }} ${LINUX_ARGS}"
+          filename=linux.tar.xz
+
+          compress_cmd="tar -a -cvf ${filename} -C ${bindist} ${exe}"
+
+        else
+          exit 1
+        fi
+
+        if [[ "${GITHUB_REF}" != refs/tags/v[2-9].* ]]; then
+          args="${args} --flags=version-with-git-hash"
+        fi
+
+        echo args="${args}"                  >> "${GITHUB_OUTPUT}"
+        echo bindist="${bindist}"            >> "${GITHUB_OUTPUT}"
+        echo compress_cmd="${compress_cmd}"  >> "${GITHUB_OUTPUT}"
+        echo content_type="${content_type}"  >> "${GITHUB_OUTPUT}"
+        echo exe="${exe}"                    >> "${GITHUB_OUTPUT}"
+        echo filename="${filename}"          >> "${GITHUB_OUTPUT}"
+
+
+    - name: Display build variables
+      run: |
+        echo "GITHUB_REF      = ${GITHUB_REF}"
+        echo "GITHUB_REF_NAME = ${GITHUB_REF_NAME}"
+
+        echo "args            = ${{ steps.vars.outputs.args         }}"
+        echo "compress_cmd    = ${{ steps.vars.outputs.compress_cmd }}"
+        echo "content_type    = ${{ steps.vars.outputs.content_type }}"
+        echo "filename        = ${{ steps.vars.outputs.filename     }}"
+
+    - name: Set up Alpine Linux with GHC
+      uses: jirutka/setup-alpine@v1
+      if:  ${{ runner.os == 'Linux' }}
+      with:
+        packages: >
+          cabal
+          g++
+          gcc
+          gmp-dev
+          gmp-static
+          musl-dev
+          ncurses-dev
+          ncurses-static
+          zlib-static
+          zlib-dev
+
+    - uses: haskell-actions/setup@v2
+      id: setup-haskell
+      if:  ${{ runner.os != 'Linux' }}
+      with:
+        ghc-version: ${{ matrix.ghc-ver }}
+        cabal-version: ${{ matrix.cabal-ver }}
+
+    - name: Environment settings based on the Haskell setup
+      if: ${{ runner.os != 'Linux' }}
+      run: |
+        GHC_VER=$(ghc --numeric-version)
+        CABAL_VER=$(cabal --numeric-version)
+        echo "GHC_VER   = ${GHC_VER}"
+        echo "CABAL_VER = ${CABAL_VER}"
+        echo "GHC_VER=${GHC_VER}"       >> "${GITHUB_ENV}"
+        echo "CABAL_VER=${CABAL_VER}"   >> "${GITHUB_ENV}"
+      # From now on, env.{GHC|CABAL}_VER are the precise versions.
+
+    # See: https://github.com/haskell/text-icu/pull/86
+    # pacman needs MSYS /usr/bin in PATH, but this breaks the latest cache action.
+    # -  https://github.com/actions/cache/issues/1073
+    # MSYS' pkg-config needs MSYS /mingw64/bin which we can safely add to the PATH
+
+    - name: Install the required packages (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $env:PATH = "C:\msys64\usr\bin;$env:PATH"
+        pacman -v --noconfirm -S mingw-w64-x86_64-pkgconf mingw-w64-x86_64-binutils
+        echo "C:\msys64\mingw64\bin" | Out-File -FilePath "$env:GITHUB_PATH" -Append
+
+      ## Old method:
+      ##  Liang-Ting Chen (2025-06-03): To release Agda as a single executable,
+      #   the flag `enable-cluster-counting` is disabled, so the library ICU is
+      #   not needed as a dynamically linked library.
+      #
+      #   env:
+      #   ICU_URL: 'https://github.com/unicode-org/icu/releases/download/release-69-1/icu4c-69_1-Win64-MSVC2019.zip'
+      #   ICU_DIR: '/c/icu4c'
+      #   ICU_FILE: 'icu4c.zip'
+      # run: |
+      #   curl -sSLo ${ICU_FILE} ${ICU_URL}
+      #   7z e ${ICU_FILE} -o${ICU_DIR} && rm ${ICU_FILE}
+      #   mkdir -p ${ICU_DIR}/include/unicode && mv ${ICU_DIR}/*.h ${ICU_DIR}/include/unicode
+
+      #   cabal user-config update --augment="extra-lib-dirs: $(cygpath -w ${ICU_DIR})" --augment="extra-include-dirs: $(cygpath -w ${ICU_DIR}/include)"
+
+#    - name: Install the ICU library (macOS)
+#      if: ${{ runner.os == 'macOS' }}
+#      run: |
+#        brew install icu4c
+#        ICU4C=$(brew --prefix)/opt/icu4c
+#        # echo "${ICU4C}/bin" >> "${GITHUB_PATH}" ## Only needed for uconv
+#        ICU_DIR=${ICU4C}/lib
+#        echo "ICU_DIR=${ICU_DIR}"
+#        echo "ICU_DIR=${ICU_DIR}" >> "${GITHUB_ENV}"
+#        echo "PKG_CONFIG_PATH=${ICU_DIR}/pkgconfig" >> "${GITHUB_ENV}"
+
+#    - name: Determine the ICU version
+#      run: |
+#        ICU_VER=$(pkg-config --modversion icu-i18n)
+#        echo "ICU_VER=${ICU_VER}"
+#        echo "ICU_VER=${ICU_VER}" >> "${GITHUB_ENV}"
+#        ICU_MAJOR_VER=$(cut -d '.' -f 1 <<< "${ICU_VER}")
+#        echo "ICU_MAJOR_VER=${ICU_MAJOR_VER}"
+#        echo "ICU_MAJOR_VER=${ICU_MAJOR_VER}" >> "${GITHUB_ENV}"
+#      # The output of unconv --version looks like "uconv v2.1  ICU 72.1" from which we extract "72.1"
+
+    - name: Configure the build plan
+      if: ${{ runner.os != 'Linux' }}
+      run: |
+        cabal configure ${{ steps.vars.outputs.args }}
+        cabal build --dry-run
+      # cabal build --dry-run creates dist-newstyle/cache/plan.json
+
+    - name: Cache dependencies
+      uses: actions/cache@v6
+      if: ${{ runner.os != 'Linux' }}
+      id: cache
+      with:
+        path: ${{ steps.setup-haskell.outputs.cabal-store }}
+        key:          deploy.yml-${{ runner.os }}-ghc-${{ env.GHC_VER }}-cabal-${{ env.CABAL_VER }}-${{ hashFiles('**/plan.json') }}
+        restore-keys: deploy.yml-${{ runner.os }}-ghc-${{ env.GHC_VER }}-cabal-${{ env.CABAL_VER }}-
+
+    - name: Build dependencies (on Alpine Linux)
+      if: ${{ runner.os == 'Linux' }}
+      shell: "alpine.sh {0}"
+      run: |
+        cabal update # Liang-Ting (2024-01-26): Alpine Linux has its own GHC toolchain
+        cabal configure ${{ steps.vars.outputs.args }}
+        cabal build --only-dependencies
+
+    - name: Build dependencies
+      if: ${{ steps.cache.outputs.cache-hit != 'true' && runner.os != 'Linux' }}
+      run: cabal build --only-dependencies
+
+    - name: Build Agda (on Alpine Linux)
+      if: ${{ runner.os == 'Linux' }}
+      shell: "alpine.sh {0}"
+      run: cabal build exe:agda
+
+    - name: Build Agda
+      if: ${{ runner.os != 'Linux' }}
+      run: cabal build exe:agda
+
+    - name: Move artefacts to ${{ steps.vars.outputs.bindist }}
+      # To locate the executable on Alpine, we fall back to "find"
+      # because "cabal" malfunctions if we are not in the alpine.sh
+      run: |
+        bindist="${{ steps.vars.outputs.bindist }}"
+        mkdir -p "${bindist}"
+        if [[ ${{ runner.os }} == Linux ]]; then
+          exepath=$(find dist-newstyle/build -name agda -type f)
+        else
+          exepath=$(cabal list-bin exe:agda)
+        fi
+        exe=$(basename "${exepath}")
+        cp "${exepath}" "${bindist}/"
+        strip "${bindist}/${exe}"
+        file "${bindist}/${exe}"
+
+    - name: Pack artefacts
+      run: |
+        ${{ steps.vars.outputs.compress_cmd }}
+
+    - uses: actions/upload-artifact@v7
+      with:
+        path: ${{ steps.vars.outputs.filename }}
+        name: ${{ steps.vars.outputs.filename }}
+        if-no-files-found: error
+        retention-days: 3
+
+  sanity-check:
+    if: ${{ !cancelled() }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, macos-26-intel, ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Set up platform-dependent variables
+      id: vars
+      run: |
+        if [[ "${{ runner.os }}" == Windows ]]; then
+
+          osname="win64"
+          ext="zip"
+          decompress_cmd_base="7z x"
+
+        elif [[ "${{ matrix.os }}" == "macos-26-intel" ]]; then
+
+          osname="macOS-x64"
+          ext="tar.xz"
+          decompress_cmd_base="tar -xf"
+
+        elif [[ "${{ matrix.os }}" == "macos-15" ]]; then
+
+          osname="macOS-arm64"
+          ext="tar.xz"
+          decompress_cmd_base="tar -xf"
+
+        elif [[ "${{ runner.os }}" == Linux ]]; then
+
+          osname="linux"
+          ext="tar.xz"
+          decompress_cmd_base="tar -xf"
+
+        fi
+
+        filename="${osname}.${ext}"
+        echo filename="${filename}"                              >> "${GITHUB_OUTPUT}"
+        echo decompress_cmd="${decompress_cmd_base} ${filename}" >> "${GITHUB_OUTPUT}"
+
+    - name: Display variables
+      run: |
+        echo "filename        = ${{ steps.vars.outputs.filename       }}"
+        echo "decompress_cmd  = ${{ steps.vars.outputs.decompress_cmd }}"
+
+    - uses: actions/download-artifact@v8
+      with:
+        name: ${{ steps.vars.outputs.filename }}
+
+    - name: Unpack artifacts
+      run: |
+        ${{ steps.vars.outputs.decompress_cmd }}
+
+    - name: Install dependency inspection tools (Windows)
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $env:PATH = "C:\msys64\usr\bin;$env:PATH"
+        pacman -v --noconfirm -S --needed mingw-w64-x86_64-binutils
+
+    - name: Display dynamic library dependencies
+      run: |
+        case "${{ runner.os }}" in
+          macOS)
+            otool -L ./agda
+            ;;
+          Windows)
+            /c/msys64/mingw64/bin/objdump.exe -p ./agda.exe | awk '/DLL Name:/ { print }'
+            ;;
+          Linux)
+            # Unlike ldd, readelf also succeeds for a fully static executable.
+            readelf -d ./agda
+            ;;
+        esac
+
+    - name: Run `agda --setup`
+# Liang-Ting Chen (2025-06-21): Agda is currently not notarized on macOS, so
+# the special attribute needs to be cleared before use.
+      run: |
+        if [[ "${{ runner.os }}" == macOS ]]; then
+          xattr -c agda
+        fi
+
+        ./agda --setup
+
+  deploy: # release a bindist if triggered on master or by a tag }}
+    # Andreas, 2023-02-13: Also run this part when manually triggered ('workflow_dispatch')
+    # if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'workflow_run' }}
+    needs: sanity-check
+    runs-on: ubuntu-latest
+    # if: ${{ success() }}
+    steps:
+
+    - *checkout
+
+    - uses: actions/download-artifact@v8
+      with:
+        path: artifacts
+
+    - name: Create/replace the nightly release and upload artifacts as release assets
+      if: ${{ github.ref == 'refs/heads/master' }}
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        sha=$(git rev-parse --short=7 HEAD)
+
+        git fetch --no-recurse-submodules -q origin 'refs/tags/*:refs/tags/*'
+        last_tag=$(git tag -l | grep -e '^v[[:digit:]]\+\(\.[[:digit:]]\+\)\{2,\}$' | sort -Vr | head -n 1)
+        echo "last_tag  = ${last_tag}"
+
+        gh release delete 'nightly' --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes || true
+        for i in artifacts/**/*; do mv "${i}" "$(dirname "${i}")/Agda-${sha}-$(basename "${i}")"; done
+        ls -R artifacts
+        gh release create 'nightly' artifacts/**/* --repo "${GITHUB_REPOSITORY}" --generate-notes --notes-start-tag "${last_tag}" --prerelease --title "${sha}@master"
+
+    - name: Create a release with the bindist as release assets
+      if: startsWith(github.ref, 'refs/tags/v')
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        echo "GITHUB_REF_NAME=${GITHUB_REF_NAME}"
+        echo "GITHUB_REPOSITORY=${GITHUB_REPOSITORY}"
+
+        gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes || true
+        gh release create "${GITHUB_REF_NAME}" -d --notes-file CHANGELOG.md --title "${GITHUB_REF_NAME}"
+        for i in artifacts/**/*; do mv "${i}" "$(dirname "${i}")/Agda-${GITHUB_REF_NAME}-$(basename "${i}")"; done
+        ls -R artifacts
+        gh release upload "${GITHUB_REF_NAME}" artifacts/**/* --repo "${GITHUB_REPOSITORY}"

@@ -1,0 +1,360 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+{-# OPTIONS_GHC -Wunused-matches #-}
+{-# OPTIONS_GHC -Wunused-binds #-}
+
+module Agda.Syntax.Concrete.Definitions.Types where
+
+import Control.DeepSeq
+
+import Data.Map (Map)
+
+import GHC.Generics (Generic)
+
+import Agda.Syntax.Position
+import Agda.Syntax.Common hiding (TerminationCheck())
+import qualified Agda.Syntax.Common as Common
+import Agda.Syntax.Common.Pretty
+import Agda.Syntax.Concrete
+import Agda.Syntax.Concrete.Name   ()
+import Agda.Syntax.Concrete.Pretty ()
+
+import Agda.Utils.List1 (List1)
+
+{--------------------------------------------------------------------------
+    Types
+ --------------------------------------------------------------------------}
+
+{-| The nice declarations. No fixity declarations and function definitions are
+    contained in a single constructor instead of spread out between type
+    signatures and clauses. The @private@, @postulate@, @abstract@ and @instance@
+    modifiers have been distributed to the individual declarations.
+
+    Observe the order of components:
+
+      Range
+      Fixity'
+      Access
+      IsAbstract
+      IsInstance
+      TerminationCheck
+      PositivityCheck
+
+      further attributes
+
+      (Q)Name
+
+      content (Expr, Declaration ...)
+-}
+data NiceDeclaration
+  = Axiom Range Access IsAbstract IsInstance ArgInfo Name Expr
+      -- ^ 'IsAbstract' argument: We record whether a declaration was made in an @abstract@ block.
+      --
+      --   'ArgInfo' argument: Axioms and functions can be declared irrelevant.
+      --   ('Hiding' should be 'NotHidden'.)
+  | NiceField Range Access IsAbstract IsInstance TacticAttribute Name (Arg Expr)
+  | PrimitiveFunction Range Access IsAbstract Name (Arg Expr)
+  | NiceMutual KwRange TerminationCheck CoverageCheck PositivityCheck (List1 NiceDeclaration)
+  | NiceModule Range Access IsAbstract Erased QName Telescope
+      [Declaration]
+  | NiceModuleMacro Range Access Erased Name ModuleApplication
+      OpenShortHand ImportDirective
+  | NiceOpen KwRange QName ImportDirective
+  | NiceImport OpenShortHand KwRange QName (Either AsName RawOpenArgs) ImportDirective
+  | NicePragma Range Pragma
+  | NiceRecSig Range Erased Access IsAbstract PositivityCheck
+      UniverseCheck ForceRecordEta Name Parameters Expr
+  | NiceDataSig Range Erased Access IsAbstract PositivityCheck
+      UniverseCheck Name Parameters Expr
+  | NiceFunClause Range Access IsAbstract TerminationCheck CoverageCheck Catchall Declaration
+    -- ^ An uncategorized function clause, could be a function clause
+    --   without type signature or a pattern lhs (e.g. for irrefutable let).
+    --   The 'Declaration' is the actual 'FunClause'.
+  | FunSig Range Access IsAbstract IsInstance IsMacro ArgInfo TerminationCheck CoverageCheck Name Expr
+  | FunDef Range (List1 Declaration) IsAbstract IsInstance TerminationCheck CoverageCheck Name (List1 Clause)
+      -- ^ Block of function clauses (we have seen the type signature before).
+      --   The 'Declaration's are the original declarations that were processed
+      --   into this 'FunDef' and are only used in 'notSoNiceDeclaration'.
+      --   Andreas, 2017-01-01: Because of issue #2372, we add 'IsInstance' here.
+      --   An alias should know that it is an instance.
+  | NiceDataDef Range Origin IsAbstract PositivityCheck UniverseCheck Name DefParameters [NiceConstructor]
+  | NiceLoneConstructor KwRange [NiceConstructor]
+  | NiceRecDef Range Origin IsAbstract PositivityCheck UniverseCheck ForceRecordEta Name [RecordDirective] DefParameters [Declaration]
+      -- ^ @(Maybe Range)@ gives range of the 'pattern' declaration.
+  | NicePatternSyn Range Access Name [WithHiding Name] Pattern
+  | NiceGeneralize Range Access ArgInfo TacticAttribute Name Expr
+  | NiceUnquoteDecl Range Access IsAbstract IsInstance TerminationCheck CoverageCheck [Name] Expr
+  | NiceUnquoteDef Range Access IsAbstract TerminationCheck CoverageCheck [Name] Expr
+  | NiceUnquoteData Range Access IsAbstract PositivityCheck UniverseCheck Name [Name] Expr
+  | NiceOpaque KwRange [QName] [NiceDeclaration]
+  deriving (Show, Generic)
+
+instance NFData NiceDeclaration
+
+type TerminationCheck = Common.TerminationCheck Measure
+
+-- | Termination measure is, for now, a variable name.
+type Measure = Name
+
+-- | Only 'Axiom's.
+type NiceConstructor = NiceTypeSignature
+
+-- | Only 'Axiom's.
+type NiceTypeSignature  = NiceDeclaration
+
+-- | One clause in a function definition. There is no guarantee that the 'LHS'
+--   actually declares the 'Name'. We will have to check that later.
+data Clause = Clause Name Catchall ArgInfo LHS RHS WhereClause [Clause]
+    deriving (Show, Generic)
+
+instance NFData Clause
+
+instance LensArgInfo Clause where
+  getArgInfo (Clause _ _ ai _ _ _ _) = ai
+  mapArgInfo f (Clause x ca ai lhs rhs wh cs) = Clause x ca (f ai) lhs rhs wh cs
+
+-- | When processing a mutual block we collect the various checks present in the block
+--   before combining them.
+
+data MutualChecks = MutualChecks
+  { mutualTermination :: [TerminationCheck]
+  , mutualCoverage    :: [CoverageCheck]
+  , mutualPositivity  :: [PositivityCheck]
+  }
+
+instance Semigroup MutualChecks where
+  MutualChecks a b c <> MutualChecks a' b' c'
+    = MutualChecks (a <> a') (b <> b') (c <> c')
+
+instance Monoid MutualChecks where
+  mempty = MutualChecks [] [] []
+  mappend = (<>)
+
+-- | In an inferred `mutual' block we keep accumulating nice declarations until all
+--   of the lone signatures have an attached definition. The type is therefore a bit
+--   span-like: we return an initial segment (the inferred mutual block) together
+--   with leftovers.
+
+data InferredMutual = InferredMutual
+  { inferredChecks    :: MutualChecks       -- checks for this block
+  , inferredBlock     :: [NiceDeclaration]  -- mutual block
+  , inferredLeftovers :: [NiceDeclaration]  -- leftovers
+  }
+
+extendInferredBlock :: NiceDeclaration -> InferredMutual -> InferredMutual
+extendInferredBlock d (InferredMutual cs ds left) = InferredMutual cs (d : ds) left
+
+-- | In an `interleaved mutual' block we collect the data signatures, function signatures,
+--   as well as their associated constructors and function clauses respectively.
+--   Each signature is given a position in the block (from 0 onwards) and each set
+--   of constructor / clauses is given a *distinct* one. This allows for interleaved
+--   forward declarations similar to what one gets in a new-style mutual block.
+type InterleavedMutual = Map Name InterleavedDecl
+
+data InterleavedDecl
+  = InterleavedData
+    { interleavedDeclNum  :: DeclNum
+        -- ^ Internal number of the data signature.
+    , interleavedDeclSig  :: NiceDeclaration
+        -- ^ The data signature.
+    , interleavedDataCons :: Maybe (DeclNum, List1 (DefParameters, [NiceConstructor]))
+        -- ^ Constructors associated to the data signature.
+    }
+  | InterleavedFun
+    { interleavedDeclNum  :: DeclNum
+        -- ^ Internal number of the function signature.
+    , interleavedDeclSig  :: NiceDeclaration
+        -- ^ The function signature.
+    , interleavedFunClauses :: Maybe (DeclNum, List1 (List1 Declaration, List1 Clause))
+        -- ^ Function clauses associated to the function signature.
+    }
+
+-- | Extra state for the 'Nice' monad to process interleaved mutual blocks.
+data InterleavedState = ISt
+  { interleavedMutual         :: InterleavedMutual
+  , interleavedMutualChecks   :: MutualChecks
+  , interleavedCurrentDeclNum :: DeclNum
+  }
+
+-- | Numbering declarations in an @interleaved mutual@ block.
+type DeclNum = Int
+
+instance HasRange InterleavedDecl where
+  getRange :: InterleavedDecl -> Range
+  getRange (InterleavedFun _ d _)  = getRange d
+  getRange (InterleavedData _ d _) = getRange d
+
+isInterleavedFun :: InterleavedDecl -> Maybe ()
+isInterleavedFun InterleavedFun{} = Just ()
+isInterleavedFun _ = Nothing
+
+isInterleavedData :: InterleavedDecl -> Maybe ()
+isInterleavedData InterleavedData{} = Just ()
+isInterleavedData _ = Nothing
+
+-- | Several declarations expect only type signatures as sub-declarations.  These are:
+data KindOfBlock
+  = PostulateBlock    -- ^ @postulate@.
+  | PrimitiveBlock    -- ^ @primitive@.
+  | FieldBlock        -- ^ @field@.  Ensured by parser.
+  | DataBlock         -- ^ @data ... where@.  Here we got a bad error message for Agda-2.5 (Issue 1698).
+  | ConstructorBlock  -- ^ @constructor@, in @interleaved mutual@.
+  deriving (Eq, Ord, Show, Generic)
+
+instance NFData KindOfBlock
+
+instance HasRange NiceDeclaration where
+  getRange (Axiom r _ _ _ _ _ _)           = r
+  getRange (NiceField r _ _ _ _ _ _)       = r
+  getRange (NiceMutual kwr _ _ _ ds)       = fuseRange kwr ds
+  getRange (NiceModule r _ _ _ _ _ _ )     = r
+  getRange (NiceModuleMacro r _ _ _ _ _ _) = r
+  getRange (NiceOpen kwr x dir)            = getRange (kwr, x, dir)
+  getRange (NiceImport o r x as dir)       = getRange (o, r, x, as, dir)
+  getRange (NicePragma r _)                = r
+  getRange (PrimitiveFunction r _ _ _ _)   = r
+  getRange (FunSig r _ _ _ _ _ _ _ _ _)    = r
+  getRange (FunDef r _ _ _ _ _ _ _)        = r
+  getRange (NiceDataDef r _ _ _ _ _ _ _)   = r
+  getRange (NiceLoneConstructor kwr ds)    = fuseRange kwr ds
+  getRange (NiceRecDef r _ _ _ _ _ _ _ _ _)= r
+  getRange (NiceRecSig r _ _ _ _ _ _ _ _ _)= r
+  getRange (NiceDataSig r _ _ _ _ _ _ _ _) = r
+  getRange (NicePatternSyn r _ _ _ _)      = r
+  getRange (NiceGeneralize r _ _ _ _ _)    = r
+  getRange (NiceFunClause r _ _ _ _ _ _)   = r
+  getRange (NiceUnquoteDecl r _ _ _ _ _ _ _) = r
+  getRange (NiceUnquoteDef r _ _ _ _ _ _)  = r
+  getRange (NiceUnquoteData r _ _ _ _ _ _ _) = r
+  getRange (NiceOpaque kwr xs ds)          = getRange (kwr, xs, ds)
+
+instance Pretty NiceDeclaration where
+  pretty = \case
+    Axiom _ _ _ _ _ x _            -> text "postulate" <+> pretty x <+> colon <+> text "_"
+    NiceField _ _ _ _ _ x _        -> text "field" <+> pretty x
+    PrimitiveFunction _ _ _ x _    -> text "primitive" <+> pretty x
+    NiceMutual{}                   -> text "mutual"
+    NiceOpaque _ _ ds              -> text "opaque" <+> nest 2 (vcat (map pretty ds))
+    NiceModule _ _ _ _ x _ _       -> text "module" <+> pretty x <+> text "where"
+    NiceModuleMacro _ _ _ x _ _ _  -> text "module" <+> pretty x <+> text "= ..."
+    NiceOpen _ x _                 -> text "open" <+> pretty x
+    NiceImport _ x _ _ _           -> text "import" <+> pretty x
+    NicePragma{}                   -> text "{-# ... #-}"
+    NiceRecSig _ _ _ _ _ _ _ x _ _ -> text "record" <+> pretty x
+    NiceDataSig _ _ _ _ _ _ x _ _  -> text "data" <+> pretty x
+    NiceFunClause{}                -> text "<function clause>"
+    FunSig _ _ _ _ _ _ _ _ x _     -> pretty x <+> colon <+> text "_"
+    FunDef _ _ _ _ _ _ x _         -> pretty x <+> text "= _"
+    NiceDataDef _ _ _ _ _ x _ _    -> text "data" <+> pretty x <+> text "where"
+    NiceLoneConstructor _ _        -> text "data _ where"
+    NiceRecDef _ _ _ _ _ _ x  _ _ _ -> text "record" <+> pretty x <+> text "where"
+    NicePatternSyn _ _ x _ _       -> text "pattern" <+> pretty x
+    NiceGeneralize _ _ _ _ x _     -> text "variable" <+> pretty x
+    NiceUnquoteDecl _ _ _ _ _ _ _xs _  -> text "<unquote declarations>"
+    NiceUnquoteDef _ _ _ _ _ _xs _     -> text "<unquote definitions>"
+    NiceUnquoteData _ _ _ _ _ _x _xs _ -> text "<unquote data types>"
+
+declName :: NiceDeclaration -> String
+declName Axiom{}             = "Postulates"
+declName NiceField{}         = "Fields"
+declName NiceMutual{}        = "Mutual blocks"
+declName NiceModule{}        = "Modules"
+declName NiceModuleMacro{}   = "Modules"
+declName NiceOpen{}          = "Open declarations"
+declName NiceImport{}        = "Import statements"
+declName NicePragma{}        = "Pragmas"
+declName PrimitiveFunction{} = "Primitive declarations"
+declName NicePatternSyn{}    = "Pattern synonyms"
+declName NiceGeneralize{}    = "Generalized variables"
+declName NiceUnquoteDecl{}   = "Unquoted declarations"
+declName NiceUnquoteDef{}    = "Unquoted definitions"
+declName NiceUnquoteData{}   = "Unquoted data types"
+declName NiceRecSig{}        = "Records"
+declName NiceDataSig{}       = "Data types"
+declName NiceFunClause{}     = "Functions without a type signature"
+declName FunSig{}            = "Type signatures"
+declName FunDef{}            = "Function definitions"
+declName NiceRecDef{}        = "Records"
+declName NiceDataDef{}       = "Data types"
+declName NiceLoneConstructor{} = "Constructors"
+declName NiceOpaque{}          = "Opaque blocks"
+
+
+data InMutual
+  = InMutual    -- ^ we are nicifying a mutual block
+  | NotInMutual -- ^ we are nicifying decls not in a mutual block
+    deriving (Eq, Show)
+
+-- | The kind of the forward declaration.
+
+data DataRecOrFun
+  = DataName
+    { _kindPosCheck :: PositivityCheck
+    , _kindUniCheck :: UniverseCheck
+    }
+    -- ^ Name of a data type
+  | RecName
+    { _kindPosCheck :: PositivityCheck
+    , _kindUniCheck :: UniverseCheck
+    , _kindForceEta :: ForceRecordEta
+    }
+    -- ^ Name of a record type
+  | FunName ArgInfo TerminationCheck CoverageCheck
+    -- ^ Name of a function.
+  deriving (Show, Generic)
+
+instance NFData DataRecOrFun
+
+-- Ignore pragmas when checking equality
+instance Eq DataRecOrFun where
+  (==) = sameKind
+
+sameKind :: DataRecOrFun -> DataRecOrFun -> Bool
+sameKind = curry \case
+  (DataName{} , DataName{}) -> True
+  (RecName{}  , RecName{} ) -> True
+  (FunName{}  , FunName{} ) -> True
+  _ -> False
+
+-- | Monoidal for 'DataName' and 'RecName'.
+--   Returns just first 'FunName' discarding the second one.
+mergeDataRecOrFun :: DataRecOrFun -> DataRecOrFun -> Maybe DataRecOrFun
+mergeDataRecOrFun = curry \case
+  (DataName pc uc , DataName pc' uc') -> Just $ DataName (pc <> pc') (uc <> uc')
+  (RecName  pc uc eta, RecName  pc' uc' eta') -> Just $ RecName  (pc <> pc') (uc <> uc') (eta <> eta')
+  (f@FunName{}    , FunName{}       ) -> Just f
+  _ -> Nothing
+
+instance Pretty DataRecOrFun where
+  pretty DataName{} = "data type"
+  pretty RecName{}  = "record type"
+  pretty FunName{}  = "function"
+
+isFunName :: DataRecOrFun -> Bool
+isFunName (FunName{}) = True
+isFunName _           = False
+
+terminationCheck :: DataRecOrFun -> TerminationCheck
+terminationCheck (FunName _ tc _) = tc
+terminationCheck _ = TerminationCheck
+
+coverageCheck :: DataRecOrFun -> CoverageCheck
+coverageCheck (FunName _ _ cc) = cc
+coverageCheck _ = YesCoverageCheck
+
+positivityCheck :: DataRecOrFun -> PositivityCheck
+positivityCheck (DataName pc _) = pc
+positivityCheck (RecName pc _ _)= pc
+positivityCheck (FunName _ _ _) = YesPositivityCheck
+
+mutualChecks :: DataRecOrFun -> MutualChecks
+mutualChecks k = MutualChecks [terminationCheck k] [coverageCheck k] [positivityCheck k]
+
+universeCheck :: DataRecOrFun -> UniverseCheck
+universeCheck (DataName _ uc) = uc
+universeCheck (RecName _ uc _)= uc
+universeCheck (FunName _ _ _) = YesUniverseCheck
+
+forceRecordEta :: DataRecOrFun -> ForceRecordEta
+forceRecordEta (DataName _ _)    = mempty
+forceRecordEta (RecName _ _ eta) = eta
+forceRecordEta (FunName _ _ _)   = mempty

@@ -1,72 +1,101 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Compiler.Treeless.Unused
   ( usedArguments
   , stripUnusedArguments
   ) where
 
-import Control.Arrow (first)
-import Control.Applicative
-import qualified Data.Set as Set
+import Prelude hiding (null, zip, zipWith)
+
 import Data.Maybe
 
+import Agda.Syntax.Common
+import Agda.Syntax.Common.Pretty   ( prettyShow )
 import Agda.Syntax.Treeless
 import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Substitute
 
-import Agda.Compiler.Treeless.Subst
-import Agda.Compiler.Treeless.Pretty
+import Agda.Compiler.Treeless.Pretty () -- instance only
 
-import Agda.Utils.Pretty (prettyShow)
+import Agda.Utils.Function ( iterateUntilM )
+import Agda.Utils.List     ( downFrom, takeExactly )
+import Agda.Utils.ListInf qualified as ListInf
+import Agda.Utils.Null
+import Agda.Utils.Singleton
+import qualified Agda.Utils.VarSet as VarSet
+import Agda.Utils.Zip
 
-usedArguments :: QName -> TTerm -> TCM [Bool]
-usedArguments q t = computeUnused q b (replicate n False)
+usedArguments :: QName -> TTerm -> TCM [ArgUsage]
+usedArguments q t = computeUnused q b (replicate n ArgUnused)
   where (n, b) = tLamView t
 
-computeUnused :: QName -> TTerm -> [Bool] -> TCM [Bool]
-computeUnused q t used = do
-  reportSLn "treeless.opt.unused" 50 $ "Unused approximation for " ++ prettyShow q ++ ": " ++
-                                       unwords [ if u then [x] else "_" | (x, u) <- zip ['a'..] used ]
+-- | Saturation algorithm, starting with all unused arguments
+--   and adding usages until fixed-point has been reached.
+
+computeUnused :: QName -> TTerm -> [ArgUsage] -> TCM [ArgUsage]
+computeUnused q t = iterateUntilM (==) $ \ used -> do
+
+  reportSLn "treeless.opt.unused" 50 $ concat
+    [ "Unused approximation for ", prettyShow q, ": "
+    , unwords [ if u == ArgUsed then [x] else "_" | (x, u) <- zip (ListInf.upFrom 'a') used ]
+    ]
+  -- Update usage information q to so far "best" value.
   setCompiledArgUse q used
+
+  -- The new usage information is the free variables of @t@,
+  -- computed under the current usage assumptions of the functions it calls.
   fv <- go t
-  let used' = [ Set.member i fv | (i, _) <- reverse $ zip [0..] used ]
-  if used == used' then return used'
-                   else computeUnused q t used'
+  return $ [ if VarSet.member i fv then ArgUsed else ArgUnused
+           | i <- downFrom (length used)
+           ]
   where
-    go t = case t of
-      TVar x    -> pure $ Set.singleton x
-      TPrim{}   -> pure Set.empty
-      TDef{}    -> pure Set.empty
-      TLit{}    -> pure Set.empty
-      TCon{}    -> pure Set.empty
+    go = \case
+      TVar x    -> pure $ singleton x
+      TPrim{}   -> pure empty
+      TDef{}    -> pure empty
+      TLit{}    -> pure empty
+      TCon{}    -> pure empty
 
       TApp (TDef f) ts -> do
-        used <- getCompiledArgUse f
-        Set.unions <$> sequence [ go t | (t, True) <- zip ts $ used ++ repeat True ]
+        used <- fromMaybe [] <$> getCompiledArgUse f
+        VarSet.unions <$> sequence [ go t | (t, ArgUsed) <- zip ts $ ListInf.pad used ArgUsed ]
 
-      TApp f ts -> Set.unions <$> mapM go (f : ts)
-      TLam b    -> underBinder <$> go b
-      TLet e b  -> Set.union <$> go e <*> (underBinder <$> go b)
-      TCase x _ d bs -> Set.insert x . Set.unions <$> ((:) <$> go d <*> mapM goAlt bs)
-      TUnit{}   -> pure Set.empty
-      TSort{}   -> pure Set.empty
-      TErased{} -> pure Set.empty
-      TError{}  -> pure Set.empty
+      TApp f ts  -> VarSet.unions <$> mapM go (f : ts)
+      TLam b     -> underBinder <$> go b
+      TLet _ e b -> do
+        uses <- go b
+        if | VarSet.member 0 uses -> VarSet.union (underBinder uses) <$> go e
+           | otherwise            -> pure (underBinder uses)
+      TCase x i d bs ->
+        let e    = caseErased i
+            cont = VarSet.unions <$> ((:) <$> go d <*> mapM (goAlt e) bs) in
+        case e of
+          Erased{}    -> cont
+          NotErased{} -> VarSet.insert x <$> cont
+      TUnit{}   -> pure empty
+      TSort{}   -> pure empty
+      TErased{} -> pure empty
+      TError{}  -> pure empty
+      TCoerce t -> go t
 
-    goAlt (TALit _   b) = go b
-    goAlt (TAGuard g b) = Set.union <$> go g <*> go b
-    goAlt (TACon _ a b) = underBinders a <$> go b
+    goAlt _ (TALit _   b) = go b
+    goAlt e (TAGuard g b) = case e of
+      NotErased{} -> VarSet.union <$> go g <*> go b
+      Erased{}    -> -- The guard will not be executed if the match
+                     -- is on an erased argument.
+                     go b
+    goAlt _ (TACon _ a b) = underBinders a <$> go b
 
     underBinder = underBinders 1
-    underBinders 0 = id
-    underBinders n = Set.filter (>= 0) . Set.mapMonotonic (subtract n)
+    underBinders n = VarSet.strengthen n
 
-stripUnusedArguments :: [Bool] -> TTerm -> TTerm
+stripUnusedArguments :: [ArgUsage] -> TTerm -> TTerm
 stripUnusedArguments used t = mkTLam m $ applySubst rho b
   where
     (n, b) = tLamView t
-    m      = length $ filter id used'
-    used'  = reverse $ take n $ used ++ repeat True
+    m      = length $ filter (== ArgUsed) used'
+    used'  = reverse $ takeExactly ArgUsed n used
     rho = computeSubst used'
-    computeSubst (False : bs) = TErased :# computeSubst bs
-    computeSubst (True  : bs) = liftS 1 $ computeSubst bs
-    computeSubst []           = idS
+    computeSubst (ArgUnused : bs) = TErased :# computeSubst bs
+    computeSubst (ArgUsed   : bs) = liftS 1 $ computeSubst bs
+    computeSubst []               = idS

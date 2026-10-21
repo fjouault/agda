@@ -1,86 +1,113 @@
-When releasing a new version of Agda, the following procedure can be
-followed:
+Tested with GHC 9.4.4 and `cabal-install 3.8.10`.
+
+When releasing the following procedure can be followed:
+
+* If necessary obtain and install the newest version of the standard
+  library and the cubical library for the `master` branch:
+
+    make fast-forward-std-lib
+    make fast-forward-cubical
+
+* Verify that GitHub workflows have no errors.
 
 * First, release a release candidate (see
-  notes/agda-releases-candidates).
+  notes/agda-stable-releases-candidates).
 
-* The $FILES variable represents the files where it is necessary to
-  change the version number.
+* Use the branch used for releasing the release candidate.
 
-    $FILES=
-      .ghci
-      Agda.cabal
-      default.nix
-      doc/user-manual/conf.py
-      mk/versions.mk
-      src/data/emacs-mode/agda2-mode.el
-      src/data/emacs-mode/agda2-mode-pkg.el
-      src/size-solver/size-solver.cabal
-      test/interaction/Issue1244a.out
-      test/interaction/Issue1244b.out
+* Finish the release notes in the CHANGELOG.
+
+* Run the `closed-issues-for-milestone` program for adding the list of
+  closed issues to the CHANGELOG.
+
+  The `closed-issues-for-milestone` program requires a GitHub access
+  token which can be generated from the GitHub site:
+
+  Settings ->
+  Developer settings ->
+  Personal access token ->
+  Tokens classic ->
+  Generate new token ->
+  Generate new token (classic)
+
+* Because some titles of some issues can generate new white-space
+  issues after running the `closed-issues-for-milestone` program, run
+
+    make check-whitespace
+
+  and fix the issues both in the CHANGELOG file and GitHub.
+
+* Update the README.md, if necessary.
+
+* Update the list of contributors if necessary.
+
+  Note: This is duplicated in the following locations:
+
+  - Agda.cabal
+  - doc/user-manual/conf.py
+  - doc/user-manual/team.rst
+  - LICENSE
+
+* Update the LICENSE file, if necessary.
+
+* Update Stackage resolvers, if necessary.
+
+* Update the copyright year range in
+
+  - Agda.cabal
+  - /doc/user-manual/conf.py
+  - LICENSE
+
+* Check the date and version in `/src/data/latex/agda.sty`.
 
 * Update in the bug tracker the milestone field of open issues to the
   next Agda version.
 
-* Verify that the Travis builds have no errors.
-
 * Get a clean Agda repository.
 
-    git clone git@github.com:agda/agda agda-release
+    export MAJOR_VERSION=<current-development-version-eg-2.4.2>
+    export VERSION=<current-released-version-eg-2.4.0.2>
+    git clone git@github.com:agda/agda.git agda-release
     cd agda-release
+    git switch master
 
-* If the current version in master is 2.5.0 the versions used in this
-  notes are:
+1) Replace in CHANGELOG.md the links to Read the Docs:
 
-    VERSION=<current-version-plus-0.0.1>
-    VERSION=2.5.1
+    agda.readthedocs.io/en/latest -> agda.readthedocs.io/en/v$MAJOR_VERSION
 
-    STABLE_BRANCH_VERSION=<two-first-digits-of-the-current-version>
-    STABLE_BRANCH_VERSION=2.5
+2) Update the Agda version
 
-    NEXT_VERSION=<current-version-plus-0.1.0>
-    NEXT_VERSION=2.6.0
+    ./src/release-tools/change-version.bash $VERSION $MAJOR_VERSION
 
-* Finish the CHANGELOG.
-
-* Update README.md, if necessary.
-
-* Update the LICENSE file, if necessary.
-
-  Note: the list of contributors is duplicated in the following locations:
-
-  - Agda.cabal
-  - doc/user-manual/license.rst
-  - doc/user-manual/conf.py
-
-* Update the version numbers to $VERSION in $FILES.
-
-* Obtain and install the standard library branch related to the Agda
-  new version.
+* Obtain and install the standard library and the cubical library for
+  the release branch:
 
     make up-to-date-std-lib
-
-* Add a second source-repository section to Agda.cabal:
-
-    source-repository this
-      type:     git
-      location: https://github.com/agda/agda.git
-      tag:      v$VERSION
-
-* Remove -Werror and -fprof-auto from Agda.cabal (this is required by
-  `cabal --check`).
+    make up-to-date-cubical
 
 * Run the test-suite:
 
     make compile-emacs-mode
     make test
 
-  Note that "compile-emacs-mode" invokes "agda-mode compile", which
-  should ensure that the Emacs mode can be compiled without errors or
+  Note that "compile-emacs-mode" invokes "agda-mode compile", which should
+  ensure that the Emacs mode can be compiled without errors or
   warnings (except for the "cl package required at runtime" warning).
 
-* Remove the Cabal tests-suites `agda-tests` and `internal-tests` from
-  Agda.cabal.
+* Test the user-manual in PDF:
+
+    make user-manual-pdf
+
+3) Remove the Cabal test-suite from Agda.cabal.
+
+4) Remove -Werror from Agda.cabal (this is required by `cabal
+   --check`).
+
+5) Remove unnecessary dependencies from stack-XYZ.yaml files:
+
+  + Remove QuickCheck dependency
+  + Remove tasty-* dependencies
+  + Remove the `packages` section.
 
 * Build source distributions:
 
@@ -88,100 +115,70 @@ followed:
     cabal check
     cabal sdist
 
-* Ensure that the package builds properly (with multiple versions of GHC if
-  possible) in Linux, MacOS X and Windows.
+* Build documentation for uploading to Hackage.
+
+    cabal haddock --haddock-for-hackage
+
+* Ensure that the package builds properly (with multiple versions of
+  GHC if possible) in Linux, macOS and Windows.
 
     BASE=`pwd`
     cd ${TMPDIR:-/tmp}
-    tar xzf $BASE/dist/Agda-$VERSION.tar.gz
-    cd Agda-$VERSION
-    cabal install
+    tar xzf $BASE/dist-newstyle/sdist/Agda-$MAJOR_VERSION.tar.gz
+    cd Agda-$MAJOR_VERSION
+    cabal install --program-suffix=-$MAJOR_VERSION
+    agda-$MAJOR_VERSION --version
+    agda-mode-$MAJOR_VERSION compile
 
-  Do not forget to test:
-
-  ** The Emacs mode
-
-* Tag the release (do not forget to record the changes above first):
+* Tag the relase (do not forget to record the changes above first):
 
     cd $BASE
-    git tag -a v$VERSION -m "Agda $VERSION release"
+    git tag -a v$MAJOR_VERSION -m "Agda $MAJOR_VERSION stable release"
 
-* Upload the Cabal package:
+* Upload the tarball and the documentation to Hackage:
 
     cd $BASE
-    cabal upload dist/Agda-$VERSION.tar.gz
+    cabal upload --publish dist-newstyle/sdist/Agda-$MAJOR_VERSION.tar.gz
+    cabal upload --publish -d dist-newstyle/Agda-$MAJOR_VERSION-docs.tar.gz
 
-* Is the documentation missing on Hackage (see #1940)? You can use the
-  `neil` program for uploading the documentation:
+* Revert changes made in 1), 2), 3) 4) and 5).
 
-    neil doc --username=YourHackageUsername
-
-* Restore the Cabal tests-suites `agda-tests` and `internal-tests`
-  from Agda.cabal.
-
-* Restore -Werror and -fprof-auto in Agda.cabal.
-
-* Remove the "this" source-repository section from the Cabal
-  file. (This would be unnecessary if we had two repositories, one
-  stable and one for development.)
-
-* Stable branch
-
-  ** Create the stable branch
-
-       git checkout -b stable-$STABLE_BRANCH_VERSION
-
-  ** Update the version numbers to $VERSION.1 in $FILES.
-
-  ** Add into the Makefile:
-
-      # --program-suffix is not for the executable name in
-      # $(BUILD_DIR)/build/, only for installing it into .cabal/bin
-      override CABAL_OPTS+=--program-suffix=-$(VERSION)
-
-      AGDA_MODE=agda-mode-$(VERSION)
-
-  ** Added stable-$STABLE_BRANCH_VERSION to the branches whitelist in
-     .travis.yml.
-
-  ** Update with stable-$STABLE_BRANCH_VERSION the branch used for
-     reporting the build status in README.md.
-
-  ** Add a new header to CHANGELOG.
-
-  ** Commit the above changes.
-
-  ** Merge the stable-$STABLE_BRANCH_VERSION branch.
-
-       git checkout master
-       git merge stable-$STABLE_BRANCH_VERSION
-
-* Update the version numbers to $NEXT_VERSION in $FILES.
-
-* Remove from the Makefile:
-
-    # --program-suffix is not for the executable name in
-    # $(BUILD_DIR)/build/, only for installing it into .cabal/bin
-    override CABAL_OPTS+=--program-suffix=-$(VERSION)
-
-    AGDA_MODE=agda-mode-$(VERSION)
-
-* Update with `master` the branch used for reporting the build status
-  in README.md.
-
-* Remove the release notes for the released version from
-  doc/release-notes and create a template for the next version.
-
-* Push all changes
+* Push all changes (in the release-$MAJOR_VERSION branch):
 
     git push --follow-tags
-    git checkout stable-$STABLE_BRANCH_VERSION
-    git push -u origin stable-$STABLE_BRANCH_VERSION
 
-* Disable force push on the stable-$STABLE_BRANCH_VERSION branch, see
+* New CHANGELOG (see Issue #4705):
 
-  https://help.github.com/articles/about-protected-branches/
-  https://github.com/agda/agda-stdlib/settings/branches
+  ** In a commit:
+
+     *** Move the CHANGELOG for $MAJOR_VERSION to a new entry in
+         doc/release-notes/<version-written-with-dashes>.md.
+
+     *** Add doc/release-notes/<version-written-with-dashes>.md. to
+         the extra-source-files field in Agda.cabal.
+
+  ** In a different commit: Create a new CHANGELOG file.
+
+* Deploy workflow
+
+  Update in src/github/workflows/deploy.yml the tag version to
+  v$MAJOR_VERSION.
+
+* Update Agda Manual on Readthedocs.org (see Issues #2844 and #3035)
+
+  ** You need Admin permissions on the Agda readthedocs.org project
+     (current admins: asr, andreasabel, phile314)
+
+  ** Go to readthedocs.org -> Agda Project -> Versions
+
+     and mark $MAJOR_VERSION as active
+
+  ** Go to readthedocs.org -> Agda Project -> Admin -> Advanced Settings
+
+     and set the default documentation version to $MAJOR_VERSION
+
+  ** If a release candidate was released then remove the associated
+     documentation.
 
 * Update the Agda Wiki:
 
@@ -192,44 +189,18 @@ followed:
 
      *** Update the last release information.
 
-     *** Update the stable version information.
-
   ** Update the Main page.
 
-* Update Agda Manual on Readthedocs.org
+  ** Is the current version of the standard library compatible with
+     the new version of Agda? If so, to update the standard library
+     page.
 
-  * You need Admin permissions on the Agda readthedocs.org project
-    (current admins: asr, andreasabel, phile314)
-
-  * Go to readthedocs.org -> Agda Project -> Admin -> Versions
-
-  * Mark $VERSION as active
-
-  * Set the default documentation version to $VERSION
+* If we are releasing a bux-fix release then deprecate in Hackage the
+  buggy version.
 
 * Announce the release of the new version on the Agda mailing lists
-  (users and developers).
+  (users and developers) and Agda Zulip.
 
-* Close in the bug tracker the milestone $VERSION.
+* Enable the released version of Agda on Stackage, if necessary.
 
-------------------------------------------------------------------------------
-Outdated (2016-04-16)
-
-* Disable sharing by default. Note that this change induces some
-  changes in the test suite.
-
-  N.B. that succeed/Issue1351.agda fails when sharing is disable.
-
-  ** Disable sharing by default in the Agda.Interaction.Options
-     module.
-
-  ** Change the message "(default: ON)" to "(default: OFF)" in the
-     above module.
-
-* Enable sharing by default. Note that this change induces some
-  changes in the test suite.
-
-  ** Enable sharing by default in the Agda.Interaction.Options module.
-
-  ** Change the message "(default: OFF)" to "(default: ON)" in the
-     above module.
+* Close in the bug tracker the milestone $MAJOR_VERSION.

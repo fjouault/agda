@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 -- | Lenses for 'CommandLineOptions' and 'PragmaOptions'.
 --
 --   Add as needed.
@@ -6,38 +8,18 @@
 
 module Agda.Interaction.Options.Lenses where
 
-import Control.Monad.State
-
 import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Monad.State
 import Agda.Interaction.Options
 
-import Agda.Utils.Lens
-import Agda.Utils.FileName
+import Agda.Utils.WithDefault (pattern Value)
 
 ---------------------------------------------------------------------------
 -- * Pragma options
 ---------------------------------------------------------------------------
 
-class LensPragmaOptions a where
-  getPragmaOptions :: a -> PragmaOptions
-  setPragmaOptions :: PragmaOptions -> a -> a
-  mapPragmaOptions :: (PragmaOptions -> PragmaOptions) -> a -> a
-
-  -- default implementations
-  setPragmaOptions     = mapPragmaOptions . const
-  mapPragmaOptions f a = setPragmaOptions (f $ getPragmaOptions a) a
-
-instance LensPragmaOptions CommandLineOptions where
-  getPragmaOptions = optPragmaOptions
-  setPragmaOptions opts st = st { optPragmaOptions = opts }
-
-instance LensPragmaOptions TCState where
-  getPragmaOptions = (^.stPragmaOptions)
-  setPragmaOptions = set stPragmaOptions
-
-modifyPragmaOptions :: (PragmaOptions -> PragmaOptions) -> TCM ()
-modifyPragmaOptions = modify . mapPragmaOptions
+modifyPragmaOptions :: MonadTCState m => (PragmaOptions -> PragmaOptions) -> m ()
+modifyPragmaOptions = modifyTC . mapPragmaOptions
 
 ---------------------------------------------------------------------------
 -- ** Verbosity in the local pragma options
@@ -53,18 +35,18 @@ class LensVerbosity a where
   mapVerbosity f a = setVerbosity (f $ getVerbosity a) a
 
 instance LensVerbosity PragmaOptions where
-  getVerbosity = optVerbose
-  setVerbosity is opts = opts { optVerbose = is }
+  getVerbosity = _optVerbose
+  setVerbosity is opts = opts { _optVerbose = is }
 
 instance LensVerbosity TCState where
   getVerbosity = getVerbosity . getPragmaOptions
   mapVerbosity = mapPragmaOptions . mapVerbosity
 
-modifyVerbosity :: (Verbosity -> Verbosity) -> TCM ()
-modifyVerbosity = modify . mapVerbosity
+modifyVerbosity :: MonadTCState m => (Verbosity -> Verbosity) -> m ()
+modifyVerbosity = modifyTC . mapVerbosity
 
-putVerbosity :: Verbosity -> TCM ()
-putVerbosity = modify . setVerbosity
+putVerbosity :: MonadTCState m => Verbosity -> m ()
+putVerbosity = modifyTC . setVerbosity
 
 ---------------------------------------------------------------------------
 -- * Command line options
@@ -87,8 +69,8 @@ instance LensCommandLineOptions TCState where
   getCommandLineOptions = getCommandLineOptions . stPersistentState
   mapCommandLineOptions = updatePersistentState . mapCommandLineOptions
 
-modifyCommandLineOptions :: (CommandLineOptions -> CommandLineOptions) -> TCM ()
-modifyCommandLineOptions = modify . mapCommandLineOptions
+modifyCommandLineOptions :: MonadTCState m => (CommandLineOptions -> CommandLineOptions) -> m ()
+modifyCommandLineOptions = modifyTC . mapCommandLineOptions
 
 ---------------------------------------------------------------------------
 -- ** Safe mode
@@ -107,7 +89,7 @@ class LensSafeMode a where
 
 instance LensSafeMode PragmaOptions where
   getSafeMode = optSafe
-  setSafeMode is opts = opts { optSafe = is }
+  setSafeMode is opts = opts { _optSafe = Value is } -- setSafeOption
 
 instance LensSafeMode CommandLineOptions where
   getSafeMode = getSafeMode . getPragmaOptions
@@ -121,64 +103,45 @@ instance LensSafeMode TCState where
   getSafeMode = getSafeMode . getCommandLineOptions
   mapSafeMode = mapCommandLineOptions . mapSafeMode
 
-modifySafeMode :: (SafeMode -> SafeMode) -> TCM ()
-modifySafeMode = modify . mapSafeMode
+modifySafeMode :: MonadTCState m => (SafeMode -> SafeMode) -> m ()
+modifySafeMode = modifyTC . mapSafeMode
 
-putSafeMode :: SafeMode -> TCM ()
-putSafeMode = modify . setSafeMode
-
+putSafeMode :: MonadTCState m => SafeMode -> m ()
+putSafeMode = modifyTC . setSafeMode
 
 ---------------------------------------------------------------------------
 -- ** Include directories
 ---------------------------------------------------------------------------
 
 class LensIncludePaths a where
-  getIncludePaths :: a -> [FilePath]
-  setIncludePaths :: [FilePath] -> a -> a
-  mapIncludePaths :: ([FilePath] -> [FilePath]) -> a -> a
-
   getAbsoluteIncludePaths :: a -> [AbsolutePath]
   setAbsoluteIncludePaths :: [AbsolutePath] -> a -> a
   mapAbsoluteIncludePaths :: ([AbsolutePath] -> [AbsolutePath]) -> a -> a
 
   -- default implementations
-  setIncludePaths     = mapIncludePaths . const
-  mapIncludePaths f a = setIncludePaths (f $ getIncludePaths a) a
   setAbsoluteIncludePaths     = mapAbsoluteIncludePaths . const
   mapAbsoluteIncludePaths f a = setAbsoluteIncludePaths (f $ getAbsoluteIncludePaths a) a
 
 instance LensIncludePaths CommandLineOptions where
-  getIncludePaths = optIncludePaths
-  setIncludePaths is opts = opts { optIncludePaths = is }
   getAbsoluteIncludePaths = optAbsoluteIncludePaths
   setAbsoluteIncludePaths is opts = opts { optAbsoluteIncludePaths = is }
 
 instance LensIncludePaths PersistentTCState where
-  getIncludePaths = getIncludePaths . getCommandLineOptions
-  mapIncludePaths = mapCommandLineOptions . mapIncludePaths
   getAbsoluteIncludePaths = getAbsoluteIncludePaths . getCommandLineOptions
   mapAbsoluteIncludePaths = mapCommandLineOptions . mapAbsoluteIncludePaths
 
 instance LensIncludePaths TCState where
-  getIncludePaths = getIncludePaths . getCommandLineOptions
-  mapIncludePaths = mapCommandLineOptions . mapIncludePaths
   getAbsoluteIncludePaths = getAbsoluteIncludePaths . getCommandLineOptions
   mapAbsoluteIncludePaths = mapCommandLineOptions . mapAbsoluteIncludePaths
 
-modifyIncludePaths :: ([FilePath] -> [FilePath]) -> TCM ()
-modifyIncludePaths = modify . mapIncludePaths
+modifyAbsoluteIncludePaths :: MonadTCState m => ([AbsolutePath] -> [AbsolutePath]) -> m ()
+modifyAbsoluteIncludePaths = modifyTC . mapAbsoluteIncludePaths
 
-putIncludePaths :: [FilePath] -> TCM ()
-putIncludePaths = modify . setIncludePaths
-
-modifyAbsoluteIncludePaths :: ([AbsolutePath] -> [AbsolutePath]) -> TCM ()
-modifyAbsoluteIncludePaths = modify . mapAbsoluteIncludePaths
-
-putAbsoluteIncludePaths :: [AbsolutePath] -> TCM ()
-putAbsoluteIncludePaths = modify . setAbsoluteIncludePaths
+putAbsoluteIncludePaths :: MonadTCState m => [AbsolutePath] -> m ()
+putAbsoluteIncludePaths = modifyTC . setAbsoluteIncludePaths
 
 ---------------------------------------------------------------------------
--- ** Include directories
+-- ** Verbosity
 ---------------------------------------------------------------------------
 
 type PersistentVerbosity = Verbosity
@@ -207,8 +170,8 @@ instance LensPersistentVerbosity TCState where
   getPersistentVerbosity = getPersistentVerbosity . getCommandLineOptions
   mapPersistentVerbosity = mapCommandLineOptions . mapPersistentVerbosity
 
-modifyPersistentVerbosity :: (PersistentVerbosity -> PersistentVerbosity) -> TCM ()
-modifyPersistentVerbosity = modify . mapPersistentVerbosity
+modifyPersistentVerbosity :: MonadTCState m => (PersistentVerbosity -> PersistentVerbosity) -> m ()
+modifyPersistentVerbosity = modifyTC . mapPersistentVerbosity
 
-putPersistentVerbosity :: PersistentVerbosity -> TCM ()
-putPersistentVerbosity = modify . setPersistentVerbosity
+putPersistentVerbosity :: MonadTCState m => PersistentVerbosity -> m ()
+putPersistentVerbosity = modifyTC . setPersistentVerbosity

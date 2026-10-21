@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 ------------------------------------------------------------------------
 -- Module name encoding
 ------------------------------------------------------------------------
@@ -7,7 +9,6 @@ module Agda.Compiler.MAlonzo.Encode
   ) where
 
 import Data.Char
-import Data.Function
 import qualified Data.List as List
 import qualified Agda.Utils.Haskell.Syntax as HS
 

@@ -5,8 +5,7 @@
 
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE TypeSynonymInstances #-}
+
 
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
@@ -89,7 +88,7 @@ rigidOrFlexN x n = (rigidOrFlex x) { offset = fromInteger $ n }
 
 -- * Testing
 
-simplify :: [Constraint] -> [Either String [Constraint]]
+simplify :: [Constraint] -> [Maybe [Constraint]]
 simplify = map (simplify1 (\ c -> return [c]))
 
 cs = simplify $ map parse

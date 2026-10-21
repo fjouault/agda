@@ -1,3 +1,5 @@
+{-# OPTIONS --backtracking-instance-search #-}
+
 module _ where
 
 module M (_ : Set₁) where

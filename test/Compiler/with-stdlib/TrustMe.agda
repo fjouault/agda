@@ -1,16 +1,20 @@
+{-# OPTIONS --guardedness #-}
+
 module TrustMe where
 
 open import Data.String
-open import Data.Unit using (⊤)
+open import Data.String.Unsafe
+open import Data.Unit.Polymorphic using (⊤)
 open import IO
-import IO.Primitive as Prim
+import IO.Primitive.Core as Prim
 open import Relation.Binary.PropositionalEquality
 open import Relation.Nullary
+open import Level using (0ℓ)
 
 -- Check that trustMe works.
 
-testTrustMe : IO ⊤
-testTrustMe with "apa" ≟ "apa"
+testTrustMe : IO {0ℓ} ⊤
+testTrustMe with "apa" ≡? "apa"
 ... | yes refl = putStrLn "Yes!"
 ... | no  _    = putStrLn "No."
 

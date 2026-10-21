@@ -1,154 +1,90 @@
-{-# LANGUAGE CPP              #-}
-
+{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Agda.TypeChecking.Reduce.Monad
-  ( constructorForm
-  , enterClosure
-  , underAbstraction_
+  ( enterClosure
   , getConstInfo
-  , isInstantiatedMeta
-  , lookupMeta
   , askR, applyWhenVerboseS
   ) where
 
 import Prelude hiding (null)
 
-import Control.Arrow ((***), first, second)
-import Control.Applicative hiding (empty)
-import Control.Monad.Reader
-
 import qualified Data.Map as Map
-import Data.Maybe
-import Data.Monoid
 
-import Debug.Trace
 import System.IO.Unsafe
 
-import Agda.Syntax.Common
-import Agda.Syntax.Position
+import Agda.Syntax.Common.Pretty () --instance only
 import Agda.Syntax.Internal
-import Agda.TypeChecking.Monad hiding
-  ( enterClosure, underAbstraction_, underAbstraction, addCtx, mkContextEntry,
-    isInstantiatedMeta, verboseS, typeOfConst, lookupMeta )
-import Agda.TypeChecking.Monad.Builtin hiding ( constructorForm )
+
+import Agda.TypeChecking.Monad
 import Agda.TypeChecking.Substitute
-import Agda.Interaction.Options
 
-import qualified Agda.Utils.HashMap as HMap
-import Agda.Utils.Lens
+import Agda.Utils.Maybe
 import Agda.Utils.Monad
-import Agda.Utils.Null
-import Agda.Utils.Pretty
-
-#include "undefined.h"
-import Agda.Utils.Impossible
-
-gets :: (TCState -> a) -> ReduceM a
-gets f = f . redSt <$> ReduceM ask
-
-useR :: Lens' a TCState -> ReduceM a
-useR l = gets (^.l)
-
-askR :: ReduceM ReduceEnv
-askR = ReduceM ask
-
-localR :: (ReduceEnv -> ReduceEnv) -> ReduceM a -> ReduceM a
-localR f = ReduceM . local f . unReduceM
-
-instance HasOptions ReduceM where
-  pragmaOptions      = useR stPragmaOptions
-  commandLineOptions = do
-    p  <- useR stPragmaOptions
-    cl <- gets $ stPersistentOptions . stPersistentState
-    return $ cl{ optPragmaOptions = p }
 
 instance HasBuiltins ReduceM where
-  getBuiltinThing b = liftM2 mplus (Map.lookup b <$> useR stLocalBuiltins)
-                                   (Map.lookup b <$> useR stImportedBuiltins)
+  getBuiltinThing b =
+    liftM2 (unionMaybeWith unionBuiltin)
+      (Map.lookup b <$> useR stLocalBuiltins)
+      (Map.lookup b <$> useR stImportedBuiltins)
 
-constructorForm :: Term -> ReduceM Term
-constructorForm v = do
-  mz <- getBuiltin' builtinZero
-  ms <- getBuiltin' builtinSuc
-  return $ fromMaybe v $ constructorForm' mz ms v
-
-enterClosure :: Closure a -> (a -> ReduceM b) -> ReduceM b
-enterClosure (Closure sig env scope pars x) f = localR (mapRedEnvSt inEnv inState) (f x)
-  where
-    inEnv   e = env { envAllowDestructiveUpdate = envAllowDestructiveUpdate e }
-    inState s =
-      -- TODO: use the signature here? would that fix parts of issue 118?
-      set stScope scope $ set stModuleParameters pars s
-
-withFreshR :: HasFresh i => (i -> ReduceM a) -> ReduceM a
+withFreshR :: (ReadTCState m, HasFresh i) => (i -> m a) -> m a
 withFreshR f = do
-  s <- gets id
+  s <- getTCState
   let (i, s') = nextFresh s
-  localR (mapRedSt $ const s') (f i)
+  withTCState (const s') (f i)
 
-withFreshName :: Range -> ArgName -> (Name -> ReduceM a) -> ReduceM a
-withFreshName r s k = withFreshR $ \i -> k (mkName r i s)
+instance MonadAddContext ReduceM where
+  withFreshName r s k = withFreshR $ \i -> k (mkName r i s)
 
-withFreshName_ :: ArgName -> (Name -> ReduceM a) -> ReduceM a
-withFreshName_ = withFreshName noRange
+  addCtx = defaultAddCtx
 
-mkContextEntry :: Dom (Name, Type) -> (ContextEntry -> ReduceM a) -> ReduceM a
-mkContextEntry x k = withFreshR $ \i -> k (Ctx i x)
+  addLetBinding' = defaultAddLetBinding'
 
-addCtx :: Name -> Dom Type -> ReduceM a -> ReduceM a
-addCtx x a ret = do
-  ctx <- asks $ map (nameConcrete . fst . unDom . ctxEntry) . envContext
-  let x' = head $ filter (notTaken ctx) $ iterate nextName x
-  mkContextEntry ((x',) <$> a) $ \ce ->
-    local (\e -> e { envContext = ce : envContext e }) ret
-      -- let-bindings keep track of own their context
-  where
-    notTaken xs x = isNoName x || nameConcrete x `notElem` xs
+  {-# INLINE updateContext #-}
+  updateContext rho f ret = withFreshR \chkpt ->
+    localTC (  over' eContext f
+             . set eCurrentCheckpoint chkpt
+             . over eCheckpoints (Map.insert chkpt IdS . fmap (applySubst rho)))
+            ret
 
-underAbstraction :: Subst t a => Dom Type -> Abs a -> (a -> ReduceM b) -> ReduceM b
-underAbstraction _ (NoAbs _ v) f = f v
-underAbstraction t a f =
-  withFreshName_ (realName $ absName a) $ \x -> addCtx x t $ f (absBody a)
-  where
-    realName s = if isNoName s then "x" else s
+  addLocalRewrite = defaultAddLocalRewrite
 
-underAbstraction_ :: Subst t a => Abs a -> (a -> ReduceM b) -> ReduceM b
-underAbstraction_ = underAbstraction dummyDom
-
-lookupMeta :: MetaId -> ReduceM MetaVariable
-lookupMeta i = fromMaybe __IMPOSSIBLE__ . Map.lookup i <$> useR stMetaStore
-
-isInstantiatedMeta :: MetaId -> ReduceM Bool
-isInstantiatedMeta i = do
-  mv <- lookupMeta i
-  return $ case mvInstantiation mv of
-    InstV{} -> True
-    _       -> False
-
--- | Apply a function if a certain verbosity level is activated.
---
---   Precondition: The level must be non-negative.
-{-# SPECIALIZE applyWhenVerboseS :: VerboseKey -> Int -> (ReduceM a -> ReduceM a) -> ReduceM a-> ReduceM a #-}
-applyWhenVerboseS :: HasOptions m => VerboseKey -> Int -> (m a -> m a) -> m a -> m a
-applyWhenVerboseS k n f a = ifM (hasVerbosity k n) (f a) a
+        -- let-bindings keep track of own their context
 
 instance MonadDebug ReduceM where
 
-  traceDebugMessage n s cont = do
-    ReduceEnv env st <- askR
+  traceDebugMessage k n s cont = do
+    ReduceEnv env st _ _ <- askR
     unsafePerformIO $ do
-      _ <- runTCM env st $ displayDebugMessage n s
+      _ <- runTCM env st $ traceDebugMessage k n s $ pure ()
       return $ cont
 
   formatDebugMessage k n d = do
-    ReduceEnv env st <- askR
+    ReduceEnv env st _ _ <- askR
     unsafePerformIO $ do
       (s , _) <- runTCM env st $ formatDebugMessage k n d
       return $ return s
 
+#ifdef DEBUG
+  verboseBracket k n s = applyWhenVerboseS k n $
+    bracket_ (openVerboseBracket k n s) (const $ closeVerboseBracket k n)
+#else
+  verboseBracket k n s ma = ma
+  {-# INLINE verboseBracket #-}
+#endif
+
+  getVerbosity      = defaultGetVerbosity
+  getProfileOptions = defaultGetProfileOptions
+  isDebugPrinting   = defaultIsDebugPrinting
+  nowDebugPrinting  = defaultNowDebugPrinting
+
 instance HasConstInfo ReduceM where
-  getRewriteRulesFor = defaultGetRewriteRulesFor (gets id)
+  getGlobalRewriteRulesFor = defaultGetGlobalRewriteRulesFor
+  getLocalRewriteRulesFor  = defaultGetLocalRewriteRulesFor
   getConstInfo' q = do
-    ReduceEnv env st <- askR
+    ReduceEnv env st _ _ <- askR
     defaultGetConstInfo st env q
+
+instance PureTCM ReduceM where

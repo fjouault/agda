@@ -1,116 +1,376 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE NondecreasingIndentation #-}
 
 module Agda.TypeChecking.Monad.MetaVars where
 
 import Prelude hiding (null)
 
-import Control.Applicative hiding (empty)
-import Control.Monad.State
-import Control.Monad.Reader
-import Control.Monad.Writer
+import Control.Monad.Except         ( ExceptT, MonadError )
+import Control.Monad.State          ( StateT, execStateT, get, put )
+import Control.Monad.Trans          ( MonadTrans, lift )
+import Control.Monad.Trans.Identity ( IdentityT )
+import Control.Monad.Trans.Maybe    ( MaybeT )
+import Control.Monad.Reader         ( ReaderT(ReaderT), runReaderT )
+import Control.Monad.Writer         ( WriterT, execWriterT, tell )
 
-import Data.Map (Map)
-import qualified Data.Map as Map
+import qualified Data.HashMap.Strict as HMap
+import qualified Data.List as List
+import qualified Data.Map.Strict as MapS
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Foldable as Fold
 
+import GHC.Stack (HasCallStack)
+
 import Agda.Syntax.Common
+import Agda.Syntax.Info ( MetaKind (InstanceMeta, UnificationMeta), MetaNameSuggestion )
 import Agda.Syntax.Internal
-import Agda.Syntax.Internal.Generic
+import Agda.Syntax.Internal.MetaVars
 import Agda.Syntax.Position
 import Agda.Syntax.Scope.Base
+import Agda.Syntax.Common.Pretty (pretty, prettyShow, (<+>))
 
 import Agda.TypeChecking.Monad.Base
+import Agda.TypeChecking.Monad.Builtin (HasBuiltins)
 import Agda.TypeChecking.Monad.Trace
 import Agda.TypeChecking.Monad.Closure
-import Agda.TypeChecking.Monad.Debug (reportSLn)
+import Agda.TypeChecking.Monad.Constraints (MonadConstraint(..))
+import Agda.TypeChecking.Monad.Debug
+  (MonadDebug, reportSLn, reportSDoc, __IMPOSSIBLE_VERBOSE__)
 import Agda.TypeChecking.Monad.Context
+import Agda.TypeChecking.Monad.Signature (HasConstInfo)
+import Agda.TypeChecking.Monad.State
 import Agda.TypeChecking.Substitute
 import {-# SOURCE #-} Agda.TypeChecking.Telescope
 
+import qualified Agda.Utils.BiMap as BiMap
 import Agda.Utils.Functor ((<.>))
 import Agda.Utils.Lens
-import Agda.Utils.List
+import Agda.Utils.List (nubOn)
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Null
 import Agda.Utils.Permutation
-import Agda.Utils.Pretty (prettyShow)
 import Agda.Utils.Tuple
-import Agda.Utils.Size
 import qualified Agda.Utils.Maybe.Strict as Strict
+import Agda.Utils.StrictReader qualified as Strict
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
+-- | Various classes of metavariables.
+
+data MetaClass =
+    Records
+    -- ^ Meta variables of record type.
+  | SingletonRecords
+    -- ^ Meta variables of \"hereditarily singleton\" record type.
+  | Levels
+    -- ^ Meta variables of level type, if type-in-type is activated.
+  deriving (Eq, Enum, Bounded, Show)
+
+-- | All possible metavariable classes.
+
+allMetaClasses :: [MetaClass]
+allMetaClasses = [minBound .. maxBound]
+
+data KeepMetas = KeepMetas | RollBackMetas
+
+-- | Monad service class for creating, solving and eta-expanding of
+--   metavariables.
+class ( MonadConstraint m
+      , MonadReduce m
+      , MonadAddContext m
+      , MonadTCEnv m
+      , ReadTCState m
+      , HasBuiltins m
+      , HasConstInfo m
+      , MonadDebug m
+      ) => MonadMetaSolver m where
+  -- | Generate a new meta variable with some instantiation given.
+  --   For instance, the instantiation could be a 'PostponedTypeCheckingProblem'.
+  newMeta' :: MetaInstantiation -> Frozen -> MetaInfo -> MetaPriority -> Permutation ->
+              Judgement a -> m MetaId
+
+  -- * Solve constraint @x vs = v@.
+
+  -- | Assign to an open metavar which may not be frozen.
+  --   First check that metavar args are in pattern fragment.
+  --     Then do extended occurs check on given thing.
+  --
+  --   Assignment is aborted by throwing a @PatternErr@ via a call to
+  --   @patternViolation@.  This error is caught by @catchConstraint@
+  --   during equality checking (@compareAtom@) and leads to
+  --   restoration of the original constraints.
+  assignV :: CompareDirection -> MetaId -> Args -> Term -> CompareAs -> m ()
+
+  -- | Directly instantiate the metavariable. Skip pattern check,
+  -- occurs check and frozen check. Used for eta expanding frozen
+  -- metas.
+  assignTerm' :: MetaId -> [Arg ArgName] -> Term -> m ()
+
+  -- | Eta-expand a local meta-variable, if it is of the specified
+  -- class. Don't do anything if the meta-variable is a blocked term.
+  etaExpandMeta :: [MetaClass] -> MetaId -> m ()
+
+  -- | Update the status of the metavariable
+  updateMetaVar :: MetaId -> (MetaVariable -> MetaVariable) -> m ()
+
+  -- | 'speculateMetas fallback m' speculatively runs 'm', but if the
+  --    result is 'RollBackMetas' any changes to metavariables are
+  --    rolled back and 'fallback' is run instead.
+  speculateMetas :: m () -> m KeepMetas -> m ()
+
+instance MonadMetaSolver m => MonadMetaSolver (ReaderT r m) where
+  newMeta' inst f i p perm j = lift $ newMeta' inst f i p perm j
+  assignV dir m us v cmp = lift $ assignV dir m us v cmp
+  assignTerm' m us v = lift $ assignTerm' m us v
+  etaExpandMeta k m = lift $ etaExpandMeta k m
+  updateMetaVar m f = lift $ updateMetaVar m f
+  speculateMetas fallback m = ReaderT $ \x -> speculateMetas (runReaderT fallback x) (runReaderT m x)
+
+instance MonadMetaSolver m => MonadMetaSolver (Strict.ReaderT r m) where
+  {-# INLINE newMeta' #-}
+  newMeta' inst f i p perm j = lift $ newMeta' inst f i p perm j
+  {-# INLINE assignV #-}
+  assignV dir m us v cmp = lift $ assignV dir m us v cmp
+  {-# INLINE assignTerm' #-}
+  assignTerm' m us v = lift $ assignTerm' m us v
+  {-# INLINE etaExpandMeta #-}
+  etaExpandMeta k m = lift $ etaExpandMeta k m
+  {-# INLINE updateMetaVar #-}
+  updateMetaVar m f = lift $ updateMetaVar m f
+  {-# INLINE speculateMetas #-}
+  speculateMetas fallback m =
+    Strict.ReaderT (\x -> speculateMetas (Strict.runReaderT fallback x)
+                                         (Strict.runReaderT m x))
+
 -- | Switch off assignment of metas.
-dontAssignMetas :: TCM a -> TCM a
+dontAssignMetas :: (MonadTCEnv m, MonadDebug m) => m a -> m a
 dontAssignMetas cont = do
   reportSLn "tc.meta" 45 $ "don't assign metas"
-  local (\ env -> env { envAssignMetas = False }) cont
+  localTC (set eAssignMetas False) cont
 
--- | Get the meta store.
-getMetaStore :: TCM MetaStore
-getMetaStore = use stMetaStore
+-- | Is the meta-variable from another top-level module?
 
-modifyMetaStore :: (MetaStore -> MetaStore) -> TCM ()
-modifyMetaStore f = stMetaStore %= f
+isRemoteMeta :: ReadTCState m => m (MetaId -> Bool)
+isRemoteMeta = do
+  h <- currentModuleNameHash
+  return (\m -> h /= metaModule m)
+
+-- | If another meta-variable is created, then it will get this
+-- 'MetaId' (unless the state is changed too much, for instance by
+-- 'setTopLevelModule').
+
+nextLocalMeta :: ReadTCState m => m MetaId
+nextLocalMeta = useR stFreshMetaId
+
+-- | Pairs of local meta-stores.
+
+data LocalMetaStores = LocalMetaStores
+  { openMetas   :: !LocalMetaStore
+    -- ^ A 'MetaStore' containing open meta-variables.
+  , solvedMetas :: !LocalMetaStore
+    -- ^ A 'MetaStore' containing instantiated meta-variables.
+  }
 
 -- | Run a computation and record which new metas it created.
-metasCreatedBy :: TCM a -> TCM (a, Set MetaId)
+metasCreatedBy ::
+  forall m a. ReadTCState m => m a -> m (a, LocalMetaStores)
 metasCreatedBy m = do
-  before <- Map.keysSet <$> use stMetaStore
-  a <- m
-  after  <- Map.keysSet <$> use stMetaStore
-  return (a, after Set.\\ before)
+  !nextMeta <- nextLocalMeta
+  a         <- m
+  os        <- created stOpenMetaStore   nextMeta
+  ss        <- created stSolvedMetaStore nextMeta
+  return (a, LocalMetaStores { openMetas = os, solvedMetas = ss })
+  where
+  created :: Lens' TCState LocalMetaStore -> MetaId -> m LocalMetaStore
+  created store next = do
+    ms <- useTC store
+    return $ case MapS.splitLookup next ms of
+      (_, Nothing, ms) -> ms
+      (_, Just m,  ms) -> MapS.insert next m ms
 
--- | Lookup a meta variable
-lookupMeta :: MetaId -> TCM MetaVariable
-lookupMeta m = fromMaybeM failure $ Map.lookup m <$> getMetaStore
-  where failure = fail $ "no such meta variable " ++ prettyShow m
+-- | Find information about the given local meta-variable, if any.
+{-# SPECIALIZE lookupLocalMeta' :: MetaId -> TCM (Maybe MetaVariable) #-}
+lookupLocalMeta' :: ReadTCState m => MetaId -> m (Maybe MetaVariable)
+lookupLocalMeta' m = do
+  tc <- getTCState
+  case MapS.lookup m (tc ^. stSolvedMetaStore) of
+    mv@Just{} -> return mv
+    Nothing   -> pure $! MapS.lookup m (tc ^. stOpenMetaStore)
 
-updateMetaVar :: MetaId -> (MetaVariable -> MetaVariable) -> TCM ()
-updateMetaVar m f = modifyMetaStore $ Map.adjust f m
+-- | Find information about the given local meta-variable.
 
-getMetaPriority :: MetaId -> TCM MetaPriority
-getMetaPriority = mvPriority <.> lookupMeta
+{-# SPECIALIZE lookupLocalMeta :: MetaId -> TCM MetaVariable #-}
+lookupLocalMeta ::
+  (HasCallStack, MonadDebug m, ReadTCState m) =>
+  MetaId -> m MetaVariable
+lookupLocalMeta m =
+  fromMaybeM (__IMPOSSIBLE_VERBOSE__ err) $ lookupLocalMeta' m
+  where
+  err = "no such local meta-variable " ++ prettyShow m
 
-{- UNUSED
-getMetaRelevance :: MetaId -> TCM Relevance
-getMetaRelevance x = miRelevance . mvInfo <$> lookupMeta x
--}
+-- | Find information about the (local or remote) meta-variable, if
+-- any.
+--
+-- If no meta-variable is found, then the reason could be that the
+-- dead-code elimination
+-- ('Agda.TypeChecking.DeadCode.eliminateDeadCode') failed to find the
+-- meta-variable, perhaps because some 'NamesIn' instance is
+-- incorrectly defined.
 
-isSortMeta :: MetaId -> TCM Bool
-isSortMeta m = isSortMeta_ <$> lookupMeta m
+{-# SPECIALIZE lookupMeta :: MetaId -> TCM (Maybe (Either RemoteMetaVariable MetaVariable)) #-}
+lookupMeta ::
+  ReadTCState m =>
+  MetaId -> m (Maybe (Either RemoteMetaVariable MetaVariable))
+lookupMeta m = do
+  mv <- lookupLocalMeta' m
+  case mv of
+    Just mv -> return (Just (Right mv))
+    Nothing -> fmap Left . HMap.lookup m <$> useR stImportedMetaStore
+
+-- | Find the meta-variable's instantiation.
+
+{-# SPECIALIZE lookupMetaInstantiation :: MetaId -> TCM MetaInstantiation #-}
+lookupMetaInstantiation ::
+  ReadTCState m => MetaId -> m MetaInstantiation
+lookupMetaInstantiation m = do
+  mi <- lookupMeta m
+  case mi of
+    Just (Left mv)  -> return (InstV $ rmvInstantiation mv)
+    Just (Right mv) -> return (mvInstantiation mv)
+    Nothing         -> __IMPOSSIBLE__
+
+-- | Find the meta-variable's judgement.
+
+lookupMetaJudgement :: ReadTCState m => MetaId -> m (Judgement MetaId)
+lookupMetaJudgement m = do
+  mi <- lookupMeta m
+  case mi of
+    Just (Left mv)  -> return (rmvJudgement mv)
+    Just (Right mv) -> return (mvJudgement mv)
+    Nothing         -> __IMPOSSIBLE__
+
+-- | Find the meta-variable's modality.
+
+lookupMetaModality :: ReadTCState m => MetaId -> m Modality
+lookupMetaModality m = do
+  mi <- lookupMeta m
+  case mi of
+    Just (Left mv)  -> return (rmvModality mv)
+    Just (Right mv) -> return (getModality mv)
+    Nothing         -> __IMPOSSIBLE__
+
+{-# INLINE metaType #-}
+-- | The type of a term or sort meta-variable.
+metaType :: ReadTCState m => MetaId -> m Type
+metaType x = jMetaType <$> lookupMetaJudgement x
+
+-- | Update the information associated with a local meta-variable.
+updateMetaVarTCM ::
+  HasCallStack => MetaId -> (MetaVariable -> MetaVariable) -> TCM ()
+updateMetaVarTCM m f = do
+  mv <- lookupLocalMeta' m
+  case mv of
+    Nothing -> do
+      mv <- lookupMeta m
+      case mv of
+        Nothing -> __IMPOSSIBLE_VERBOSE__
+                     ("Meta-variable not found: " ++ prettyShow m)
+        Just{}  -> __IMPOSSIBLE_VERBOSE__
+                     ("Attempt to update remote meta-variable: " ++
+                      prettyShow m)
+    Just mv -> do
+      let mv'    = f mv
+          insert = (`modifyTCLens` MapS.insert m mv')
+          delete = (`modifyTCLens` MapS.delete m)
+      case ( isOpenMeta (mvInstantiation mv)
+           , isOpenMeta (mvInstantiation mv')
+           ) of
+        (True,  True)  -> insert stOpenMetaStore
+        (False, False) -> insert stSolvedMetaStore
+        (True,  False) -> do
+          delete stOpenMetaStore
+          insert stSolvedMetaStore
+        (False, True)  -> __IMPOSSIBLE__
+
+-- | Insert a new meta-variable with associated information into the
+-- local meta store.
+insertMetaVar :: MetaId -> MetaVariable -> TCM ()
+insertMetaVar m mv
+  | isOpenMeta (mvInstantiation mv) = insert stOpenMetaStore
+  | otherwise                       = insert stSolvedMetaStore
+  where
+  insert = (`modifyTCLens` MapS.insert m mv)
+
+{-# INLINE getMetaPriority #-}
+-- | Returns the 'MetaPriority' of the given local meta-variable.
+getMetaPriority ::
+  (HasCallStack, MonadDebug m, ReadTCState m) =>
+  MetaId -> m MetaPriority
+getMetaPriority = mvPriority <.> lookupLocalMeta
+
+isSortMeta :: ReadTCState m => MetaId -> m Bool
+isSortMeta m = isSortJudgement <$> lookupMetaJudgement m
 
 isSortMeta_ :: MetaVariable -> Bool
-isSortMeta_ mv = case mvJudgement mv of
-    HasType{} -> False
-    IsSort{}  -> True
+isSortMeta_ mv = isSortJudgement (mvJudgement mv)
 
-getMetaType :: MetaId -> TCM Type
+isSortJudgement :: Judgement a -> Bool
+isSortJudgement HasType{} = False
+isSortJudgement IsSort{}  = True
+
+-- | If a meta variable is still open, what is its kind?
+--
+metaInstantiationToMetaKind :: MetaInstantiation -> MetaKind
+metaInstantiationToMetaKind = \case
+  OpenMeta k                     -> k
+  InstV{}                        -> empty
+  BlockedConst{}                 -> empty
+  PostponedTypeCheckingProblem{} -> empty
+
+{-# SPECIALIZE getMetaType :: MetaId -> TCM Type #-}
+getMetaType :: ReadTCState m => MetaId -> m Type
 getMetaType m = do
-  mv <- lookupMeta m
-  return $ case mvJudgement mv of
+  j <- lookupMetaJudgement m
+  return $ case j of
     HasType{ jMetaType = t } -> t
     IsSort{}  -> __IMPOSSIBLE__
 
--- | Given a meta, return the type applied to the current context.
-getMetaTypeInContext :: MetaId -> TCM Type
+{-# SPECIALIZE getMetaContextArgs :: MetaVariable -> TCM Args #-}
+-- | Compute the context variables that a local meta-variable should
+-- be applied to, accounting for pruning.
+getMetaContextArgs :: MonadTCEnv m => MetaVariable -> m Args
+getMetaContextArgs MetaVar{ mvPermutation = p } = do
+  args <- getContextArgs
+  return $ permute (takeP (length args) p) args
+
+{-# SPECIALIZE getMetaTypeInContext :: MetaId -> TCM Type #-}
+-- | Given a local meta-variable, return the type applied to the
+-- current context.
+getMetaTypeInContext ::
+  (HasBuiltins m, HasCallStack, MonadDebug m, MonadReduce m) =>
+  MetaId -> m Type
 getMetaTypeInContext m = do
-  MetaVar{ mvJudgement = j, mvPermutation = p } <- lookupMeta m
+  mv@MetaVar{ mvJudgement = j } <- lookupLocalMeta m
   case j of
-    HasType{ jMetaType = t } -> do
-      vs <- getContextArgs
-      piApplyM t $ permute (takeP (size vs) p) vs
+    HasType{ jMetaType = t } -> piApplyM t =<< getMetaContextArgs mv
     IsSort{}                 -> __IMPOSSIBLE__
+
+{-# SPECIALIZE isGeneralizableMeta :: MetaId -> TCM DoGeneralize #-}
+-- | Is it a local meta-variable that might be generalized?
+isGeneralizableMeta ::
+  (HasCallStack, MonadDebug m, ReadTCState m) =>
+  MetaId -> m DoGeneralize
+isGeneralizableMeta x =
+  unArg . miGeneralizable . mvInfo <$> lookupLocalMeta x
 
 -- | Check whether all metas are instantiated.
 --   Precondition: argument is a meta (in some form) or a list of metas.
 class IsInstantiatedMeta a where
-  isInstantiatedMeta :: a -> TCM Bool
+  isInstantiatedMeta :: (ReadTCState m) => a -> m Bool
+
+{-# SPECIALIZE isInstantiatedMeta :: Term -> TCM Bool #-}
+{-# SPECIALIZE isInstantiatedMeta :: Type -> TCM Bool #-}
 
 instance IsInstantiatedMeta MetaId where
   isInstantiatedMeta m = isJust <$> isInstantiatedMeta' m
@@ -118,23 +378,20 @@ instance IsInstantiatedMeta MetaId where
 instance IsInstantiatedMeta Term where
   isInstantiatedMeta = loop where
    loop v =
-    case ignoreSharing v of
+    case v of
       MetaV x _  -> isInstantiatedMeta x
       DontCare v -> loop v
       Level l    -> isInstantiatedMeta l
       Lam _ b    -> isInstantiatedMeta b
-      Con _ _ vs -> isInstantiatedMeta vs
+      Con _ _ es | Just vs <- allApplyElims es -> isInstantiatedMeta vs
       _          -> __IMPOSSIBLE__
 
 instance IsInstantiatedMeta Level where
-  isInstantiatedMeta (Max ls) = isInstantiatedMeta ls
+  isInstantiatedMeta (Max n ls) | n == 0 = isInstantiatedMeta ls
+  isInstantiatedMeta _ = __IMPOSSIBLE__
 
 instance IsInstantiatedMeta PlusLevel where
   isInstantiatedMeta (Plus n l) | n == 0 = isInstantiatedMeta l
-  isInstantiatedMeta _ = __IMPOSSIBLE__
-
-instance IsInstantiatedMeta LevelAtom where
-  isInstantiatedMeta (MetaLevel x es) = isInstantiatedMeta x
   isInstantiatedMeta _ = __IMPOSSIBLE__
 
 instance IsInstantiatedMeta a => IsInstantiatedMeta [a] where
@@ -150,82 +407,184 @@ instance IsInstantiatedMeta a => IsInstantiatedMeta (Arg a) where
 instance IsInstantiatedMeta a => IsInstantiatedMeta (Abs a) where
   isInstantiatedMeta = isInstantiatedMeta . unAbs
 
-isInstantiatedMeta' :: MetaId -> TCM (Maybe Term)
+{-# SPECIALIZE isInstantiatedMeta' :: MetaId -> TCM (Maybe Term) #-}
+isInstantiatedMeta' :: (ReadTCState m) => MetaId -> m (Maybe Term)
 isInstantiatedMeta' m = do
-  mv <- lookupMeta m
-  return $ case mvInstantiation mv of
-    InstV tel v -> Just $ foldr mkLam v tel
-    _           -> Nothing
+  inst <- lookupMetaInstantiation m
+  return $ case inst of
+    InstV inst -> Just $ foldr mkLam (instBody inst) (instTel inst)
+    _          -> Nothing
 
-
--- | Returns every meta-variable occurrence in the given type, except
--- for those in 'Sort's.
-allMetas :: TermLike a => a -> [MetaId]
-allMetas = foldTerm metas
+-- | Returns all metavariables in a constraint. Slightly complicated by the
+--   fact that blocked terms are represented by two meta variables. To find the
+--   second one we need to look up the meta listeners for the one in the
+--   UnBlock constraint.
+--   This is used for the purpose of deciding if a metavariable is constrained or if it can be
+--   generalized over (see Agda.TypeChecking.Generalize).
+constraintMetas :: Constraint -> TCM (Set MetaId)
+constraintMetas = \case
+    -- We don't use allMetas here since some constraints should not stop us from generalizing. For
+    -- instance CheckSizeLtSat (see #3694). We also have to check meta listeners to get metas of
+    -- UnBlock constraints.
+    -- #5147: Don't count metas in the type of a constraint. For instance the constraint u = v : t
+    -- should not stop us from generalize metas in t, since we could never solve those metas based
+    -- on that constraint alone.
+      ValueCmp _ _ u v         -> gatherMetas (u, v)
+      ValueCmpOnFace _ p _ u v -> gatherMetas (p, u, v)
+      ElimCmp _ _ _ _ es es'   -> gatherMetas (es, es')
+      LevelCmp _ l l'          -> gatherMetas (Level l, Level l')
+      UnquoteTactic t h g      -> gatherMetas (t, h, g)
+      SortCmp _ s1 s2          -> gatherMetas (Sort s1, Sort s2)
+      UnBlock x                -> Set.insert x . Set.unions <$> (mapM listenerMetas =<< getMetaListeners x)
+      FindInstance _ x _       ->
+        -- #5093: We should not generalize over metas bound by instance constraints.
+        -- We keep instance constraints even if the meta is solved, to check that it could indeed
+        -- be filled by instance search. If it's solved, look in the solution.
+        caseMaybeM (isInstantiatedMeta' x) (return $ Set.singleton x) $ return . allMetas Set.singleton
+      ResolveInstanceHead{}    -> return mempty
+      IsEmpty{}                -> return mempty
+      CheckFunDef{}            -> return mempty
+      CheckSizeLtSat{}         -> return mempty
+      HasBiggerSort{}          -> return mempty
+      HasPTSRule{}             -> return mempty
+      CheckDataSort{}          -> return mempty
+      CheckMetaInst x          -> return mempty
+      CheckType t              -> gatherMetas t
+      CheckLockedVars a b c d  -> gatherMetas (a, b, c, d)
+      UsableAtModality{}       -> return mempty
+      RewConstraint e          -> gatherMetas e
   where
-  metas (MetaV m _) = [m]
-  metas (Level l)   = levelMetas l
-  metas _           = []
+    -- For blocked constant twin variables
+    listenerMetas EtaExpand{}           = return Set.empty
+    listenerMetas (CheckConstraint _ c) = constraintMetas (clValue $ theConstraint c)
 
-  levelMetas (Max as) = concatMap plusLevelMetas as
+    gatherMetas :: AllMetas t => t -> TCM (Set MetaId)
+    gatherMetas = allMetas makeSingle
 
-  plusLevelMetas ClosedLevel{} = []
-  plusLevelMetas (Plus _ l)    = levelAtomMetas l
+    makeSingle :: MetaId -> TCM (Set MetaId)
+    makeSingle m = lookupMetaInstantiation m >>= \case
+      InstV i -> gatherMetas $ instBody i
+      OpenMeta _ -> return $ Set.singleton m
+      BlockedConst t ->
+        -- Jesper, 2025-05-13: We should really look into the
+        -- (blocked) solution here but doing so triggers a
+        -- regression in the standard library that I'm too tired
+        -- to deal with (see test/Succeed/Issue7876b.agda).
+        -- Set.insert m <$> gatherMetas t
+        return $ Set.singleton m
+      PostponedTypeCheckingProblem clos -> Set.insert m <$> tcProblemMetas (clValue clos)
 
-  levelAtomMetas (MetaLevel m _) = [m]
-  levelAtomMetas _               = []
+    tcProblemMetas :: TypeCheckingProblem -> TCM (Set MetaId)
+    tcProblemMetas = \case
+      CheckExpr _ _ ty -> gatherMetas ty
+      CheckArgs _ _ _ _ ty1 ty2 _ -> gatherMetas (ty1, ty2)
+      CheckProjAppToKnownPrincipalArg _ _ _ _ _ _ ty1 _ u ty2 patm -> gatherMetas (u, ty1, ty2, patm)
+      CheckLambda _ (Arg { unArg = (_ , mty)}) _ ty -> gatherMetas (mty, ty)
+      DisambiguateConstructor cdd _ -> gatherMetas $ bcdType cdd
+      DoQuoteTerm _ u ty -> gatherMetas (u, ty)
 
 -- | Create 'MetaInfo' in the current environment.
-createMetaInfo :: TCM MetaInfo
+createMetaInfo :: (MonadTCEnv m, ReadTCState m) => m MetaInfo
 createMetaInfo = createMetaInfo' RunMetaOccursCheck
 
-createMetaInfo' :: RunMetaOccursCheck -> TCM MetaInfo
+createMetaInfo'
+  :: (MonadTCEnv m, ReadTCState m)
+  => RunMetaOccursCheck -> m MetaInfo
 createMetaInfo' b = do
-  r   <- getCurrentRange
-  cl  <- buildClosure r
+  r        <- getCurrentRange
+  cl       <- buildClosure r
+  gen      <- viewTC eGeneralizeMetas
+  -- Andreas, 2026-10-03, issue #8171.
+  -- The polarity of the current position is not tracked in the environment;
+  -- instead, the context is divided by the polarity of each argument we enter.
+  -- Thus, relative to its context, a meta always sits at the unit polarity (@++),
+  -- not at the 'defaultPolarity' (mixed) supplied by 'currentModality'.
+  -- Otherwise, the occurs check, which divides the variables by the meta's
+  -- modality, rejects solutions mentioning variables of non-mixed polarity.
+  modality <- setModalPolarity unitPolarity <$> currentModality
   return MetaInfo
     { miClosRange       = cl
+    , miModality        = modality
     , miMetaOccursCheck = b
     , miNameSuggestion  = ""
+    , miGeneralizable   = defaultArg gen
+                          -- The ArgInfo is set to the right value in
+                          -- the newArgsMetaCtx' function.
     }
 
-setValueMetaName :: Term -> MetaNameSuggestion -> TCM ()
+setValueMetaName :: MonadMetaSolver m => Term -> MetaNameSuggestion -> m ()
 setValueMetaName v s = do
-  case ignoreSharing v of
+  case v of
     MetaV mi _ -> setMetaNameSuggestion mi s
     u          -> do
       reportSLn "tc.meta.name" 70 $
         "cannot set meta name; newMeta returns " ++ show u
       return ()
 
-getMetaNameSuggestion :: MetaId -> TCM MetaNameSuggestion
-getMetaNameSuggestion mi = miNameSuggestion . mvInfo <$> lookupMeta mi
+getMetaNameSuggestion ::
+  (HasCallStack, MonadDebug m, ReadTCState m) =>
+  MetaId -> m MetaNameSuggestion
+getMetaNameSuggestion mi =
+  miNameSuggestion . mvInfo <$> lookupLocalMeta mi
 
-setMetaNameSuggestion :: MetaId -> MetaNameSuggestion -> TCM ()
+setMetaNameSuggestion :: MonadMetaSolver m => MetaId -> MetaNameSuggestion -> m ()
 setMetaNameSuggestion mi s = unless (null s || isUnderscore s) $ do
   reportSLn "tc.meta.name" 20 $
     "setting name of meta " ++ prettyShow mi ++ " to " ++ s
   updateMetaVar mi $ \ mvar ->
     mvar { mvInfo = (mvInfo mvar) { miNameSuggestion = s }}
 
-updateMetaVarRange :: MetaId -> Range -> TCM ()
+-- | Change the ArgInfo that will be used when generalizing over this
+-- local meta-variable.
+setMetaGeneralizableArgInfo :: MonadMetaSolver m => MetaId -> ArgInfo -> m ()
+setMetaGeneralizableArgInfo m i = updateMetaVar m $ \ mv ->
+  mv { mvInfo = (mvInfo mv)
+        { miGeneralizable = setArgInfo i (miGeneralizable (mvInfo mv)) } }
+
+updateMetaVarRange :: MonadMetaSolver m => MetaId -> Range -> m ()
 updateMetaVarRange mi r = updateMetaVar mi (setRange r)
 
-setMetaOccursCheck :: MetaId -> RunMetaOccursCheck -> TCM ()
+setMetaOccursCheck :: MonadMetaSolver m => MetaId -> RunMetaOccursCheck -> m ()
 setMetaOccursCheck mi b = updateMetaVar mi $ \ mvar ->
   mvar { mvInfo = (mvInfo mvar) { miMetaOccursCheck = b } }
 
 -- * Query and manipulate interaction points.
 
-modifyInteractionPoints :: (InteractionPoints -> InteractionPoints) -> TCM ()
-modifyInteractionPoints f =
-  stInteractionPoints %= f
+class (MonadTCEnv m, ReadTCState m) => MonadInteractionPoints m where
+  freshInteractionId :: m InteractionId
+  default freshInteractionId
+    :: (MonadTrans t, MonadInteractionPoints n, t n ~ m)
+    => m InteractionId
+  freshInteractionId = lift freshInteractionId
+
+  modifyInteractionPoints :: (InteractionPoints -> InteractionPoints) -> m ()
+  default modifyInteractionPoints
+    :: (MonadTrans t, MonadInteractionPoints n, t n ~ m)
+    => (InteractionPoints -> InteractionPoints) -> m ()
+  modifyInteractionPoints = lift . modifyInteractionPoints
+
+instance MonadInteractionPoints m => MonadInteractionPoints (ExceptT e m)
+instance MonadInteractionPoints m => MonadInteractionPoints (MaybeT m)
+instance MonadInteractionPoints m => MonadInteractionPoints (IdentityT m)
+instance MonadInteractionPoints m => MonadInteractionPoints (ReaderT r m)
+instance MonadInteractionPoints m => MonadInteractionPoints (StateT s m)
+instance (MonadInteractionPoints m, Monoid w) => MonadInteractionPoints (WriterT w m)
+
+instance MonadInteractionPoints TCM where
+  -- TODO: does the pure mode happen?
+  freshInteractionId =
+    ifImpureConv fresh (patternViolation alwaysUnblock)
+  -- TODO: does the pure mode happen?
+  modifyInteractionPoints f =
+    ifImpureConv (stInteractionPoints `modifyTCLens` f) (patternViolation alwaysUnblock)
 
 -- | Register an interaction point during scope checking.
 --   If there is no interaction id yet, create one.
-registerInteractionPoint :: Bool -> Range -> Maybe Nat -> TCM InteractionId
+registerInteractionPoint
+  :: forall m. MonadInteractionPoints m
+  => Bool -> Range -> Maybe Nat -> m InteractionId
 registerInteractionPoint preciseRange r maybeId = do
-  m <- use stInteractionPoints
+  m <- useR stInteractionPoints
   -- If we're given an interaction id we shouldn't look up by range.
   -- This is important when doing 'refine', since all interaction points
   -- created by the refine gets the same range.
@@ -236,13 +595,14 @@ registerInteractionPoint preciseRange r maybeId = do
     -- First, try to find the interaction point by Range.
     caseMaybe (findInteractionPoint_ r m) (continue m) {-else-} return
  where
+ continue :: InteractionPoints -> m InteractionId
  continue m = do
   -- We did not find an interaction id with the same Range, so let's create one!
   ii <- case maybeId of
     Just i  -> return $ InteractionId i
-    Nothing -> fresh
-  let ip = InteractionPoint { ipRange = r, ipMeta = Nothing, ipSolved = False, ipClause = IPNoClause }
-  case Map.insertLookupWithKey (\ key new old -> old) ii ip m of
+    Nothing -> freshInteractionId
+  let ip = InteractionPoint { ipRange = r, ipMeta = Nothing, ipSolved = False, ipClause = IPNoClause, ipBoundary = IPBoundary mempty }
+  case BiMap.insertLookupWithKey (\ key new old -> old) ii ip m of
     -- If the interaction point is already present, we keep the old ip.
     -- However, it needs to be at the same range as the new one.
     (Just ip0, _)
@@ -253,212 +613,301 @@ registerInteractionPoint preciseRange r maybeId = do
       return ii
 
 -- | Find an interaction point by 'Range' by searching the whole map.
+--   Issue 3000: Don't consider solved interaction points.
 --
 --   O(n): linear in the number of registered interaction points.
 
 findInteractionPoint_ :: Range -> InteractionPoints -> Maybe InteractionId
 findInteractionPoint_ r m = do
   guard $ not $ null r
-  headMaybe $ mapMaybe sameRange $ Map.toList m
+  listToMaybe $ mapMaybe sameRange $ BiMap.toList m
   where
     sameRange :: (InteractionId, InteractionPoint) -> Maybe InteractionId
-    sameRange (ii, InteractionPoint r' _ _ _) | r == r' = Just ii
+    sameRange (ii, InteractionPoint r' _ False _ _) | r == r' = Just ii
     sameRange _ = Nothing
 
--- | Hook up meta variable to interaction point.
-connectInteractionPoint :: InteractionId -> MetaId -> TCM ()
+{-# INLINABLE connectInteractionPoint #-}
+-- | Hook up a local meta-variable to an interaction point.
+connectInteractionPoint
+  :: MonadInteractionPoints m
+  => InteractionId -> MetaId -> m ()
 connectInteractionPoint ii mi = do
-  ipCl <- asks envClause
-  m <- use stInteractionPoints
-  let ip = InteractionPoint { ipRange = __IMPOSSIBLE__, ipMeta = Just mi, ipSolved = False, ipClause = ipCl }
+  ipCl <- viewTC eClause
+  m <- useR stInteractionPoints
+  let ip = InteractionPoint { ipRange = __IMPOSSIBLE__, ipMeta = Just mi, ipSolved = False, ipClause = ipCl, ipBoundary = IPBoundary mempty }
   -- The interaction point needs to be present already, we just set the meta.
-  case Map.insertLookupWithKey (\ key new old -> new { ipRange = ipRange old }) ii ip m of
+  case BiMap.insertLookupWithKey (\ key new old -> new { ipRange = ipRange old }) ii ip m of
     (Nothing, _) -> __IMPOSSIBLE__
     (Just _, m') -> modifyInteractionPoints $ const m'
 
 -- | Mark an interaction point as solved.
-removeInteractionPoint :: InteractionId -> TCM ()
-removeInteractionPoint ii = do
-  stInteractionPoints %= Map.update (\ ip -> Just ip{ ipSolved = True }) ii
+removeInteractionPoint :: MonadInteractionPoints m => InteractionId -> m ()
+removeInteractionPoint ii =
+  modifyInteractionPoints $ BiMap.update (\ ip -> Just ip{ ipSolved = True }) ii
 
--- | Get a list of interaction ids.
-getInteractionPoints :: TCM [InteractionId]
-getInteractionPoints = Map.keys <$> use stInteractionPoints
+-- | Get a list of unsolved interaction ids.
+{-# SPECIALIZE getInteractionPoints :: TCM [InteractionId] #-}
+getInteractionPoints :: ReadTCState m => m [InteractionId]
+getInteractionPoints =
+  map fst . filter (not . ipSolved . snd) . BiMap.toList <$> useR stInteractionPoints
+  -- The following alternative will not include the unreachable IPs
+  -- (e.g. test/Interaction/Issue2807).
+  -- This might lead to a wrong numbering of ?s.
+  -- map fst <$> getInteractionIdsAndMetas
 
 -- | Get all metas that correspond to unsolved interaction ids.
-getInteractionMetas :: TCM [MetaId]
+getInteractionMetas :: ReadTCState m => m [MetaId]
 getInteractionMetas =
-  mapMaybe ipMeta . filter (not . ipSolved) . Map.elems <$> use stInteractionPoints
+  mapMaybe ipMeta . filter (not . ipSolved) . BiMap.elems <$> useR stInteractionPoints
+
+getUniqueMetasRanges ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => [MetaId] -> m [Range]
+getUniqueMetasRanges = fmap (nubOn id) . mapM getMetaRange
+
+getUnsolvedMetas ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => m [Range]
+getUnsolvedMetas = do
+  openMetas            <- getOpenMetas
+  interactionMetas     <- getInteractionMetas
+  getUniqueMetasRanges (openMetas List.\\ interactionMetas)
+
+getUnsolvedInteractionMetas ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => m [Range]
+getUnsolvedInteractionMetas = getUniqueMetasRanges =<< getInteractionMetas
 
 -- | Get all metas that correspond to unsolved interaction ids.
-getInteractionIdsAndMetas :: TCM [(InteractionId,MetaId)]
+getInteractionIdsAndMetas :: ReadTCState m => m [(InteractionId,MetaId)]
 getInteractionIdsAndMetas =
-  mapMaybe f . filter (not . ipSolved . snd) . Map.toList <$> use stInteractionPoints
+  mapMaybe f . filter (not . ipSolved . snd) . BiMap.toList <$> useR stInteractionPoints
   where f (ii, ip) = (ii,) <$> ipMeta ip
 
 -- | Does the meta variable correspond to an interaction point?
 --
---   Time: @O(n)@ where @n@ is the number of interaction metas.
-isInteractionMeta :: MetaId -> TCM (Maybe InteractionId)
-isInteractionMeta x = lookup x . map swap <$> getInteractionIdsAndMetas
+--   Time: @O(log n)@ where @n@ is the number of interaction metas.
+isInteractionMeta :: ReadTCState m => MetaId -> m (Maybe InteractionId)
+isInteractionMeta x = BiMap.invLookup x <$> useR stInteractionPoints
 
 -- | Get the information associated to an interaction point.
-lookupInteractionPoint :: InteractionId -> TCM InteractionPoint
+{-# SPECIALIZE lookupInteractionPoint :: InteractionId -> TCM InteractionPoint #-}
+lookupInteractionPoint
+  :: (ReadTCState m, MonadError TCErr m, MonadTCEnv m)
+  => InteractionId -> m InteractionPoint
 lookupInteractionPoint ii =
-  fromMaybeM err $ Map.lookup ii <$> use stInteractionPoints
-  where
-    err  = fail $ "no such interaction point: " ++ show ii
+  fromMaybeM (interactionError $ NoSuchInteractionPoint ii) $
+    BiMap.lookup ii <$> useR stInteractionPoints
 
+{-# SPECIALIZE lookupInteractionId :: InteractionId -> TCM MetaId #-}
 -- | Get 'MetaId' for an interaction point.
 --   Precondition: interaction point is connected.
-lookupInteractionId :: InteractionId -> TCM MetaId
-lookupInteractionId ii = fromMaybeM err2 $ ipMeta <$> lookupInteractionPoint ii
-  where
-    err2 = typeError $ GenericError $ "No type nor action available for hole " ++ show ii ++ ". Possible cause: the hole has not been reached during type checking (do you see yellow?)"
+lookupInteractionId
+  :: (ReadTCState m, MonadError TCErr m, MonadTCEnv m)
+  => InteractionId -> m MetaId
+lookupInteractionId ii =
+  fromMaybeM (interactionError $ NoActionForInteractionPoint ii) $
+    ipMeta <$> lookupInteractionPoint ii
 
 -- | Check whether an interaction id is already associated with a meta variable.
-lookupInteractionMeta :: InteractionId -> TCM (Maybe MetaId)
-lookupInteractionMeta ii = lookupInteractionMeta_ ii <$> use stInteractionPoints
+lookupInteractionMeta :: ReadTCState m => InteractionId -> m (Maybe MetaId)
+lookupInteractionMeta ii = lookupInteractionMeta_ ii <$> useR stInteractionPoints
 
 lookupInteractionMeta_ :: InteractionId -> InteractionPoints -> Maybe MetaId
-lookupInteractionMeta_ ii m = ipMeta =<< Map.lookup ii m
+lookupInteractionMeta_ ii m = ipMeta =<< BiMap.lookup ii m
 
 -- | Generate new meta variable.
-newMeta :: MetaInfo -> MetaPriority -> Permutation -> Judgement a -> TCM MetaId
-newMeta = newMeta' Open
+newMeta :: MonadMetaSolver m => Frozen -> MetaInfo -> MetaPriority -> Permutation -> Judgement a -> m MetaId
+newMeta = newMeta' (OpenMeta UnificationMeta)
 
 -- | Generate a new meta variable with some instantiation given.
 --   For instance, the instantiation could be a 'PostponedTypeCheckingProblem'.
-newMeta' :: MetaInstantiation -> MetaInfo -> MetaPriority -> Permutation ->
-            Judgement a -> TCM MetaId
-newMeta' inst mi p perm j = do
+newMetaTCM' :: MetaInstantiation -> Frozen -> MetaInfo -> MetaPriority -> Permutation ->
+               Judgement a -> TCM MetaId
+newMetaTCM' inst frozen mi p perm j = do
   x <- fresh
   let j' = j { jMetaId = x }  -- fill the identifier part of the judgement
-      mv = MetaVar mi p perm j' inst Set.empty Instantiable
+      mv = MetaVar{ mvInfo             = mi
+                  , mvPriority         = p
+                  , mvPermutation      = perm
+                  , mvJudgement        = j'
+                  , mvInstantiation    = inst
+                  , mvListeners        = Set.empty
+                  , mvFrozen           = frozen
+                  , mvTwin             = Nothing
+                  }
   -- printing not available (import cycle)
-  -- reportSDoc "tc.meta.new" 50 $ text "new meta" <+> prettyTCM j'
-  stMetaStore %= Map.insert x mv
+  -- reportSDoc "tc.meta.new" 50 $ "new meta" <+> prettyTCM j'
+  insertMetaVar x mv
   return x
 
 -- | Get the 'Range' for an interaction point.
-getInteractionRange :: InteractionId -> TCM Range
+{-# SPECIALIZE getInteractionRange :: InteractionId -> TCM Range #-}
+getInteractionRange
+  :: (MonadInteractionPoints m, MonadDebug m, MonadError TCErr m)
+  => InteractionId -> m Range
 getInteractionRange = ipRange <.> lookupInteractionPoint
 
--- | Get the 'Range' for a meta variable.
-getMetaRange :: MetaId -> TCM Range
-getMetaRange = getRange <.> lookupMeta
+-- | Set the 'Range' for an interaction point.
+{-# SPECIALIZE setInteractionRange :: Range -> InteractionId -> TCM () #-}
+setInteractionRange :: (MonadInteractionPoints m, MonadDebug m)
+  => Range -> InteractionId -> m ()
+setInteractionRange r ii = do
+  modifyInteractionPoints $ BiMap.update (\ ip -> Just ip{ ipRange = r }) ii
+  return ()
 
-getInteractionScope :: InteractionId -> TCM ScopeInfo
-getInteractionScope = getMetaScope <.> lookupMeta <=< lookupInteractionId
+-- | Get the 'Range' for a local meta-variable.
+getMetaRange ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => MetaId -> m Range
+getMetaRange = getRange <.> lookupLocalMeta
 
-withMetaInfo' :: MetaVariable -> TCM a -> TCM a
+getInteractionScope ::
+  (MonadDebug m, ReadTCState m, MonadError TCErr m,
+   MonadTCEnv m) =>
+  InteractionId -> m ScopeInfo
+getInteractionScope =
+  getMetaScope <.> lookupLocalMeta <=< lookupInteractionId
+
+withMetaInfo' :: (MonadTrace m) => MetaVariable -> m a -> m a
 withMetaInfo' mv = withMetaInfo (miClosRange $ mvInfo mv)
 
-withMetaInfo :: Closure Range -> TCM a -> TCM a
+withMetaInfo :: (MonadTrace m) => Closure Range -> m a -> m a
 withMetaInfo mI cont = enterClosure mI $ \ r ->
   setCurrentRange r cont
 
-getInstantiatedMetas :: TCM [MetaId]
-getInstantiatedMetas = do
-    store <- getMetaStore
-    return [ i | (i, MetaVar{ mvInstantiation = mi }) <- Map.assocs store, isInst mi ]
-    where
-        isInst Open                           = False
-        isInst OpenIFS                        = False
-        isInst BlockedConst{}                 = False
-        isInst PostponedTypeCheckingProblem{} = False
-        isInst InstV{}                        = True
+withInteractionId ::
+  (MonadDebug m, MonadError TCErr m, MonadTrace m) =>
+  InteractionId -> m a -> m a
+withInteractionId i ret = do
+  m <- lookupInteractionId i
+  withMetaId m ret
 
-getOpenMetas :: TCM [MetaId]
-getOpenMetas = do
-    store <- getMetaStore
-    return [ i | (i, MetaVar{ mvInstantiation = mi }) <- Map.assocs store, isOpenMeta mi ]
+withMetaId ::
+  (HasCallStack, MonadDebug m, MonadTrace m) =>
+  MetaId -> m a -> m a
+withMetaId m ret = do
+  mv <- lookupLocalMeta m
+  withMetaInfo' mv ret
+
+getOpenMetas :: ReadTCState m => m [MetaId]
+getOpenMetas = MapS.keys <$> useR stOpenMetaStore
 
 isOpenMeta :: MetaInstantiation -> Bool
-isOpenMeta Open                           = True
-isOpenMeta OpenIFS                        = True
+isOpenMeta OpenMeta{}                     = True
 isOpenMeta BlockedConst{}                 = True
 isOpenMeta PostponedTypeCheckingProblem{} = True
 isOpenMeta InstV{}                        = False
 
 -- | @listenToMeta l m@: register @l@ as a listener to @m@. This is done
 --   when the type of l is blocked by @m@.
-listenToMeta :: Listener -> MetaId -> TCM ()
+listenToMeta :: MonadMetaSolver m => Listener -> MetaId -> m ()
 listenToMeta l m =
   updateMetaVar m $ \mv -> mv { mvListeners = Set.insert l $ mvListeners mv }
 
 -- | Unregister a listener.
-unlistenToMeta :: Listener -> MetaId -> TCM ()
+unlistenToMeta :: MonadMetaSolver m => Listener -> MetaId -> m ()
 unlistenToMeta l m =
   updateMetaVar m $ \mv -> mv { mvListeners = Set.delete l $ mvListeners mv }
 
--- | Get the listeners to a meta.
-getMetaListeners :: MetaId -> TCM [Listener]
-getMetaListeners m = Set.toList . mvListeners <$> lookupMeta m
+-- | Get the listeners for a local meta-variable.
+getMetaListeners ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => MetaId -> m [Listener]
+getMetaListeners m = Set.toList . mvListeners <$> lookupLocalMeta m
 
-clearMetaListeners :: MetaId -> TCM ()
+clearMetaListeners :: MonadMetaSolver m => MetaId -> m ()
 clearMetaListeners m =
   updateMetaVar m $ \mv -> mv { mvListeners = Set.empty }
+
+-- | Do safe eta-expansions for meta (@SingletonRecords,Levels@).
+etaExpandMetaSafe :: (MonadMetaSolver m) => MetaId -> m ()
+etaExpandMetaSafe = etaExpandMeta [SingletonRecords,Levels]
+
+-- | Eta expand metavariables listening on the current meta.
+etaExpandListeners :: MonadMetaSolver m => MetaId -> m ()
+etaExpandListeners m = do
+  ls <- getMetaListeners m
+  clearMetaListeners m  -- we don't really have to do this
+  mapM_ wakeupListener ls
+
+-- | Wake up a meta listener and let it do its thing
+wakeupListener :: MonadMetaSolver m => Listener -> m ()
+  -- Andreas 2010-10-15: do not expand record mvars, lazyness needed for irrelevance
+wakeupListener (EtaExpand x)         = etaExpandMetaSafe x
+wakeupListener (CheckConstraint _ c) = do
+  --reportSDoc "tc.meta.blocked" 20 $ "waking boxed constraint" <+> prettyTCM c
+  modifyAwakeConstraints (c:)
+  solveAwakeConstraints
+
+solveAwakeConstraints :: (MonadConstraint m) => m ()
+solveAwakeConstraints = solveAwakeConstraints' False
+
+solveAwakeConstraints' :: (MonadConstraint m) => Bool -> m ()
+solveAwakeConstraints' = solveSomeAwakeConstraints (const True)
 
 ---------------------------------------------------------------------------
 -- * Freezing and unfreezing metas.
 ---------------------------------------------------------------------------
 
--- | Freeze all so far unfrozen metas for the duration of the given computation.
-withFreezeMetas :: TCM a -> TCM a
-withFreezeMetas cont = do
-  ms <- Set.fromList <$> freezeMetas
-  x  <- cont
-  unfreezeMetas' (`Set.member` ms)
-  return x
-
--- | Freeze all meta variables and return the list of metas that got frozen.
-freezeMetas :: TCM [MetaId]
-freezeMetas = freezeMetas' $ const True
-
--- | Freeze some meta variables and return the list of metas that got frozen.
-freezeMetas' :: (MetaId -> Bool) -> TCM [MetaId]
-freezeMetas' p = execWriterT $ stMetaStore %== Map.traverseWithKey freeze
+{-# SPECIALIZE freezeMetas :: [MetaId] -> TCM (Set MetaId) #-}
+-- | Freeze the given meta-variables (but only if they are open) and
+-- return those that were not already frozen.
+freezeMetas :: forall m t. (MonadTCState m, ReadTCState m, Traversable t) => t MetaId -> m (Set MetaId)
+freezeMetas =
+  execWriterT . modifyTCLensM stOpenMetaStore . execStateT . mapM_ freeze
+    -- For efficiency, this modifies the 'LocalMetaStore' in 'stOpenMetaStore'
+    -- in a local state and writes this store back to TCState in the end
+    -- with the accumulated changes.
   where
-  freeze :: Monad m => MetaId -> MetaVariable -> WriterT [MetaId] m MetaVariable
-  freeze m mvar
-    | p m && mvFrozen mvar /= Frozen = do
-        tell [m]
-        return $ mvar { mvFrozen = Frozen }
-    | otherwise = return mvar
+  freeze :: MetaId -> StateT LocalMetaStore (WriterT (Set MetaId) m) ()
+  freeze m = do
+    store <- get
+    whenJust (MapS.lookup m store) \ mvar -> do
+      unless (mvFrozen mvar == Frozen) do
+        lift $ tell $ Set.singleton m
+        put $ MapS.insert m (mvar { mvFrozen = Frozen }) store
 
--- | Thaw all meta variables.
+-- | Thaw all open meta variables.
 unfreezeMetas :: TCM ()
-unfreezeMetas = unfreezeMetas' $ const True
+unfreezeMetas = do
+  reportSDoc "tc.meta" 40 $ "unfreezing ALL metas"
+  stOpenMetaStore `modifyTCLens` MapS.map unfreeze_
 
--- | Thaw some metas, as indicated by the passed condition.
-unfreezeMetas' :: (MetaId -> Bool) -> TCM ()
-unfreezeMetas' cond = modifyMetaStore $ Map.mapWithKey unfreeze where
-  unfreeze :: MetaId -> MetaVariable -> MetaVariable
-  unfreeze m mvar
-    | cond m    = mvar { mvFrozen = Instantiable }
-    | otherwise = mvar
+unfreeze_ :: MetaVariable -> MetaVariable
+unfreeze_ = \ mvar -> mvar { mvFrozen = Instantiable }
 
-isFrozen :: MetaId -> TCM Bool
+{-# SPECIALIZE isFrozen :: MetaId -> TCM Bool #-}
+isFrozen ::
+  (HasCallStack, MonadDebug m, ReadTCState m) => MetaId -> m Bool
 isFrozen x = do
-  mvar <- lookupMeta x
+  mvar <- lookupLocalMeta x
   return $ mvFrozen mvar == Frozen
 
--- | Unfreeze meta and its type if this is a meta again.
---   Does not unfreeze deep occurrences of metas.
+-- | Temporarily freeze all open metas (from 'stOpenMetaStore')
+--   and unfreeze exactly those that were frozen in the first step.
+withFrozenMetas ::
+    (MonadMetaSolver m, MonadTCState m)
+  => m a -> m a
+withFrozenMetas act = do
+  openMetas <- MapS.keys <$> useR stOpenMetaStore
+  frozenMetas <- freezeMetas openMetas
+  result <- act
+  mapM_ (`updateMetaVar` unfreeze_) frozenMetas
+  return result
+
+-- | Unfreeze a meta and its type if this is a meta again.
+--   Does not unfreeze deep occurrences of meta-variables or remote
+--   meta-variables.
 class UnFreezeMeta a where
-  unfreezeMeta :: a -> TCM ()
+  unfreezeMeta :: MonadMetaSolver m => a -> m ()
 
 instance UnFreezeMeta MetaId where
-  unfreezeMeta x = do
-    updateMetaVar x $ \ mv -> mv { mvFrozen = Instantiable }
-    unfreezeMeta =<< do jMetaType . mvJudgement <$> lookupMeta x
+  unfreezeMeta x = unlessM (($ x) <$> isRemoteMeta) $ do
+    reportSDoc "tc.meta" 50 $ pure $ "unfreezing meta" <+> pretty x
+    updateMetaVar x unfreeze_
+    unfreezeMeta =<< metaType x
+{-# SPECIALIZE unfreezeMeta :: MetaId -> TCM () #-}
 
 instance UnFreezeMeta Type where
   unfreezeMeta (El s t) = unfreezeMeta s >> unfreezeMeta t
 
 instance UnFreezeMeta Term where
-  unfreezeMeta (Shared p)    = unfreezeMeta $ derefPtr p
   unfreezeMeta (MetaV x _)   = unfreezeMeta x
   unfreezeMeta (Sort s)      = unfreezeMeta s
   unfreezeMeta (Level l)     = unfreezeMeta l
@@ -467,21 +916,14 @@ instance UnFreezeMeta Term where
   unfreezeMeta _             = return ()
 
 instance UnFreezeMeta Sort where
-  unfreezeMeta (Type l)      = unfreezeMeta l
+  unfreezeMeta (MetaS x _)   = unfreezeMeta x
   unfreezeMeta _             = return ()
 
 instance UnFreezeMeta Level where
-  unfreezeMeta (Max ls)      = unfreezeMeta ls
+  unfreezeMeta (Max _ ls)      = unfreezeMeta ls
 
 instance UnFreezeMeta PlusLevel where
   unfreezeMeta (Plus _ a)    = unfreezeMeta a
-  unfreezeMeta ClosedLevel{} = return ()
-
-instance UnFreezeMeta LevelAtom where
-  unfreezeMeta (MetaLevel x _)    = unfreezeMeta x
-  unfreezeMeta (BlockedLevel _ t) = unfreezeMeta t
-  unfreezeMeta (NeutralLevel _ t) = unfreezeMeta t
-  unfreezeMeta (UnreducedLevel t) = unfreezeMeta t
 
 instance UnFreezeMeta a => UnFreezeMeta [a] where
   unfreezeMeta = mapM_ unfreezeMeta

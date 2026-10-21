@@ -46,8 +46,6 @@ data List {a} (A : Set a) : Set a where
   _∷_ : (x : A) (xs : List A) → List A
 
 {-# BUILTIN LIST List #-}
-{-# BUILTIN NIL  []   #-}
-{-# BUILTIN CONS _∷_  #-}
 
 private
  primitive

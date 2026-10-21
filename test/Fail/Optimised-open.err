@@ -4,6 +4,27 @@ ScopeInfo
   context = []
   modules
     scope
+      private
+        names
+          Set --> [Agda.Primitive.Set]
+      imports
+        [Agda.Primitive]
+    scope Agda.Primitive
+      public
+        names
+          _⊔_ --> [Agda.Primitive._⊔_]
+          Level --> [Agda.Primitive.Level]
+          LevelUniv --> [Agda.Primitive.LevelUniv]
+          Prop --> [Agda.Primitive.Prop]
+          Propω --> [Agda.Primitive.Propω]
+          SSet --> [Agda.Primitive.SSet]
+          SSetω --> [Agda.Primitive.SSetω]
+          Set --> [Agda.Primitive.Set]
+          Setω --> [Agda.Primitive.Setω]
+          lsuc --> [Agda.Primitive.lsuc]
+          lzero --> [Agda.Primitive.lzero]
+        name parts
+          ⊔ --> {_⊔_ -> [Agda.Primitive._⊔_]}
     scope Optimised-open
       private
         names
@@ -28,6 +49,27 @@ ScopeInfo
   context = []
   modules
     scope
+      private
+        names
+          Set --> [Agda.Primitive.Set]
+      imports
+        [Agda.Primitive]
+    scope Agda.Primitive
+      public
+        names
+          _⊔_ --> [Agda.Primitive._⊔_]
+          Level --> [Agda.Primitive.Level]
+          LevelUniv --> [Agda.Primitive.LevelUniv]
+          Prop --> [Agda.Primitive.Prop]
+          Propω --> [Agda.Primitive.Propω]
+          SSet --> [Agda.Primitive.SSet]
+          SSetω --> [Agda.Primitive.SSetω]
+          Set --> [Agda.Primitive.Set]
+          Setω --> [Agda.Primitive.Setω]
+          lsuc --> [Agda.Primitive.lsuc]
+          lzero --> [Agda.Primitive.lzero]
+        name parts
+          ⊔ --> {_⊔_ -> [Agda.Primitive._⊔_]}
     scope Optimised-open
       private
         names
@@ -56,6 +98,9 @@ ScopeInfo
       public
         names
           P′ --> [Optimised-open.M₂._.P]
-Optimised-open.agda:35,9-10
-(A → Set) !=< A of type Set₁
+Optimised-open.agda:35.9-10: error: [UnequalTypes]
+The type
+  A → Set
+is not a subtype of
+  A
 when checking that the expression P has type A

@@ -1,5 +1,6 @@
-ShouldBeEmpty.agda:12,1-7
+ShouldBeEmpty.agda:12.1-7: error: [ShouldBeEmpty]
 One should be empty, but the following constructor patterns are
 valid:
   one
-when checking that the clause bad () has type One → One
+when checking the clause left hand side
+bad ()

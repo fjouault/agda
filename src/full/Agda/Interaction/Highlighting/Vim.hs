@@ -1,4 +1,4 @@
--- {-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Interaction.Highlighting.Vim where
 
@@ -7,17 +7,21 @@ import Control.Monad.Trans
 import Data.Function ( on )
 import qualified Data.List as List
 import qualified Data.Map as Map
+import Data.Maybe
 
 import System.FilePath
 
-import Agda.Syntax.Scope.Base
+import Agda.Syntax.Abstract.Name (AbstractName(..), KindOfName (FldName))
 import Agda.Syntax.Common
+import Agda.Syntax.Common.Pretty
 import Agda.Syntax.Concrete.Name as CName
+import Agda.Syntax.Scope.Base
 
 import Agda.TypeChecking.Monad
 
-import qualified Agda.Utils.IO.UTF8 as UTF8
-import Agda.Utils.Tuple
+import Agda.Utils.IO.UTF8 qualified as UTF8
+import Agda.Utils.List1 ( List1, pattern (:|) )
+import Agda.Utils.List1 qualified as List1
 
 vimFile :: FilePath -> FilePath
 vimFile file =
@@ -27,6 +31,7 @@ vimFile file =
 escape :: String -> String
 escape = concatMap esc
     where
+        escchars :: String
         escchars = "$\\^.*~[]"
         esc c   | c `elem` escchars = ['\\',c]
                 | otherwise         = [c]
@@ -38,10 +43,13 @@ keyword :: String -> [String] -> String
 keyword _ [] = ""
 keyword cat ws  = "syn keyword " ++ unwords (cat : ws)
 
-match :: String -> [String] -> String
-match _ [] = ""
-match cat ws    = "syn match " ++ cat ++ " \"" ++
-                    concat (List.intersperse "\\|" $ map (wordBounded . escape) ws) ++ "\""
+match :: String -> List1 String -> String
+match cat (w :| ws) =
+  "syn match "
+    ++ cat
+    ++ " \""
+    ++ List.intercalate "\\|" (map (wordBounded . escape) $ w:ws)
+    ++ "\""
 
 matches :: [String] -> [String] -> [String] -> [String] -> [String] -> [String] -> [String]
 matches cons icons defs idefs flds iflds =
@@ -53,33 +61,31 @@ matches cons icons defs idefs flds iflds =
         icons' = foo "agdaInfixConstructor" $ classify length icons
         defs'  = foo "agdaFunction"         $ classify length defs
         idefs' = foo "agdaInfixFunction"    $ classify length idefs
-        flds'  = foo "agdaProjection"       $ classify length flds
-        iflds' = foo "agdaInfixProjection"  $ classify length iflds
 
-        classify f = List.groupBy ((==) `on` f)
+        classify f = List1.groupBy ((==) `on` f)
                      . List.sortBy (compare `on` f)
 
-        foo :: String -> [[String]] -> [(Int, String)]
-        foo cat = map (length . head /\ match cat)
+        foo :: String -> [List1 String] -> [(Int, String)]
+        foo cat = map (length . List1.head &&& match cat)
 
 toVim :: NamesInScope -> String
 toVim ns = unlines $ matches mcons micons mdefs midefs mflds miflds
     where
-        cons = [ x | (x, def:_) <- Map.toList ns, anameKind def == ConName ]
-        defs = [ x | (x, def:_) <- Map.toList ns, anameKind def == DefName ]
-        flds = [ x | (x, fld:_) <- Map.toList ns, anameKind fld == FldName ]
+        cons = [ x | (x, con :| _) <- Map.toList ns, isJust $ isConName $ anameKind con ]
+        defs = [ x | (x, def :| _) <- Map.toList ns, isDefName (anameKind def) ]
+        flds = [ x | (x, fld :| _) <- Map.toList ns, anameKind fld == FldName  ]
 
-        mcons = map show cons
-        mdefs = map show defs
-        mflds = map show flds
+        mcons = map prettyShow cons
+        mdefs = map prettyShow defs
+        mflds = map prettyShow flds
 
         micons = concatMap parts cons
         midefs = concatMap parts defs
         miflds = concatMap parts flds
 
-        parts (NoName _ _) = []
-        parts (Name _ [_]) = []
-        parts (Name _ ps)  = [ rawNameToString x | Id x <- ps ]
+        parts n
+          | isOperator n = map rawNameToString $ nameStringParts n
+          | otherwise    = []
 
 generateVimFile :: FilePath -> TCM ()
 generateVimFile file = do

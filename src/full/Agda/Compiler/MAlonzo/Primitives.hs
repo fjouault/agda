@@ -1,229 +1,317 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Compiler.MAlonzo.Primitives where
 
-import Control.Monad.State
-import Data.Char
-import qualified Data.List as List
-import Data.Map as M
+import Control.Monad.Trans.Maybe ( MaybeT(MaybeT, runMaybeT) )
+
+import Data.HashMap.Strict qualified as HMap
+import Data.List qualified as List
+import Data.Map qualified as Map
 import Data.Maybe
+import Data.Set (Set)
+import Data.Set qualified as Set
 
 import Agda.Compiler.Common
-import Agda.Compiler.ToTreeless
-import {-# SOURCE #-} Agda.Compiler.MAlonzo.Compiler (closedTerm)
 import Agda.Compiler.MAlonzo.Misc
-import Agda.Compiler.MAlonzo.Pretty
 import Agda.Syntax.Common
+import Agda.Syntax.Common.Pretty ( prettyShow )
 import Agda.Syntax.Internal
 import Agda.Syntax.Treeless
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Monad.Builtin
 import Agda.TypeChecking.Primitive
 import Agda.TypeChecking.Reduce
-import Agda.TypeChecking.Pretty
 
 import Agda.Utils.Either
-import Agda.Utils.Except
-import Agda.Utils.Lens
-import Agda.Utils.Monad
-import qualified Agda.Utils.HashMap as HMap
-import qualified Agda.Utils.Haskell.Syntax as HS
+import Agda.Utils.List ( hasElem )
+import Agda.Utils.Haskell.Syntax qualified as HS
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
-isMainFunction :: QName -> Bool
-isMainFunction q = "main" == show (nameConcrete $ qnameName q)
+---------------------------------------------------------------------------
+-- * Entrypoint (@main@)
 
-hasMainFunction :: Interface -> IsMain
-hasMainFunction i
-  | List.any isMainFunction names = IsMain
-  | otherwise                     = NotMain
+newtype MainFunctionDef = MainFunctionDef Definition
+
+data CheckedMainFunctionDef = CheckedMainFunctionDef
+  { checkedMainDef :: MainFunctionDef
+  , checkedMainDecl :: HS.Decl
+  }
+
+-- Andreas, 2019-04-29, issue #3731: exclude certain kinds of names, like constructors.
+-- TODO: Also only consider top-level definition (not buried inside a module).
+asMainFunctionDef :: Definition -> Maybe MainFunctionDef
+asMainFunctionDef d = case (theDef d) of
+    Axiom{}                              -> perhaps
+    Function{ funProjection = Left _ }   -> perhaps
+    Function{ funProjection = Right{}  } -> no
+    AbstractDefn{}                       -> no
+    GeneralizableVar{}                   -> no
+    DataOrRecSig{}                       -> no
+    Datatype{}                           -> no
+    Record{}                             -> no
+    Constructor{}                        -> no
+    Primitive{}                          -> no
+    PrimitiveSort{}                      -> no
   where
-    names = HMap.keys $ iSignature i ^. sigDefinitions
+  isNamedMain = "main" == prettyShow (nameConcrete . qnameName . defName $ d)  -- ignores the qualification!?
+  perhaps | isNamedMain = Just $ MainFunctionDef d
+          | otherwise   = no
+  no                    = Nothing
+
+mainFunctionDefs :: Interface -> [MainFunctionDef]
+mainFunctionDefs i = catMaybes $ asMainFunctionDef <$> defs
+  where
+    defs = HMap.elems $ iSignature i ^. sigDefinitions
 
 -- | Check that the main function has type IO a, for some a.
-checkTypeOfMain :: QName -> Type -> TCM [HS.Decl] -> TCM [HS.Decl]
-checkTypeOfMain q ty ret
-  | not (isMainFunction q) = ret
-  | otherwise = do
-    Def io _ <- ignoreSharing <$> primIO
-    ty <- normalise ty
-    case ignoreSharing $ unEl ty of
-      Def d _ | d == io -> (mainAlias :) <$> ret
-      _                 -> do
-        err <- fsep $
-          pwords "The type of main should be" ++
-          [prettyTCM io] ++ pwords " A, for some A. The given type is" ++ [prettyTCM ty]
-        typeError $ GenericError $ show err
+checkTypeOfMain :: Definition -> HsCompileM (Maybe CheckedMainFunctionDef)
+checkTypeOfMain def = runMaybeT $ do
+  -- Only indicate main functions in the main module.
+  isMainModule <- curIsMainModule
+  mainDef <- MaybeT $ pure $ if isMainModule then asMainFunctionDef def else Nothing
+  liftTCM $ checkTypeOfMain' mainDef
+
+checkTypeOfMain' :: MainFunctionDef -> TCM CheckedMainFunctionDef
+checkTypeOfMain' m@(MainFunctionDef def) = CheckedMainFunctionDef m <$> do
+    Def io _ <- primIO
+    ty <- reduce $ defType def
+    case unEl ty of
+      Def d _ | d == io -> return mainAlias
+      _ -> ghcBackendError $ WrongTypeOfMain io ty
   where
     mainAlias = HS.FunBind [HS.Match mainLHS [] mainRHS emptyBinds ]
     mainLHS   = HS.Ident "main"
-    mainRHS   = HS.UnGuardedRhs $ HS.Var $ HS.UnQual $ unqhname "d" q
+    mainRHS   = HS.UnGuardedRhs $ HS.App mazCoerce (HS.Var $ HS.UnQual $ dname $ defName def)
+
+---------------------------------------------------------------------------
+-- * Primitives and builtins
+
+-- | These builtins need a qualified import of "Data.Char".
+charBuiltins :: [SomeBuiltin]
+charBuiltins =
+  [ someBuiltin BuiltinChar
+  , someBuiltin PrimIsAlpha
+  , someBuiltin PrimIsAscii
+  , someBuiltin PrimIsDigit
+  , someBuiltin PrimIsHexDigit
+  , someBuiltin PrimIsLatin1
+  , someBuiltin PrimIsLower
+  , someBuiltin PrimIsPrint
+  , someBuiltin PrimIsSpace
+  , someBuiltin PrimToLower
+  , someBuiltin PrimToUpper
+  ]
+
+-- | These builtins need a qualified import of "MAlonzo.RTE.Float".
+floatBuiltins :: [SomeBuiltin]
+floatBuiltins =
+  [ someBuiltin PrimFloatCeiling
+  , someBuiltin PrimFloatDecode
+  , someBuiltin PrimFloatEncode
+  , someBuiltin PrimFloatEquality
+  , someBuiltin PrimFloatFloor
+  , someBuiltin PrimFloatInequality
+  , someBuiltin PrimFloatIsSafeInteger
+  , someBuiltin PrimFloatLess
+  , someBuiltin PrimFloatRound
+  , someBuiltin PrimFloatToRatio
+  , someBuiltin PrimFloatToWord64
+  , someBuiltin PrimRatioToFloat
+  ]
+
+-- | Which builtins are actually used in the definitions?
+usedBuiltins :: BuiltinThings -> [Definition] -> Set SomeBuiltin
+usedBuiltins builtinThings defs = Set.fromList
+    [ s
+    | (s, def) <- Map.toList builtinThings
+    , maybe False elemDefs $ getName def
+    ]
+  where
+  elemDefs = hasElem $ map defName defs
+  getName = \case
+    Builtin t                 -> Just $ getPrimName t
+    Prim (PrimFun q _ _ _)    -> Just q
+    BuiltinRewriteRelations _ -> Nothing
+
+-- ** Translating primitives
 
 treelessPrimName :: TPrim -> String
 treelessPrimName p =
   case p of
-    PQuot -> "quotInt"
-    PRem  -> "remInt"
-    PSub  -> "subInt"
-    PAdd  -> "addInt"
-    PMul  -> "mulInt"
-    PGeq  -> "geqInt"
-    PLt   -> "ltInt"
-    PEqI  -> "eqInt"
-    PEqF  -> "eqFloat"
+    PQuot   -> "quotInt"
+    PRem    -> "remInt"
+    PSub    -> "subInt"
+    PAdd    -> "addInt"
+    PMul    -> "mulInt"
+    PGeq    -> "geqInt"
+    PLt     -> "ltInt"
+    PEqI    -> "eqInt"
+    PQuot64 -> "quot64"
+    PRem64  -> "rem64"
+    PSub64  -> "sub64"
+    PAdd64  -> "add64"
+    PMul64  -> "mul64"
+    PLt64   -> "lt64"
+    PEq64   -> "eq64"
+    PITo64  -> "word64FromNat"
+    P64ToI  -> "word64ToNat"
+    PEqF    -> "MAlonzo.RTE.Float.doubleDenotEq"
     -- MAlonzo uses literal patterns, so we don't need equality for the other primitive types
-    PEqC  -> __IMPOSSIBLE__
-    PEqS  -> __IMPOSSIBLE__
-    PEqQ  -> __IMPOSSIBLE__
-    PSeq  -> "seq"
+    PEqC    -> __IMPOSSIBLE__
+    PEqS    -> __IMPOSSIBLE__
+    PEqQ    -> __IMPOSSIBLE__
+    PSeq    -> "seq"
     -- primitives only used by GuardsToPrims transformation, which MAlonzo doesn't use
-    PIf   -> __IMPOSSIBLE__
-
--- | Haskell modules to be imported for BUILT-INs
-importsForPrim :: TCM [HS.ModuleName]
-importsForPrim =
-  fmap (++ [HS.ModuleName "Data.Text"]) $
-  xForPrim $
-  List.map (\(s, ms) -> (s, return (List.map HS.ModuleName ms))) $
-  [ "CHAR"              |-> ["Data.Char"]
-  , "primIsAlpha"       |-> ["Data.Char"]
-  , "primIsAscii"       |-> ["Data.Char"]
-  , "primIsDigit"       |-> ["Data.Char"]
-  , "primIsHexDigit"    |-> ["Data.Char"]
-  , "primIsLatin1"      |-> ["Data.Char"]
-  , "primIsLower"       |-> ["Data.Char"]
-  , "primIsPrint"       |-> ["Data.Char"]
-  , "primIsSpace"       |-> ["Data.Char"]
-  , "primToLower"       |-> ["Data.Char"]
-  , "primToUpper"       |-> ["Data.Char"]
-  ]
-  where (|->) = (,)
-
---------------
-
-xForPrim :: [(String, TCM [a])] -> TCM [a]
-xForPrim table = do
-  qs <- HMap.keys <$> curDefs
-  bs <- toList <$> gets stBuiltinThings
-  let getName (Builtin (Def q _))    = q
-      getName (Builtin (Con q _ _))  = conName q
-      getName (Builtin (Shared p))   = getName (Builtin $ derefPtr p)
-      getName (Builtin (Lam _ b))    = getName (Builtin $ unAbs b)
-      getName (Builtin _)            = __IMPOSSIBLE__
-      getName (Prim (PrimFun q _ _)) = q
-  concat <$> sequence [ fromMaybe (return []) $ List.lookup s table
-                        | (s, def) <- bs, getName def `elem` qs ]
+    PIf     -> __IMPOSSIBLE__
 
 
 -- | Definition bodies for primitive functions
-primBody :: String -> TCM HS.Exp
-primBody s = maybe unimplemented (fromRight (hsVarUQ . HS.Ident) <$>) $
-             List.lookup s $
+primBody :: MonadTCError m => PrimitiveId -> m HS.Exp
+primBody s = maybe unimplemented (fromRight (hsVarUQ . HS.Ident) <$>) $ List.lookup s $
   [
   -- Integer functions
-    "primIntegerPlus"    |-> binAsis "(+)" "Integer"
-  , "primIntegerMinus"   |-> binAsis "(-)" "Integer"
-  , "primIntegerTimes"   |-> binAsis "(*)" "Integer"
-  , "primIntegerDiv"     |-> binAsis "div" "Integer"
-  , "primIntegerMod"     |-> binAsis "mod" "Integer"
-  , "primIntegerEquality"|-> rel "(==)" "Integer"
-  , "primIntegerLess"    |-> rel "(<)"  "Integer"
-  , "primIntegerAbs"     |-> return "(abs :: Integer -> Integer)"
-  , "primNatToInteger"   |-> return "(id :: Integer -> Integer)"
-  , "primShowInteger"    |-> return "(Data.Text.pack . show :: Integer -> Data.Text.Text)"
+    PrimShowInteger      |-> return "(Data.Text.pack . show :: Integer -> Data.Text.Text)"
 
   -- Levels
-  , "primLevelZero"   |-> return "()"
-  , "primLevelSuc"    |-> return "(\\ _ -> ())"
-  , "primLevelMax"    |-> return "(\\ _ _ -> ())"
+  , PrimLevelZero        |-> return "()"
+  , PrimLevelSuc         |-> return "(\\ _ -> ())"
+  , PrimLevelMax         |-> return "(\\ _ _ -> ())"
 
   -- Natural number functions
-  , "primNatPlus"      |-> binNat "(+)"
-  , "primNatMinus"     |-> binNat "(\\ x y -> max 0 (x - y))"
-  , "primNatTimes"     |-> binNat "(*)"
-  , "primNatDivSucAux" |-> binNat4 "(\\ k m n j -> k + div (max 0 $ n + m - j) (m + 1))"
-  , "primNatModSucAux" |-> binNat4 "(\\ k m n j -> if n > j then mod (n - j - 1) (m + 1) else (k + n))"
-  , "primNatEquality"  |-> relNat "(==)"
-  , "primNatLess"      |-> relNat "(<)"
+  , PrimNatPlus         |-> binNat "(+)"
+  , PrimNatMinus        |-> binNat "(\\ x y -> max 0 (x - y))"
+  , PrimNatTimes        |-> binNat "(*)"
+  , PrimNatDivSucAux    |-> binNat4 "(\\ k m n j -> k + div (max 0 $ n + m - j) (m + 1))"
+  , PrimNatModSucAux    |-> binNat4 "(\\ k m n j -> if n > j then mod (n - j - 1) (m + 1) else (k + n))"
+  , PrimNatEquality     |-> relNat "(==)"
+  , PrimNatLess         |-> relNat "(<)"
+  , PrimShowNat         |-> return "(Data.Text.pack . show :: Integer -> Data.Text.Text)"
+
+  -- Machine word functions
+  , PrimWord64ToNat     |-> return "MAlonzo.RTE.word64ToNat"
+  , PrimWord64FromNat   |-> return "MAlonzo.RTE.word64FromNat"
+  , PrimWord64ToNatInjective   |-> return mazErasedName
 
   -- Floating point functions
-  , "primNatToFloat"        |-> return "(fromIntegral :: Integer -> Double)"
-  , "primFloatPlus"         |-> return "((+)          :: Double -> Double -> Double)"
-  , "primFloatMinus"        |-> return "((-)          :: Double -> Double -> Double)"
-  , "primFloatTimes"        |-> return "((*)          :: Double -> Double -> Double)"
-  , "primFloatNegate"       |-> return "(negate       :: Double -> Double)"
-  , "primFloatDiv"          |-> return "((/)          :: Double -> Double -> Double)"
-  -- ASR (2016-09-14). We use bitwise equality for comparing Double
-  -- because Haskell's Eq, which equates 0.0 and -0.0, allows to prove
-  -- a contradiction (see Issue #2169).
-  , "primFloatEquality"     |-> return "MAlonzo.RTE.eqFloat"
-  , "primFloatNumericalEquality" |-> return "MAlonzo.RTE.eqNumFloat"
-  , "primFloatNumericalLess" |-> return "MAlonzo.RTE.ltNumFloat"
-  , "primFloatSqrt"         |-> return "(sqrt :: Double -> Double)"
-  , "primRound"             |-> return "(round :: Double -> Integer)"
-  , "primFloor"             |-> return "(floor :: Double -> Integer)"
-  , "primCeiling"           |-> return "(ceiling :: Double -> Integer)"
-  , "primExp"               |-> return "(exp :: Double -> Double)"
-  , "primLog"               |-> return "(log :: Double -> Double)"
-  , "primSin"               |-> return "(sin :: Double -> Double)"
-  , "primCos"               |-> return "(cos :: Double -> Double)"
-  , "primTan"               |-> return "(tan :: Double -> Double)"
-  , "primASin"              |-> return "(asin :: Double -> Double)"
-  , "primACos"              |-> return "(acos :: Double -> Double)"
-  , "primATan"              |-> return "(atan :: Double -> Double)"
-  , "primATan2"             |-> return "(atan2 :: Double -> Double -> Double)"
-  , "primShowFloat"         |-> return "(Data.Text.pack . show :: Double -> Data.Text.Text)"
+  , PrimFloatEquality            |-> return "MAlonzo.RTE.Float.doubleEq"
+  , PrimFloatInequality          |-> return "MAlonzo.RTE.Float.doubleLe"
+  , PrimFloatLess                |-> return "MAlonzo.RTE.Float.doubleLt"
+  , PrimFloatIsInfinite          |-> return "(isInfinite :: Double -> Bool)"
+  , PrimFloatIsNaN               |-> return "(isNaN :: Double -> Bool)"
+  , PrimFloatIsNegativeZero      |-> return "(isNegativeZero :: Double -> Bool)"
+  , PrimFloatIsSafeInteger       |-> return "MAlonzo.RTE.Float.isSafeInteger"
+  , PrimFloatToWord64            |-> return "MAlonzo.RTE.Float.doubleToWord64"
+  , PrimFloatToWord64Injective   |-> return mazErasedName
+  , PrimNatToFloat               |-> return "(MAlonzo.RTE.Float.intToDouble :: Integer -> Double)"
+  , PrimIntToFloat               |-> return "(MAlonzo.RTE.Float.intToDouble :: Integer -> Double)"
+  , PrimFloatRound               |-> return "MAlonzo.RTE.Float.doubleRound"
+  , PrimFloatFloor               |-> return "MAlonzo.RTE.Float.doubleFloor"
+  , PrimFloatCeiling             |-> return "MAlonzo.RTE.Float.doubleCeiling"
+  , PrimFloatToRatio             |-> return "MAlonzo.RTE.Float.doubleToRatio"
+  , PrimRatioToFloat             |-> return "MAlonzo.RTE.Float.ratioToDouble"
+  , PrimFloatDecode              |-> return "MAlonzo.RTE.Float.doubleDecode"
+  , PrimFloatEncode              |-> return "MAlonzo.RTE.Float.doubleEncode"
+  , PrimShowFloat                |-> return "(Data.Text.pack . show :: Double -> Data.Text.Text)"
+  , PrimFloatPlus                |-> return "MAlonzo.RTE.Float.doublePlus"
+  , PrimFloatMinus               |-> return "MAlonzo.RTE.Float.doubleMinus"
+  , PrimFloatTimes               |-> return "MAlonzo.RTE.Float.doubleTimes"
+  , PrimFloatNegate              |-> return "MAlonzo.RTE.Float.doubleNegate"
+  , PrimFloatDiv                 |-> return "MAlonzo.RTE.Float.doubleDiv"
+  , PrimFloatPow                 |-> return "MAlonzo.RTE.Float.doublePow"
+  , PrimFloatSqrt                |-> return "MAlonzo.RTE.Float.doubleSqrt"
+  , PrimFloatExp                 |-> return "MAlonzo.RTE.Float.doubleExp"
+  , PrimFloatLog                 |-> return "MAlonzo.RTE.Float.doubleLog"
+  , PrimFloatSin                 |-> return "MAlonzo.RTE.Float.doubleSin"
+  , PrimFloatCos                 |-> return "MAlonzo.RTE.Float.doubleCos"
+  , PrimFloatTan                 |-> return "MAlonzo.RTE.Float.doubleTan"
+  , PrimFloatASin                |-> return "MAlonzo.RTE.Float.doubleASin"
+  , PrimFloatACos                |-> return "MAlonzo.RTE.Float.doubleACos"
+  , PrimFloatATan                |-> return "MAlonzo.RTE.Float.doubleATan"
+  , PrimFloatATan2               |-> return "MAlonzo.RTE.Float.doubleATan2"
+  , PrimFloatSinh                |-> return "MAlonzo.RTE.Float.doubleSinh"
+  , PrimFloatCosh                |-> return "MAlonzo.RTE.Float.doubleCosh"
+  , PrimFloatTanh                |-> return "MAlonzo.RTE.Float.doubleTanh"
+  , PrimFloatASinh               |-> return "MAlonzo.RTE.Float.doubleASinh"
+  , PrimFloatACosh               |-> return "MAlonzo.RTE.Float.doubleACosh"
+  , PrimFloatATanh               |-> return "MAlonzo.RTE.Float.doubleATanh"
 
   -- Character functions
-  , "primCharEquality"   |-> rel "(==)" "Char"
-  , "primIsLower"        |-> return "Data.Char.isLower"
-  , "primIsDigit"        |-> return "Data.Char.isDigit"
-  , "primIsAlpha"        |-> return "Data.Char.isAlpha"
-  , "primIsSpace"        |-> return "Data.Char.isSpace"
-  , "primIsAscii"        |-> return "Data.Char.isAscii"
-  , "primIsLatin1"       |-> return "Data.Char.isLatin1"
-  , "primIsPrint"        |-> return "Data.Char.isPrint"
-  , "primIsHexDigit"     |-> return "Data.Char.isHexDigit"
-  , "primToUpper"        |-> return "Data.Char.toUpper"
-  , "primToLower"        |-> return "Data.Char.toLower"
-  , "primCharToNat" |-> return "(fromIntegral . fromEnum :: Char -> Integer)"
-  , "primNatToChar" |-> return "(toEnum . fromIntegral :: Integer -> Char)"
-  , "primShowChar"  |-> return "(Data.Text.pack . show :: Char -> Data.Text.Text)"
+  , PrimCharEquality     |-> rel "(==)" "Char"
+  , PrimIsLower          |-> return "Data.Char.isLower"
+  , PrimIsDigit          |-> return "Data.Char.isDigit"
+  , PrimIsAlpha          |-> return "Data.Char.isAlpha"
+  , PrimIsSpace          |-> return "Data.Char.isSpace"
+  , PrimIsAscii          |-> return "Data.Char.isAscii"
+  , PrimIsLatin1         |-> return "Data.Char.isLatin1"
+  , PrimIsPrint          |-> return "Data.Char.isPrint"
+  , PrimIsHexDigit       |-> return "Data.Char.isHexDigit"
+  , PrimToUpper          |-> return "Data.Char.toUpper"
+  , PrimToLower          |-> return "Data.Char.toLower"
+  , PrimCharToNat   |-> return "(fromIntegral . fromEnum :: Char -> Integer)"
+  , PrimNatToChar   |-> return "MAlonzo.RTE.natToChar"
+  , PrimShowChar    |-> return "(Data.Text.pack . show :: Char -> Data.Text.Text)"
+  , PrimCharToNatInjective   |-> return mazErasedName
 
   -- String functions
-  , "primStringToList"   |-> return "Data.Text.unpack"
-  , "primStringFromList" |-> return "Data.Text.pack"
-  , "primStringAppend"   |-> binAsis "Data.Text.append" "Data.Text.Text"
-  , "primStringEquality" |-> rel "(==)" "Data.Text.Text"
-  , "primShowString"     |-> return "(Data.Text.pack . show :: Data.Text.Text -> Data.Text.Text)"
+  , PrimStringUncons     |-> return "Data.Text.uncons"
+  , PrimStringToList     |-> return "Data.Text.unpack"
+  , PrimStringFromList   |-> return "Data.Text.pack"
+  , PrimStringAppend     |-> binAsis "Data.Text.append" "Data.Text.Text"
+  , PrimStringEquality   |-> rel "(==)" "Data.Text.Text"
+  , PrimShowString       |-> return "(Data.Text.pack . show :: Data.Text.Text -> Data.Text.Text)"
+  , PrimStringToListInjective   |-> return mazErasedName
+  , PrimStringFromListInjective   |-> return mazErasedName
 
   -- Reflection
-  , "primQNameEquality"   |-> rel "(==)" "MAlonzo.RTE.QName"
-  , "primQNameLess"       |-> rel "(<)" "MAlonzo.RTE.QName"
-  , "primShowQName"       |-> return "Data.Text.pack . MAlonzo.RTE.qnameString"
-  , "primQNameFixity"     |-> return "MAlonzo.RTE.qnameFixity"
-  , "primMetaEquality"    |-> rel "(==)" "Integer"
-  , "primMetaLess"        |-> rel "(<)" "Integer"
-  , "primShowMeta"        |-> return "\\ x -> Data.Text.pack (\"_\" ++ show (x :: Integer))"
+  , PrimQNameEquality     |-> rel "(==)" "MAlonzo.RTE.QName"
+  , PrimQNameLess         |-> rel "(<)" "MAlonzo.RTE.QName"
+  , PrimShowQName         |-> return "Data.Text.pack . MAlonzo.RTE.qnameString"
+  , PrimQNameFixity       |-> return "MAlonzo.RTE.qnameFixity"
+  , PrimQNameToWord64s    |-> return "\\ qn -> (MAlonzo.RTE.nameId qn, MAlonzo.RTE.moduleId qn)"
+  , PrimQNameToWord64sInjective   |-> return mazErasedName
+  , PrimMetaEquality      |-> rel "(==)" "(Integer, Integer)"
+  , PrimMetaLess          |-> rel "(<)" "(Integer, Integer)"
+  -- Should be kept in sync with version in `primitiveFunctions` in
+  -- Agda.TypeChecking.Primitive
+  , PrimShowMeta          |-> return "\\ (m, h) -> Data.Text.pack (\"_\" ++ show (m :: Integer) ++ \"@\" ++ show (h :: Integer))"
+  -- Should be kept in sync with `metaToNat` in Agda.TypeChecking.Primitive
+  , PrimMetaToNat         |-> return "\\ (m, h) -> (h :: Integer) * 2^64 + (m :: Integer)"
+  , PrimMetaToNatInjective   |-> return mazErasedName
 
   -- Seq
-  , "primForce"      |-> return "\\ _ _ _ _ x f -> f $! x"
-  , "primForceLemma" |-> return "erased"
+  , PrimForce        |-> return "\\ _ _ _ _ x f -> f $! x"
+  , PrimForceLemma   |-> return mazErasedName
 
-  -- Trust me
-  , ("primTrustMe"       , Right <$> do
-       refl <- primRefl
-       closedTerm =<< (closedTermToTreeless $ lam "a" (lam "A" (lam "x" (lam "y" refl)))))
+  -- Lock universe
+  , PrimLockUniv |-> return "()"
+
+  -- Erase
+  , PrimEraseEquality |-> return mazErasedName
+
+  -- Rewriting
+  , PrimRewriteNoMatch |-> return "\\ _ _ x -> x"
+
+  -- Quotients
+  , PrimQrec |-> return "\\_ _ _ _ _ _ f _ _ x -> f x"
+
+  -- Cubical
+  , PrimIMin          |-> return "(&&)"
+  , PrimIMax          |-> return "(||)"
+  , PrimINeg          |-> return "not"
+  , PrimPartial       |-> return "\\_ _ x -> x"
+  , PrimPartialP      |-> return "\\_ _ x -> x"
+  , PrimPOr           |-> return "\\_ i _ _ x y -> if i then x else y"
+  , PrimComp          |-> return "\\_ _ _ _ x -> x"
+  , PrimTrans         |-> return "\\_ _ _ x -> x"
+  , PrimHComp         |-> return "\\_ _ _ _ x -> x"
+  , PrimSubOut        |-> return "\\_ _ _ _ x -> x"
+  , Prim_glueU        |-> return "\\_ _ _ _ _ x -> x"
+  , Prim_unglueU      |-> return "\\_ _ _ _ x -> x"
+  , PrimFaceForall    |-> return
+                            "\\f -> f True == True && f False == True"
   ]
   where
   x |-> s = (x, Left <$> s)
-  bin blt op ty from to = do
-    from' <- bltQual' blt from
-    to'   <- bltQual' blt to
-    return $ repl [op, opty ty, from', to'] $
-               "\\ x y -> <<3>> ((<<0>> :: <<1>>) (<<2>> x) (<<2>> y))"
   binNat  op = return $ repl [op] "(<<0>> :: Integer -> Integer -> Integer)"
   binNat4 op = return $ repl [op] "(<<0>> :: Integer -> Integer -> Integer -> Integer -> Integer)"
   binAsis op ty = return $ repl [op, opty ty] $ "((<<0>>) :: <<1>>)"
@@ -235,23 +323,10 @@ primBody s = maybe unimplemented (fromRight (hsVarUQ . HS.Ident) <$>) $
       "(<<0>> :: Integer -> Integer -> Bool)"
   rel op ty  = rel' "" op ty
   opty t = t ++ "->" ++ t ++ "->" ++ t
-  axiom_prims = ["primIMin","primIMax","primINeg","primPartial","primPartialP","primPFrom1","primPOr","primComp"]
-  unimplemented | s `List.elem` axiom_prims = return $ rtmError $ "primitive with no body evaluated: " ++ s
-                | otherwise = typeError $ NotImplemented s
+  unimplemented = typeError $ NotImplemented (getBuiltinId s)
 
-  lam x t = Lam (setHiding Hidden defaultArgInfo) (Abs x t)
+  hLam x t = Lam (setHiding Hidden defaultArgInfo) (Abs x t)
+  nLam x t = Lam (setHiding NotHidden defaultArgInfo) (Abs x t)
 
-noCheckCover :: QName -> TCM Bool
+noCheckCover :: (HasBuiltins m, MonadReduce m) => QName -> m Bool
 noCheckCover q = (||) <$> isBuiltin q builtinNat <*> isBuiltin q builtinInteger
-
-----------------------
-
-
-pconName :: String -> TCM String
-pconName s = toS . ignoreSharing =<< getBuiltin s where
-  toS (Con q _ _) = prettyPrint <$> conhqn (conName q)
-  toS (Lam _ t) = toS (unAbs t)
-  toS _ = mazerror $ "pconName" ++ s
-
-bltQual' :: String -> String -> TCM String
-bltQual' b s = prettyPrint <$> bltQual b s

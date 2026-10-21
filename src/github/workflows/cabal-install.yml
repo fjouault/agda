@@ -1,0 +1,102 @@
+# This workflow tests whether we can build Agda from the sdist tarball.
+
+name: Install (v2-cabal)
+
+on:
+  push:
+    branches:
+    - master
+    paths: &trigger_path_list
+    - '.github/workflows/cabal-install.yml'
+    - 'Agda.cabal'
+    - 'src/full/**'
+    - 'src/main/**'
+  pull_request:
+    paths: *trigger_path_list
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  auto-cancel:
+    if: |
+      !contains(github.event.head_commit.message, '[skip ci]')
+      && !contains(github.event.head_commit.message, '[ci skip]')
+      && !contains(github.event.head_commit.message, '[github skip]')
+      && !contains(github.event.head_commit.message, '[skip github]')
+    runs-on: ubuntu-latest # Required, but it can be anything here.
+
+    steps:
+    - uses: styfle/cancel-workflow-action@0.13.1
+      with:
+        access_token: ${{ github.token }}
+
+  cabal-install:
+    needs: auto-cancel
+
+    timeout-minutes: 60
+
+    name: cabal install ${{ matrix.name }}
+    runs-on: ubuntu-26.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # OBS: name also used in conditional below
+        - name:  ""
+          install_flags: ""
+        - name:  "--lib"
+          install_flags: "--lib"
+
+    env:
+      FLAGS: "-O0 -f enable-cluster-counting"
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: haskell-actions/setup@v2
+      id: setup-haskell
+      with:
+        ghc-version:   '9.14.1'
+        cabal-version: latest
+        cabal-update:  true
+
+    - name: Configure the build plan
+      run: |
+        # shellcheck disable=SC2086
+        cabal configure ${FLAGS}
+        cabal build --dry-run
+      # cabal build --dry-run creates dist-newstyle/cache/plan.json
+
+    - name: Restore cached dependencies
+      uses: actions/cache/restore@v6
+      id: cache
+      env:
+        key: cabal-install.yml-${{ runner.os }}-ghc-${{ steps.setup-haskell.outputs.ghc-version }}-cabal-${{ steps.setup-haskell.outputs.cabal-version }}
+      with:
+        path: &cache_path ${{ steps.setup-haskell.outputs.cabal-store }}
+        # The file `plan.json` contains the build information.
+        key:          ${{ env.key }}-${{ hashFiles('**/plan.json') }}
+        restore-keys: ${{ env.key }}-
+
+    - name: Install dependencies
+      # Since we save the cache even when building failed, it may be incomplete.
+      # Thus, do not skip this step:
+      # if: steps.cache.outputs.cache-hit != 'true'
+      run: |
+        cabal build --only-dependencies
+
+    - name: Install Agda
+      run: |
+        # shellcheck disable=SC2086
+        cabal install ${FLAGS} ${{ matrix.install_flags }}
+
+    - name: Save cache
+      uses: actions/cache/save@v6
+      if:   always() && steps.cache.outputs.cache-hit != 'true'
+            # save cache even when build fails
+      with:
+        key:  ${{ steps.cache.outputs.cache-primary-key }}
+        path: *cache_path

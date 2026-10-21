@@ -4,26 +4,26 @@ TOP = ../..
 
 include $(TOP)/mk/paths.mk
 
-# Enable read -n and 2>&1 |.
-SHELL=/usr/bin/env bash
+# Extra options when running agda --interaction
+# Andreas, 2025-08-05, PR #8047:
+# Add --color=never to turn off highlighting info sent to the Agda information buffer.
+# Highlighting information for the info buffer is not portable
+# since its position info varies with the length of filepaths.
+# As they are absolute, they have different length locally and on CI.
+# So, we do not want this highlighting information in the golden values
+# until someone finishes #6192.
+AGDA_OPT=--no-default-libraries --color=never
 
 uname:=$(shell uname)
 ifeq (NT-5,$(findstring NT-5,$(uname)))
-pwd=$(shell (cmd /c 'echo %CD%') | sed -e 's/\\/\\\\\\\\/g')
+pwd=$(shell (cmd /c 'echo %CD%') | $(SED) -e 's/\\/\\\\\\\\/g')
 pwdPlusDelimiter=$(pwd)\\\\
 else
 pwd=$(shell pwd)
 pwdPlusDelimiter=$(pwd)/
 endif
 
-# use gsed on Mac OS instead of sed
-ifeq (Darwin,$(findstring Darwin,$(uname)))
-sed=gsed
-else
-sed=sed
-endif
-
-clean=/usr/bin/env bash $(shell pwd)/clean.sh $(sed)
+clean=/usr/bin/env bash $(shell pwd)/clean.sh $(SED)
 
 # Andreas, 2017-04-24 ls -t: sort by newest first
 AgdaFiles=$(shell ls -t *agda)
@@ -35,24 +35,28 @@ default : $(Tests)
 export TMPDIR=highlighting-tmp
 
 # Filter out absolute pathes
-filter=$(sed) -e 's"$(pwdPlusDelimiter)""g' \
+filter=$(SED) -e 's"$(pwdPlusDelimiter)""g' \
               -e 's"$(pwd)""g' \
               -e 's" \"$(TMPDIR).*\"""' \
               -e 's"[^ (\"]*lib.prim"agda-default-include-path"g' \
+              -e 's"[^ (\"]*std-lib"agda-default-standard-library-path"g' \
               -e 's/\(\\n\| \)\+/ /g' \
      | $(clean)
 
-run_test=if test -f $*.in; \
+# Turn off "eager failure" flags (e, E, pipefail) while running the test.
+run_test=\
+    set +eE +o pipefail; \
+    if test -f $*.in; \
     then cat $*.in \
-         | $(sed) "s/ioTCM/IOTCM/g" \
-         | $(sed) "s/cmd_/Cmd_/g" \
-         | $(sed) "s/showImplicitArgs/ShowImplicitArgs/g" \
-         | $(sed) "s/toggleImplicitArgs/ToggleImplicitArgs/g" \
-         | $(sed) "s/top_command/IOTCM currentFile None Indirect/g" \
-         | $(sed) "s/goal_command \\([0-9]\+\\) (\\([^)]\+\\)) \\(\"[^\"]*\"\\)/IOTCM currentFile None Indirect (\\2 \\1 noRange \\3)/g" \
-         | $(sed) "s/goal_command \\([0-9]\+\\) \\([^ ]\+\\) \\(\"[^\"]*\"\\)/IOTCM currentFile None Indirect (\\2 \\1 noRange \\3)/g" \
-         | $(sed) "s/currentFile/\"$(wildcard $*.agda $*.lagda)\"/g" \
-         | $(AGDA_BIN) -v 0 -i . -i .. --interaction --no-default-libraries $(RTS_$*) \
+         | $(SED) "s/ioTCM/IOTCM/g" \
+         | $(SED) "s/cmd_/Cmd_/g" \
+         | $(SED) "s/showImplicitArgs/ShowImplicitArgs/g" \
+         | $(SED) "s/toggleImplicitArgs/ToggleImplicitArgs/g" \
+         | $(SED) "s/top_command/IOTCM currentFile None Indirect/g" \
+         | $(SED) "s/goal_command \\([0-9]\+\\) (\\([^)]\+\\)) \\(\"[^\"]*\"\\)/IOTCM currentFile None Indirect (\\2 \\1 noRange \\3)/g" \
+         | $(SED) "s/goal_command \\([0-9]\+\\) \\([^ ]\+\\) \\(\"[^\"]*\"\\)/IOTCM currentFile None Indirect (\\2 \\1 noRange \\3)/g" \
+         | $(SED) "s/currentFile/\"$(wildcard $*.agda $*.lagda)\"/g" \
+         | $(AGDA_BIN) -v 0 -i . -i .. --interaction $(AGDA_OPT) $(RTS_$*) \
            2>&1 | $(filter) ; \
     else /usr/bin/env bash ./$*.sh $(AGDA_BIN) > $(TMPDIR)/$*.tmp_out ; \
          cat $(TMPDIR)/$*.tmp_out | $(filter) ; \
@@ -63,7 +67,7 @@ run_test=if test -f $*.in; \
 
 # No recorded output
 $(OutFiles) : %.out : $(wildcard %.agda %.lagda) $(wildcard %.in %.in_ghci)
-	@-mkdir $(TMPDIR)
+	@-mkdir -p $(TMPDIR)
 	@$(setup_$*)
 	@rm -f "$(@:.out=.agdai)"
 	@echo "=== Output for $* ==="
@@ -74,12 +78,12 @@ $(OutFiles) : %.out : $(wildcard %.agda %.lagda) $(wildcard %.in %.in_ghci)
 
 # Comparing output
 $(Tests) : %.cmp : %.out
-	@-mkdir $(TMPDIR)
+	@-mkdir -p $(TMPDIR)
 	@$(setup_$*)
 	@rm -f "$(@:.cmp=.agdai)"
 	@echo $*
 	@$(run_test) > $*.tmp
-	@if diff -b $*.out $*.tmp; \
+	@if diff -q -b $*.out $*.tmp; \
 		then rm -f $*.tmp; true; \
 		else \
 			echo "=== Old output ==="; \
@@ -87,7 +91,7 @@ $(Tests) : %.cmp : %.out
 			echo "=== New output ==="; \
 			cat $*.tmp; \
 			echo "=== Diff ==="; \
-			diff -b $*.out $*.tmp; \
+			( git diff --no-index --no-ext-diff -w $*.out $*.tmp || true ) ; \
 			/bin/echo -n "Accept new error [y/N/q]? "; \
 			read -n 1; \
 			echo ""; \

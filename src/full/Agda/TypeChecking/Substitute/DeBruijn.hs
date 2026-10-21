@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.Substitute.DeBruijn where
 
@@ -10,45 +11,52 @@ class DeBruijn a where
 
   -- | Produce a variable without name suggestion.
   deBruijnVar  :: Int -> a
-  deBruijnVar = debruijnNamedVar underscore
+  deBruijnVar = deBruijnNamedVar underscore
 
   -- | Produce a variable with name suggestion.
-  debruijnNamedVar :: String -> Int -> a
-  debruijnNamedVar _ = deBruijnVar
+  deBruijnNamedVar :: String -> Int -> a
+  deBruijnNamedVar _ = deBruijnVar
 
   -- | Are we dealing with a variable?
   --   If yes, what is its index?
   deBruijnView :: a -> Maybe Int
 
+  {-# MINIMAL (deBruijnVar | deBruijnNamedVar) , deBruijnView #-}
+
 -- | We can substitute @Term@s for variables.
 instance DeBruijn Term where
   deBruijnVar = var
+  {-# INLINE deBruijnView #-}
   deBruijnView u =
-    case ignoreSharing u of
+    case u of
       Var i [] -> Just i
       Level l -> deBruijnView l
       _ -> Nothing
 
-instance DeBruijn LevelAtom where
-  deBruijnVar = NeutralLevel ReallyNotBlocked . deBruijnVar
-  deBruijnView l =
-    case l of
-      NeutralLevel _ u -> deBruijnView u
-      UnreducedLevel u -> deBruijnView u
-      MetaLevel{}    -> Nothing
-      BlockedLevel{} -> Nothing
-
 instance DeBruijn PlusLevel where
   deBruijnVar = Plus 0 . deBruijnVar
+  {-# INLINE deBruijnView #-}
   deBruijnView l =
     case l of
       Plus 0 a -> deBruijnView a
       _ -> Nothing
 
 instance DeBruijn Level where
-  deBruijnVar i = Max [deBruijnVar i]
+  deBruijnVar i = Max 0 [deBruijnVar i]
+  {-# INLINE deBruijnView #-}
   deBruijnView l =
     case l of
-      Max [p] -> deBruijnView p
+      Max 0 [p] -> deBruijnView p
       _ -> Nothing
 
+instance DeBruijn DBPatVar where
+  deBruijnNamedVar = DBPatVar
+  deBruijnView = Just . dbPatVarIndex
+
+instance DeBruijn a => DeBruijn (Named_ a) where
+  deBruijnNamedVar nm i = unnamed $ deBruijnNamedVar nm i
+  deBruijnView = deBruijnView . namedThing
+
+instance DeBruijn Nat where
+  deBruijnVar  x = x
+  deBruijnView x = Just x

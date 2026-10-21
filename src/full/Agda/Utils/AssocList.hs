@@ -1,19 +1,21 @@
-{-# LANGUAGE CPP           #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Additional functions for association lists.
 
-module Agda.Utils.AssocList where
+module Agda.Utils.AssocList
+  ( module Agda.Utils.AssocList
+  , lookup
+  ) where
 
 import Prelude hiding (lookup)
 
-import Control.Applicative
-
-import qualified Data.List as List
-import Data.Function
+import Data.Function (on)
+import Data.List (lookup)
+import Data.List qualified as List
+import Data.Map qualified  as Map
 
 import Agda.Utils.Tuple
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 -- | A finite map, represented as a set of pairs.
@@ -21,10 +23,20 @@ import Agda.Utils.Impossible
 --   Invariant: at most one value per key.
 type AssocList k v = [(k,v)]
 
--- | O(n).
---   Reexport 'List.lookup'.
-lookup :: Eq k => k -> AssocList k v -> Maybe v
-lookup = List.lookup
+-- Lookup, reexported from Data.List.
+-- O(n).
+-- lookup :: Eq k => k -> AssocList k v -> Maybe v
+
+-- | Lookup keys in the same association list often.
+--   Use partially applied to create partial function
+--   @apply m :: k -> Maybe v@.
+--
+--   * First time: @O(n log n)@ in the worst case.
+--   * Subsequently: @O(log n)@.
+--
+--   Specification: @apply m == (`lookup` m)@.
+apply :: Ord k => AssocList k v -> k -> Maybe v
+apply m = (`Map.lookup` Map.fromListWith (\ _new old -> old) m)
 
 -- | O(n).
 --   Get the domain (list of keys) of the finite map.
@@ -82,4 +94,4 @@ mapWithKeyM f = mapM $ \ (k,v) -> (k,) <$> f k v
 --   To preserve the invariant, it is sufficient that the key
 --   transformation is injective (rather than monotonic).
 mapKeysMonotonic :: (k -> k') -> AssocList k v -> AssocList k' v
-mapKeysMonotonic f = map $ mapFst f
+mapKeysMonotonic f = map $ first f

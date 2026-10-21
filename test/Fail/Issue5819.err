@@ -1,0 +1,11 @@
+
+Issue5819.agda:108.36-53: warning: -W[no]RewritesNothing
+'rewrite' did not apply
+when checking that the clause
+invˡ {dl″ (cons′ a l) p} rewrite invˡ {dl″ l ?} = ? has type
+{x = x₁ : DList″} → f dl-iso (f⁻¹ dl-iso x₁) ≡ x₁
+Issue5819.agda:108.48-120.45: error: [UnsolvedInteractionMetas]
+Unsolved interaction metas at the following locations:
+  Issue5819.agda:108.48-52
+  Issue5819.agda:108.56-60
+  Issue5819.agda:120.25-45

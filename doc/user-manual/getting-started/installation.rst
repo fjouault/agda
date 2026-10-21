@@ -4,58 +4,111 @@
 Installation
 ************
 
-Debian / Ubuntu
----------------
+.. hint:: If you want a sneak peek of Agda without installing it, try the
+  `Agda Pad <https://agdapad.quasicoherent.io/>`_ or the `Agda Web <https://agda-web.github.io>`_.
 
-Prebuilt packages are available for Debian testing/unstable and Ubuntu from Karmic onwards. To install:
+.. hint:: This documentation is for first-time Agda users.
+    More advanced "do it yourself" instructions can be found in the Agda repo's
+    `HACKING.md <https://github.com/agda/agda/blob/master/HACKING.md>`_ file.
 
-.. code-block:: bash
+.. _install-agda:
 
-  apt-get install agda-mode
+Step 1: Install Agda
+====================
 
-This should install Agda and the Emacs mode.
+You can get the Agda type-checker in at least 4 ways:
 
-The standard library is available in Debian testing/unstable and Ubuntu from Lucid onwards. To install:
 
-.. code-block:: bash
+.. _prebuilt-agda-from-github:
 
-  apt-get install agda-stdlib
+Option 1: From GitHub releases
+------------------------------
 
-Fedora
-------
+Pre-built ``agda`` binaries are available for the following platforms:
 
-Agda is packaged in Fedora (since before Fedora 18).
+* Windows (x86-64)
+* Linux (x86-64, statically linked)
+* macOS (x86-64)
+* macOS (arm64, i.e. Apple M-series)
 
-.. code-block:: bash
+They can be downloaded from the `Agda GitHub releases <https://github.com/agda/agda/releases/>`_ page (under "Assets").
 
-  yum install Agda
+To install, download the appropriate archive, extract the binary, and place it in a directory listed in your ``PATH`` environment variable.
 
-will pull in emacs-agda-mode and ghc-Agda-devel.
+.. _install-agda-dev:
 
-NixOS
------
+Option 2: From source
+---------------------
 
-Agda is part of the Nixpkgs collection that is used by http://nixos.org/nixos. To install Agda and agda-mode for Emacs, type:
+If you want to work on the Agda compiler itself, or you want to work with the very
+latest version of Agda, then you can compile it from source from the `Github repository
+<https://github.com/agda/agda>`_.
 
-.. code-block:: bash
+Both ``cabal install``-based and ``nix build``-based developer builds are maintained.
 
-  nix-env -f "<nixpkgs>" -iA haskellPackages.Agda
+Miscellaneous developer information is available in the repository's ``HACKING.md``.
 
-If you’re just interested in the library, you can also install the library without the executable. The Agda standard library is currently not installed automatically.
+.. _install-agda-prebuilt:
 
-OS X
-----
+Option 3: From package manager
+------------------------------
 
-`Homebrew <http://brew.sh>`_ provides prebuilt packages for OS X.  To install:
+``agda`` binaries are distributed by various package managers, but are often out of date. Repology.org maintains a list:
 
-.. code-block:: bash
+.. raw:: html
 
-  brew install agda
+  <embed src="https://repology.org/badge/vertical-allrepos/agda.svg?columns=4&exclude_unsupported=1&exclude_sources=modules,site">
 
-This should take less than a minute, and install Agda together with the Emacs mode and the standard library.
+As well as the repositories tracked by repology,
+an OS-independent binary installation of Agda is provided by the `python installer <https://pypi.org/project/agda/>`_.
 
-By default, the standard library is installed in ``/usr/local/lib/agda/``.  To use the standard library, it is convenient to add ``/usr/local/lib/agda/standard-library.agda-lib`` to ``~/.agda/libraries``, and specify ``standard-library`` in ``~/.agda/defaults``.  Note this is not performed automatically.
+.. _install-agda-from-editor:
 
-It is also possible to install ``--without-stdlib``, ``--without-ghc``, or from ``--HEAD``.  Note this will require building Agda from source.
+Option 4: From text editor
+--------------------------
 
-For more information, refer to the `Homebrew documentation <http://git.io/brew-docs>`_.
+Some text editor extensions (e.g. ``banacorn.agda-mode`` for VSCode) can install Agda on their own.
+
+.. _install-text-editor:
+
+Step 2: Configure a text editor
+===============================
+
+Your choice of text editor matters more in Agda than it does in most other programming languages.
+This is because Agda code typically uses a lot of unicode symbols, and because you will typically
+*interact* with Agda through the text editor while writing your program.
+
+Editors with interactive support for Agda include:
+
+* Emacs (:ref:`agda-mode <emacs-mode>`) (most tested)
+
+* Visual Studio Code (`banacorn.agda-mode
+  <https://github.com/banacorn/agda-mode-vscode>`_)
+
+* Neovim (`Cornelis
+  <https://github.com/isovector/cornelis>`_)
+
+* Vim (`agda-vim
+  <https://github.com/derekelkins/agda-vim>`_)
+
+.. _install-agda-stdlib:
+
+Step 3: Install ``agda-stdlib`` (optional)
+==========================================
+
+You may want to install Agda's `standard library <https://github.com/agda/agda-stdlib>`_,
+although Agda will work without it.
+
+You can install this like any other Agda library (see :ref:`package-system`).
+See the `agda-stdlib project's installation instructions <https://github.com/agda/agda-stdlib/blob/master/doc/installation-guide.md>`_
+for the steps to take to install the latest version.
+
+.. _install-ghc:
+
+Step 4: Install ``ghc`` (optional)
+==================================
+
+To compile your Agda code to an executable, ``agda`` calls the Haskell compiler ``ghc``, which is not bundled with most Agda distributions.
+You can install ``ghc`` spearately with e.g. `GHCUp <https://www.haskell.org/ghcup/>`_.
+
+No separate programs are called by Agda's :ref:`JavaScript backend <javascript-backend>`.

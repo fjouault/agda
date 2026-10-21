@@ -21,11 +21,12 @@
 Copatterns
 **********
 
-Consider the following record:
+.. note:: If you are looking for information on how to use copatterns with
+   coinductive records, please visit the section on :ref:`coinduction <coinduction>`.
 
-::
+Consider the following record::
 
-  record Enumeration A : Set where
+  record Enumeration (A : Set) : Set where
     constructor enumeration
     field
       start    : A
@@ -33,7 +34,7 @@ Consider the following record:
       backward : A → A
 
 
-This gives an interfaces that allows us to move along the elements of a
+This gives an interface that allows us to move along the elements of a
 data type ``A``.
 
 For example, we can get the “third” element of a type ``A``:
@@ -72,8 +73,8 @@ specify all the fields in a single expression:
     open Enumeration
 
     enum-Nat : Enumeration Nat
-    enum-Nat = record {
-        start    = 0
+    enum-Nat = record
+      { start    = 0
       ; forward  = suc
       ; backward = pred
       }
@@ -138,8 +139,8 @@ Without copatterns, we just add the extra argument to the function declaration:
     open Enumeration
 
     enum-Nat : Nat → Enumeration Nat
-    enum-Nat initial = record {
-        start    = initial
+    enum-Nat initial = record
+      { start    = initial
       ; forward  = suc
       ; backward = pred
       }
@@ -169,7 +170,7 @@ field in the record:
     backward (enum-Nat _) (suc n) = n
 
 
-Mixing patterns and co-patterns
+Mixing patterns and copatterns
 -------------------------------
 
 Instead of allowing an arbitrary value, we want to limit the user to
@@ -191,8 +192,8 @@ value to start with based on the user-provided flag:
     if false then _ else y = y
 
     enum-Nat : Bool → Enumeration Nat
-    enum-Nat ahead = record {
-        start    = if ahead then 42 else 0
+    enum-Nat ahead = record
+      { start    = if ahead then 42 else 0
       ; forward  = suc
       ; backward = pred
       }
@@ -266,4 +267,3 @@ With copatterns, we can do the case analysis directly by pattern matching:
        forward  enum-Nat n = suc n
        backward enum-Nat zero    = zero
        backward enum-Nat (suc n) = n
-

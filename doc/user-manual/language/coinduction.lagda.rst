@@ -1,3 +1,18 @@
+.. _coinduction:
+
+***********
+Coinduction
+***********
+
+The corecursive definitions below are accepted if the option
+:samp:`--guardedness` is active:
+
+::
+
+  {-# OPTIONS --guardedness #-}
+
+(An alternative approach is to use :ref:`sized-types`.)
+
 ..
   ::
   module language.coinduction where
@@ -9,19 +24,13 @@
 
   module newcoinduction where
 
-.. _coinduction:
-
-***********
-Coinduction
-***********
-
 .. _copatterns-coinductive-records:
 
 Coinductive Records
-----------------------------------
+-------------------
 
 It is possible to define the type of infinite lists (or streams) of
-elements of some type ``A`` as follows,
+elements of some type ``A`` as follows:
 
 ::
 
@@ -31,11 +40,11 @@ elements of some type ``A`` as follows,
         hd : A
         tl : Stream A
 
-As opossed to inductive record types, we have to introduce the keyword
+As opposed to :ref:`inductive record types <recursive-records>`, we have to introduce the keyword
 ``coinductive`` before defining the fields that constitute the record.
 
-It is interesting to note that is not neccessary to give an explicit
-constructor to the record type ``Stream A``.
+It is interesting to note that it is not necessary to give an :ref:`explicit
+constructor <coinductive-constructors>` to the record type ``Stream``.
 
 ..
   ::
@@ -49,21 +58,25 @@ constructor to the record type ``Stream A``.
         fst : A
         snd : B
 
+Now we can use :ref:`copatterns <copatterns>` to create ``Stream``\s, like one that
+repeats a given element ``a`` infinitely many times::
 
-We can as well define bisimilarity (equivalence) of a pair of ``Stream A`` as a
-coinductive record.
+    repeat : {A : Set} (a : A) -> Stream A
+    hd (repeat a) = a
+    tl (repeat a) = repeat a
 
-::
+We can also define pointwise equality (a bisimulation and an equivalence) of a pair of ``Stream``\s as a
+coinductive record::
 
-    record _≈_ {A : Set} (xs : Stream A) (ys : Stream A) : Set where
+    record _≈_ {A} (xs : Stream A) (ys : Stream A) : Set where
       coinductive
       field
-        hd-≈ : hd xs ≡ hd ys
+        hd-≡ : hd xs ≡ hd ys
         tl-≈ : tl xs ≈ tl ys
 
 Using :ref:`copatterns <copatterns>` we can define a pair of functions
-on ``Stream`` such that one returns a ``Stream`` with the elements in
-the even positions and the other the elements in odd positions.
+on ``Stream``\s such that one returns the elements in
+the even positions and the other the elements in the odd positions:
 
 ..
   ::
@@ -73,32 +86,138 @@ the even positions and the other the elements in odd positions.
 ::
 
     even : ∀ {A} → Stream A → Stream A
-    hd (even x) = hd x
-    tl (even x) = even (tl (tl x))
+    hd (even xs) = hd xs
+    tl (even xs) = even (tl (tl xs))
 
     odd : ∀ {A} → Stream A → Stream A
-    odd x = even (tl x)
+    odd xs = even (tl xs)
 
-    split : ∀ {A } → Stream A → Stream A × Stream A
+    split : ∀ {A} → Stream A → Stream A × Stream A
     split xs = even xs , odd xs
 
-And merge a pair of ``Stream`` by interleaving their elements.
+as well as a function that merges a pair of ``Stream``\s by interleaving their elements:
 
 ::
 
     merge : ∀ {A} → Stream A × Stream A → Stream A
-    hd (merge (fst , snd)) = hd fst
-    tl (merge (fst , snd)) = merge (snd , tl fst)
+    hd (merge (xs , ys)) = hd xs
+    tl (merge (xs , ys)) = merge (ys , tl xs)
 
-Finally, we can prove that split is the left inverse of merge.
+Finally, we can prove that ``merge`` is a left inverse for ``split``:
 
 ::
 
     merge-split-id : ∀ {A} (xs : Stream A) → merge (split xs) ≈ xs
-    hd-≈ (merge-split-id _)  = refl
+    hd-≡ (merge-split-id _)  = refl
     tl-≈ (merge-split-id xs) = merge-split-id (tl xs)
 
+.. _coinductive-constructors:
 
+Coinductive Record Constructors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+It is possible to give an explicit constructor to coinductive record types like ``Stream``:
+
+::
+
+    record Stream' (A : Set) : Set where
+      coinductive
+      constructor cons
+      field
+        hd : A
+        tl : Stream' A
+
+..
+  ::
+
+    open Stream'
+
+However, this constructor cannot be pattern-matched:
+
+::
+
+    -- Get the third element of a stream
+    third : ∀{A} → Stream' A → A
+
+    -- Not allowed:
+    -- third (cons _ (cons _ (cons x _))) = x
+
+Instead, you can use the record fields as projections:
+
+::
+
+    third str = str .tl .tl .hd
+
+The constructor can be used as usual in the right-hand side of definitions:
+
+::
+
+    -- Prepend a list to a stream
+    prepend : ∀{A} → List A → Stream' A → Stream' A
+    prepend [] str = str
+    prepend (a ∷ as) str = cons a (prepend as str)
+
+However, it doesn't count as 'guarding' for the productivity checker:
+
+::
+
+    -- Make a stream with one element repeated forever
+    cycle : ∀{A} → A → Stream' A
+
+    -- Does not termination-check:
+    -- cycle a = cons a (cycle a)
+
+Instead, you can use copattern matching:
+
+::
+
+    cycle a .hd = a
+    cycle a .tl = cycle a
+
+It is also possible to use copatterns in a :ref:`pattern-lambda`:
+
+::
+
+    cycle' : ∀{A} → A → Stream' A
+    cycle' a = λ where
+      .hd → a
+      .tl → cycle' a
+
+
+For more information on these restrictions, see `this pull request <https://github.com/agda/agda/pull/4611>`_,
+and `this commit <https://github.com/agda/agda/commit/d771ac257ee9a1f9662364e5db8a50f9994dac49>`_.
+
+.. _eta-pragma:
+
+The ``ETA_EQUALITY`` pragma
+___________________________
+
+Agda does not permit the ``eta-equality`` directive in ``coinductive`` ``record`` declarations,
+since η for coinductive types is unsafe in general and can make the type checker loop.
+For instance, the following code would lead to infinite η expansion when checking ``test``:
+
+.. code-block:: agda
+
+  record R : Set where
+   coinductive; eta-equality
+   field force : R
+  open R
+
+  foo : R
+  foo .force .force = foo
+
+  test : foo .force ≡ foo
+  test = refl
+
+If you know what you are doing, you can override Agda and force a coinductive record to support η via the ``ETA_EQUALITY`` pragma.
+
+.. code-block:: agda
+
+  {-# ETA_EQUALITY #-}
+  record R : Set where
+    ...
+
+.. _old-coinduction:
 
 Old Coinduction
 ---------------
@@ -107,10 +226,7 @@ Old Coinduction
    This is the old way of coinduction support in Agda. You are advised to use
    :ref:`copatterns-coinductive-records` instead.
 
-.. note::
-   The type constructor ``∞`` can be used to prove absurdity!
-
-To use coinduction it is recommended that you import the module Coinduction from the `standard library <http://wiki.portal.chalmers.se/agda/pmwiki.php?n=Libraries.StandardLibrary>`_. Coinductive types can then be defined by labelling coinductive occurrences using the delay operator ``∞``:
+To use coinduction it is recommended that you import the module Coinduction from the `standard library <https://wiki.portal.chalmers.se/agda/pmwiki.php?n=Libraries.StandardLibrary>`_. Coinductive types can then be defined by labelling coinductive occurrences using the delay operator ``∞``:
 
 ..
   ::
@@ -180,5 +296,3 @@ The recommended definition is the following one:
   data _≈_ : Coℕ → Coℕ → Set where
     zero : zero ≈ zero
     suc  : ∀ {m n} → ∞ (♭ m ≈ ♭ n) → suc m ≈ suc n
-
-The current implementation of coinductive types comes with some `limitations <http://article.gmane.org/gmane.comp.lang.agda/763/>`_.

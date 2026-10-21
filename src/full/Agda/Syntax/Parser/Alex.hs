@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 {-| This module defines the things required by Alex and some other
     Alex related things.
 -}
@@ -8,7 +10,7 @@ module Agda.Syntax.Parser.Alex
     , alexInputPrevChar
     , alexGetChar, alexGetByte
       -- * Lex actions
-    , LexAction, LexPredicate
+    , LexAction(..), LexPredicate
     , (.&&.), (.||.), not'
     , PreviousInput, CurrentInput, TokenLength
       -- * Monad operations
@@ -17,25 +19,26 @@ module Agda.Syntax.Parser.Alex
     where
 
 import Control.Monad.State
+import Data.Char
 import Data.Word
+import GHC.Exts (oneShot)
 
 import Agda.Syntax.Position
 import Agda.Syntax.Parser.Monad
 
 import Agda.Utils.Lens
-import Agda.Utils.Monad
 import Agda.Utils.Tuple
 
 -- | This is what the lexer manipulates.
 data AlexInput = AlexInput
   { lexSrcFile  :: !SrcFile              -- ^ File.
   , lexPos      :: !PositionWithoutFile  -- ^ Current position.
-  , lexInput    :: String                -- ^ Current input.
+  , lexInput    :: !String                -- ^ Current input.
   , lexPrevChar :: !Char                 -- ^ Previously read character.
   }
 
 -- | A lens for 'lexInput'.
-lensLexInput :: Lens' String AlexInput
+lensLexInput :: Lens' AlexInput String
 lensLexInput f r = f (lexInput r) <&> \ s -> r { lexInput = s }
 
 -- | Get the previously lexed character. Same as 'lexPrevChar'. Alex needs this
@@ -43,9 +46,10 @@ lensLexInput f r = f (lexInput r) <&> \ s -> r { lexInput = s }
 alexInputPrevChar :: AlexInput -> Char
 alexInputPrevChar = lexPrevChar
 
--- | Lex a character. No surprises.
+-- | Returns the next character, and updates the 'AlexInput' value.
 --
--- This function is used by Alex 2.
+-- This function is not suitable for use by Alex 2, because it can
+-- return non-ASCII characters.
 alexGetChar :: AlexInput -> Maybe (Char, AlexInput)
 alexGetChar     (AlexInput { lexInput = []              }) = Nothing
 alexGetChar inp@(AlexInput { lexInput = c:s, lexPos = p }) =
@@ -57,21 +61,40 @@ alexGetChar inp@(AlexInput { lexInput = c:s, lexPos = p }) =
                  }
          )
 
--- | A variant of 'alexGetChar'.
+-- | Returns the next byte, and updates the 'AlexInput' value.
 --
--- This function is used by Alex 3.
+-- A trick is used to handle the fact that there are more than 256
+-- Unicode code points. The function translates characters to bytes in
+-- the following way:
+--
+-- * Whitespace characters other than \'\\t\' and \'\\n\' are
+--   translated to \' \'.
+-- * Non-ASCII alphabetical characters are translated to \'z\'.
+-- * Other non-ASCII printable characters are translated to \'+\'.
+-- * Everything else is translated to \'\\1\'.
+--
+-- Note that it is important that there are no keywords containing
+-- \'z\', \'+\', \' \' or \'\\1\'.
+--
+-- This function is used by Alex (version 3).
+
 alexGetByte :: AlexInput -> Maybe (Word8, AlexInput)
 alexGetByte ai =
-  -- Note that we ensure that every character presented to Alex fits
-  -- in seven bits.
-  mapFst (fromIntegral . fromEnum) <$> alexGetChar ai
+  first (fromIntegral . fromEnum . toASCII) <$> alexGetChar ai
+  where
+  toASCII c
+    | isSpace c && c /= '\t' && c /= '\n' = ' '
+    | isAscii c                           = c
+    | isPrint c                           = if isAlpha c then 'z'
+                                                         else '+'
+    | otherwise                           = '\1'
 
 {--------------------------------------------------------------------------
     Monad operations
  --------------------------------------------------------------------------}
 
 getLexInput :: Parser AlexInput
-getLexInput = getInp <$> get
+getLexInput = gets getInp
     where
         getInp s = AlexInput
                     { lexSrcFile    = parseSrcFile s
@@ -97,9 +120,30 @@ type PreviousInput  = AlexInput
 type CurrentInput   = AlexInput
 type TokenLength    = Int
 
--- | In the lexer, regular expressions are associated with lex actions who's
---   task it is to construct the tokens.
-type LexAction r    = PreviousInput -> CurrentInput -> TokenLength -> Parser r
+-- | In the lexer, regular expressions are associated with lex actions whose
+--   task is to construct the tokens.
+newtype LexAction r
+  = LexAction { runLexAction :: PreviousInput -> CurrentInput -> TokenLength -> Parser r }
+  deriving (Functor)
+
+instance Applicative LexAction where
+  {-# INLINE pure #-}
+  pure r    = LexAction (oneShot \ _ _ _ -> pure r)
+  {-# INLINE (<*>) #-}
+  mf <*> mr = LexAction (oneShot \ a b c -> runLexAction mf a b c <*> runLexAction mr a b c)
+
+instance Monad LexAction where
+  return = pure
+  {-# INLINE (>>=) #-}
+  m >>= k  = LexAction (oneShot \ a b c -> do
+    r <- runLexAction m a b c
+    runLexAction (k r) a b c)
+
+instance MonadState ParseState LexAction where
+  {-# INLINE get #-}
+  get   = LexAction (oneShot (\ _ _ _ -> get))
+  {-# INLINE put #-}
+  put s = LexAction (oneShot (\ _ _ _ -> put s))
 
 -- | Sometimes regular expressions aren't enough. Alex provides a way to do
 --   arbitrary computations to see if the input matches. This is done with a

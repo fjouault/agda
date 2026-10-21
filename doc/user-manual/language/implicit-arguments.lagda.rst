@@ -3,7 +3,9 @@
   {-# OPTIONS --allow-unsolved-metas #-}
   module language.implicit-arguments (A B : Set) (C : A → Set) where
 
-  open import language.built-ins using (_≡_ ; refl)
+  open import Agda.Builtin.Equality
+  open import Agda.Builtin.Unit using (⊤)
+  open import Agda.Builtin.Nat using (Nat; zero; suc)
 
   _is-the-same-as_ = _≡_
 
@@ -15,7 +17,7 @@ Implicit Arguments
 ******************
 
 It is possible to omit terms that the type checker can figure out for
-itself, replacing them by ``_``.
+itself, replacing them by an underscore (``_``).
 If the type checker cannot infer the value of an ``_`` it will report
 an error.
 For instance, for the polymorphic identity function
@@ -60,7 +62,7 @@ Another example:
 Note how the first argument to ``_==_`` is left implicit.
 Similarly, we may leave out the implicit arguments ``A``, ``x``, and ``y`` in an
 application of ``subst``.
-To give an implicit argument explicitly, enclose in curly braces.
+To give an implicit argument explicitly, enclose it in curly braces.
 The following two expressions are equivalent:
 
 ..
@@ -103,7 +105,7 @@ For example, in the following, ``y1`` and ``y2`` are equivalent.
 Implicit arguments are inserted eagerly in left-hand sides so ``y3`` and ``y4``
 are equivalent. An exception is when no type signature is given, in which case
 no implicit argument insertion takes place. Thus in the definition of ``y5``
-there only implicit is the ``A`` argument of ``subst``.
+the only implicit is the ``A`` argument of ``subst``.
 
 ::
 
@@ -149,6 +151,26 @@ without giving a value for ``x`` we can write
 
       subst C {y = e} eq cx
 
+In rare circumstances it can be useful to separate the name used to give an
+argument by name from the name of the bound variable, for instance if the desired
+name shadows an existing name. To do this you write
+
+::
+
+  id₂ : {A = X : Set} → X → X  -- name of bound variable is X
+  id₂ x = x
+
+  use-id₂ : (Y : Set) → Y → Y
+  use-id₂ Y = id₂ {A = Y}      -- but the label is A
+
+Labeled bindings must appear by themselves when typed, so the type ``Set`` needs to
+be repeated in this example:
+
+::
+
+  const : {A = X : Set} {B = Y : Set} → A → B → A
+  const x y = x
+
 When constructing implicit function spaces the implicit argument can be omitted,
 so both expressions below are valid expressions of type ``{A : Set} → A → A``:
 
@@ -177,6 +199,31 @@ The ``∀`` (or ``forall``) syntax for function types also has implicit variants
   ② = refl
   ③ = refl
 
+
+In very special situations it makes sense to declare *unnamed* hidden arguments
+``{A} → B``.  In the following ``example``, the hidden argument to ``scons`` of type
+``zero ≤ zero`` can be solved by η-expansion, since this type reduces to ``⊤``.
+
+..
+  ::
+  module UnnamedImplicit where
+
+::
+
+    data ⊥ : Set where
+
+    _≤_ : Nat → Nat → Set
+    zero ≤ _      = ⊤
+    suc m ≤ zero  = ⊥
+    suc m ≤ suc n = m ≤ n
+
+    data SList (bound : Nat) : Set where
+      []    : SList bound
+      scons : (head : Nat) → {head ≤ bound} → (tail : SList head) → SList bound
+
+    example : SList zero
+    example = scons zero []
+
 There are no restrictions on when a function space can be implicit.
 Internally, explicit and implicit function spaces are treated in the same way.
 This means that there are no guarantees that implicit arguments will be solved.
@@ -186,6 +233,50 @@ arguments.
 The reason for this liberal approach to implicit arguments is that
 limiting the use of implicit argument to the cases where we guarantee
 that they are solved rules out many useful cases in practice.
+
+.. _tactic_arguments:
+
+Tactic arguments
+----------------
+
+..
+  ::
+  open import Agda.Builtin.Reflection
+  open import Agda.Builtin.Unit
+  open import Agda.Builtin.Nat
+  open import Agda.Builtin.List
+  Proof = Nat
+  Goal  = Nat
+
+You can declare :ref:`tactics<reflection>` to be used to solve a particular implicit argument using
+the ``@(tactic t)`` attribute, where ``t : Term → TC ⊤``. For instance::
+
+  clever-search : Term → TC ⊤
+  clever-search hole = unify hole (lit (nat 17))
+
+  the-best-number : {@(tactic clever-search) n : Nat} → Nat
+  the-best-number {n} = n
+
+  check : the-best-number ≡ 17
+  check = refl
+
+The tactic can be an arbitrary term of the right type and may depend on previous arguments to the function::
+
+  default : {A : Set} → A → Term → TC ⊤
+  default x hole = bindTC (quoteTC x) (unify hole)
+
+  search : (depth : Nat) → Term → TC ⊤
+
+  example : {@(tactic default 10)   depth : Nat}
+            {@(tactic search depth) proof : Proof} →
+            Goal
+
+..
+  ::
+  search depth hole = unify hole (lit (nat depth))
+  example {proof = p} = p
+  check₁ : example ≡ 10
+  check₁ = refl
 
 .. _metavariables:
 

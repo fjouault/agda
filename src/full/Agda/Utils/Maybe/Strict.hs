@@ -1,122 +1,47 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-
-#if __GLASGOW_HASKELL__ >= 708
-{-# LANGUAGE DeriveGeneric #-}
-#endif
-
-
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | A strict version of the 'Maybe' type.
 --
 --   Import qualified, as in
 --   @
---     import qualified Agda.Utils.Maybe.Strict as Strict
+--     import Agda.Utils.Maybe.Strict qualified as Strict
 --   @
---
--- Copyright :  (c) 2006-2007 Roman Leshchinskiy
---              (c) 2013 Simon Meier
--- License   :  BSD-style (see the file LICENSE)
---
--- Copyright :  (c) 2014 Andreas Abel
 
 module Agda.Utils.Maybe.Strict
   ( module Data.Strict.Maybe
+  , module Data.Strict.Classes
   , module Agda.Utils.Maybe.Strict
   ) where
 
--- The following code is copied from
--- http://hackage.haskell.org/package/strict-base-types-0.3.0/docs/src/Data-Maybe-Strict.html
+import Prelude hiding (Maybe(..), maybe)
 
-import           Prelude             hiding (Maybe (..), maybe, null)
-import qualified Prelude             as Lazy
+import Data.Maybe qualified as Lazy
+import Data.Strict.Classes
+import Data.Strict.Maybe
 
-import           Control.Applicative (pure, (<$>))
-import           Control.DeepSeq     (NFData (..))
-import           Data.Binary         (Binary (..))
-import           Data.Data           (Data (..))
-import           Data.Semigroup      (Semigroup, Monoid, (<>), mempty, mappend)
-import           Data.Foldable       (Foldable (..))
-import           Data.Traversable    (Traversable (..))
-import           Data.Typeable       (Typeable)
-import           Data.Strict.Maybe   (Maybe (Nothing, Just), fromJust,
-                                      fromMaybe, isJust, isNothing, maybe)
-#if __GLASGOW_HASKELL__ >= 708
-import           GHC.Generics        (Generic (..))
-#endif
-
+import Agda.Utils.Functor ( (<.>) )
+import Agda.Utils.Lens    ( Lens' )
 import Agda.Utils.Null
 
-toStrict :: Lazy.Maybe a -> Maybe a
-toStrict Lazy.Nothing  = Nothing
-toStrict (Lazy.Just x) = Just x
+-- | Note that strict Maybe is an 'Applicative' only modulo strictness.
+--   The laws only hold in the strict semantics.
+--   Eg. @pure f <*> pure _|_ = _|_@, but according to the laws for
+--   'Applicative' it should be @pure (f _|_)@.
+--   We ignore this issue here, it applies also to 'Foldable' and 'Traversable'.
 
-toLazy :: Maybe a -> Lazy.Maybe a
-toLazy Nothing  = Lazy.Nothing
-toLazy (Just x) = Lazy.Just x
-
-deriving instance Data a => Data (Maybe a)
-deriving instance Typeable Maybe
-
-#if __GLASGOW_HASKELL__ >= 708
-deriving instance Generic  (Maybe a)
-#endif
+instance Applicative Maybe where
+  pure              = Just
+  Just f <*> Just x = Just $ f x
+  _      <*> _      = Nothing
 
 instance Null (Maybe a) where
   empty = Nothing
   null = isNothing
 
--- The monoid instance was fixed in strict-base-types 0.5.0. See
--- Issue 1805.
-instance Semigroup a => Semigroup (Maybe a) where
-  Nothing <> m       = m
-  m       <> Nothing = m
-  Just x1 <> Just x2 = Just (x1 <> x2)
+-- * Conversion to lazy @Maybe@.
 
-instance Semigroup a => Monoid (Maybe a) where
-  mempty  = Nothing
-  mappend = (<>)
-
-instance Foldable Maybe where
-    foldMap _ Nothing  = mempty
-    foldMap f (Just x) = f x
-
-instance Traversable Maybe where
-    traverse _ Nothing  = pure Nothing
-    traverse f (Just x) = Just <$> f x
-
-instance NFData a => NFData (Maybe a) where
-  rnf = rnf . toLazy
-
-instance Binary a => Binary (Maybe a) where
-  put = put . toLazy
-  get = toStrict <$> get
-
--- | Analogous to 'Lazy.listToMaybe' in "Data.Maybe".
-listToMaybe :: [a] -> Maybe a
-listToMaybe []        =  Nothing
-listToMaybe (a:_)     =  Just a
-
--- | Analogous to 'Lazy.maybeToList' in "Data.Maybe".
-maybeToList :: Maybe a -> [a]
-maybeToList  Nothing   = []
-maybeToList  (Just x)  = [x]
-
--- | Analogous to 'Lazy.catMaybes' in "Data.Maybe".
-catMaybes :: [Maybe a] -> [a]
-catMaybes ls = [x | Just x <- ls]
-
--- | Analogous to 'Lazy.mapMaybe' in "Data.Maybe".
-mapMaybe :: (a -> Maybe b) -> [a] -> [b]
-mapMaybe _ []     = []
-mapMaybe f (x:xs) = case f x of
-    Nothing -> rs
-    Just r  -> r:rs
-  where
-    rs = mapMaybe f xs
-
--- The remaining code is a copy of Agda.Utils.Maybe
+lensMaybeLazy :: Lens' (Maybe a) (Lazy.Maybe a)
+lensMaybeLazy f = toStrict <.> f . toLazy
 
 -- * Collection operations.
 

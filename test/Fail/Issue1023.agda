@@ -1,7 +1,7 @@
 -- Andreas, 2014-01-10
 -- Code by Jesper Cockx and Conor McBride and folks from the Coq-club
 
-{-# OPTIONS --without-K #-}
+{-# OPTIONS --cubical-compatible #-}
 
 -- An empty type.
 
@@ -15,7 +15,7 @@ mutual
 
 -- Type equality.
 
-data _<->_ (X : Set) : Set -> Set where
+data _<->_ (X : Set) : Set -> Set₁ where
   Refl : X <-> X
 
 -- This postulate is compatible with univalence:

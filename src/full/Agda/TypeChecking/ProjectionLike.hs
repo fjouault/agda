@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP               #-}
+-- {-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Dropping initial arguments (``parameters'') from a function which can be
 --   easily reconstructed from its principal argument.
@@ -58,10 +58,10 @@
 
 module Agda.TypeChecking.ProjectionLike where
 
-import Control.Monad
-
 import qualified Data.Map as Map
-import Data.Monoid (Any(..), getAny)
+-- import Data.Monoid (Any(..), getAny)
+
+import Agda.Interaction.Options
 
 import Agda.Syntax.Abstract.Name
 import Agda.Syntax.Common
@@ -69,25 +69,28 @@ import Agda.Syntax.Internal
 import Agda.Syntax.Internal.Pattern
 
 import Agda.TypeChecking.Monad
-import Agda.TypeChecking.Free (runFree, IgnoreSorts(..))
+import Agda.TypeChecking.Free (anyFreeVar)
 import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Positivity
+import Agda.TypeChecking.Positivity.OccurrenceAnalysis qualified as Occ
 import Agda.TypeChecking.Pretty
-import Agda.TypeChecking.Reduce (reduce)
+import Agda.TypeChecking.Records
+import Agda.TypeChecking.Reduce (reduce, abortIfBlocked, reduceDefCopies)
+import Agda.TypeChecking.Telescope
 
 import Agda.TypeChecking.DropArgs
 
+import Agda.Utils.CallStack (HasCallStack)
 import Agda.Utils.List
 import Agda.Utils.Maybe
 import Agda.Utils.Monad
 import Agda.Utils.Permutation
-import Agda.Utils.Pretty ( prettyShow )
+import Agda.Syntax.Common.Pretty ( prettyShow )
 import Agda.Utils.Size
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
--- | View for a @Def f (Apply a : es)@ where @isProjection f@.
+-- | View for a @Def f (Apply a : es)@ where @isRelevantProjection f@.
 --   Used for projection-like @f@s.
 data ProjectionView
   = ProjectionView
@@ -105,8 +108,7 @@ data ProjectionView
 
 -- | Semantics of 'ProjectionView'.
 unProjView :: ProjectionView -> Term
-unProjView pv =
-  case pv of
+unProjView = \case
     ProjectionView f a es   -> Def f (Apply a : es)
     LoneProjectionLike f ai -> Def f []
     NoProjection v          -> v
@@ -116,8 +118,8 @@ unProjView pv =
 projView :: HasConstInfo m => Term -> m ProjectionView
 projView v = do
   let fallback = return $ NoProjection v
-  case ignoreSharing v of
-    Def f es -> caseMaybeM (isProjection f) fallback $ \ isP -> do
+  case v of
+    Def f es -> caseMaybeM (isRelevantProjection f) fallback $ \ isP -> do
       if projIndex isP <= 0 then fallback else do
         case es of
           []           -> return $ LoneProjectionLike f $ projArgInfo isP
@@ -129,59 +131,72 @@ projView v = do
 
     _ -> fallback
 
+{-# SPECIALIZE reduceProjectionLike :: Term -> TCM Term #-}
 -- | Reduce away top-level projection like functions.
 --   (Also reduces projections, but they should not be there,
 --   since Internal is in lambda- and projection-beta-normal form.)
 --
-reduceProjectionLike :: Term -> TCM Term
+reduceProjectionLike :: PureTCM m => Term -> m Term
 reduceProjectionLike v = do
   -- Andreas, 2013-11-01 make sure we do not reduce a constructor
   -- because that could be folded back into a literal by reduce.
-  pv <- projView v
-  case pv of
+  projView v >>= \case
     ProjectionView{} -> onlyReduceProjections $ reduce v
                             -- ordinary reduce, only different for Def's
     _                -> return v
 
+-- | How to treat lone projection-like functions
+--   (i.e. those that miss their principal argument) in 'elimView'.
+data LoneProjectionLikeToLambda
+  = LoneProjectionLikeToLambda
+      -- ^ Turn lone projection-like functions into lambdas.
+  | KeepLoneProjectionLike
+      -- ^ Leave lone projection-like functions as they are.
+  deriving Eq
+
+{-# SPECIALIZE elimView :: LoneProjectionLikeToLambda -> Term -> TCM Term #-}
 -- | Turn prefix projection-like function application into postfix ones.
 --   This does just one layer, such that the top spine contains
 --   the projection-like functions as projections.
 --   Used in 'compareElims' in @TypeChecking.Conversion@
 --   and in "Agda.TypeChecking.CheckInternal".
 --
---   If the 'Bool' is 'True', a lone projection like function will be
+--   With 'LoneProjectionLikeToLambda', a lone projection like function will be
 --   turned into a lambda-abstraction, expecting the principal argument.
---   If the 'Bool' is 'False', it will be returned unaltered.
+--   If the 'KeepLoneProjectionLike', it will be returned unaltered.
 --
 --   No precondition.
 --   Preserves constructorForm, since it really does only something
 --   on (applications of) projection-like functions.
-elimView :: Bool -> Term -> TCM Term
-elimView loneProjToLambda v = do
-  reportSDoc "tc.conv.elim" 30 $ text "elimView of " <+> prettyTCM v
-  reportSLn  "tc.conv.elim" 50 $ "v = " ++ show v
+elimView :: PureTCM m => LoneProjectionLikeToLambda -> Term -> m Term
+elimView loneProjectionLikeToLambda v = do
+  reportSDoc "tc.conv.elim" 60 $ "elimView of " <+> prettyTCM v
   v <- reduceProjectionLike v
-  reportSDoc "tc.conv.elim" 40 $
-    text "elimView (projections reduced) of " <+> prettyTCM v
-  pv <- projView v
-  case pv of
-    NoProjection{}        -> return v
-    LoneProjectionLike f ai
-      | loneProjToLambda  -> return $ Lam ai $ Abs "r" $ Var 0 [Proj ProjPrefix f]
-      | otherwise         -> return v
-    ProjectionView f a es -> (`applyE` (Proj ProjPrefix f : es)) <$> elimView loneProjToLambda (unArg a)
+  reportSDoc "tc.conv.elim" 65 $
+    "elimView (projections reduced) of " <+> prettyTCM v
+  projView v >>= \case
+    LoneProjectionLike f ai -> case loneProjectionLikeToLambda of
+      LoneProjectionLikeToLambda -> return $ Lam ai $ Abs "r" $ Var 0 [Proj ProjPrefix f]
+      KeepLoneProjectionLike -> return v
+    ProjectionView f a es -> (`applyE` (Proj ProjPrefix f : es)) <$> elimView loneProjectionLikeToLambda (unArg a)
+    NoProjection{} -> return v
 
--- | Which @Def@types are eligible for the principle argument
+{-# SPECIALIZE eligibleForProjectionLike :: QName -> TCM Bool #-}
+-- | Which @Def@ heads are eligible for the principle argument
 --   of a projection-like function?
-eligibleForProjectionLike :: QName -> TCM Bool
+--   They need to be injective, which is the case for data, record, and axiom.
+eligibleForProjectionLike :: (HasConstInfo m) => QName -> m Bool
 eligibleForProjectionLike d = eligible . theDef <$> getConstInfo d
   where
   eligible = \case
     Datatype{} -> True
     Record{}   -> True
     Axiom{}    -> True
+    DataOrRecSig{}     -> True
+    GeneralizableVar{} -> False
     Function{}    -> False
     Primitive{}   -> False
+    PrimitiveSort{} -> False
     Constructor{} -> __IMPOSSIBLE__
     AbstractDefn d -> eligible d
       -- Andreas, 2017-08-14, issue #2682:
@@ -198,11 +213,13 @@ eligibleForProjectionLike d = eligible . theDef <$> getConstInfo d
 --      a name (@Def@) which is 'eligibleForProjectionLike':
 --      @data@ / @record@ / @postulate@.
 --
+--      None of the parameters may be irrelevant (issue #8686).
+--
 --   2. The application of f should only get stuck if the principal argument
 --      is inferable (neutral).  Thus:
 --
 --      a. @f@ cannot have absurd clauses (which are stuck even if the principal
---         argument is a constructor)
+--         argument is a constructor).
 --
 --      b. @f@ cannot be abstract as it does not reduce outside abstract blocks
 --         (always stuck).
@@ -211,7 +228,15 @@ eligibleForProjectionLike d = eligible . theDef <$> getConstInfo d
 --
 --      d. @f@ cannot match deeply.
 --
---      e. @f@s body may not mention the paramters.
+--      e. @f@s body may not mention the parameters.
+--
+--      f. A rhs of @f@ cannot be a record expression, since this will be
+--         translated to copatterns by recordExpressionsToCopatterns.
+--         Thus, an application of @f@ waiting for a projection
+--         can be stuck even when the principal argument is a constructor.
+--
+--      g. @f@ cannot be an irrelevant definition (Andreas, 2022-03-07, #5809),
+--         as those are not reduced.
 --
 -- For internal reasons:
 --
@@ -224,49 +249,60 @@ eligibleForProjectionLike d = eligible . theDef <$> getConstInfo d
 -- Examples for these reasons: see test/Succeed/NotProjectionLike.agda
 
 makeProjection :: QName -> TCM ()
-makeProjection x = -- if True then return () else do
+makeProjection x = whenM (optProjectionLike <$> pragmaOptions) $ do
  inTopContext $ do
   reportSLn "tc.proj.like" 70 $ "Considering " ++ prettyShow x ++ " for projection likeness"
   defn <- getConstInfo x
   let t = defType defn
   reportSDoc "tc.proj.like" 20 $ sep
-    [ text "Checking for projection likeness "
-    , prettyTCM x <+> text " : " <+> prettyTCM t
+    [ "Checking for projection likeness "
+    , prettyTCM x <+> " : " <+> prettyTCM t
     ]
-  case theDef defn of
+  if isIrrelevant defn then
+    reportSDoc "tc.proj.like" 30 $ "  projection-like functions cannot be irrelevant"
+  else case theDef defn of
     Function{funClauses = cls}
       | any (isNothing . clauseBody) cls ->
         reportSLn "tc.proj.like" 30 $ "  projection-like functions cannot have absurd clauses"
+      | any (maybe __IMPOSSIBLE__ isRecordExpression . clauseBody) cls ->
+        reportSLn "tc.proj.like" 30 $ "  projection-like functions cannot have record rhss"
     -- Constructor-headed functions can't be projection-like (at the moment). The reason
     -- for this is that invoking constructor-headedness will circumvent the inference of
     -- the dropped arguments.
     -- Nor can abstract definitions be projection-like since they won't reduce
     -- outside the abstract block.
-    def@Function{funProjection = Nothing, funClauses = cls, funCompiled = cc0, funInv = NotInjective,
-                 funMutual = Just [], -- Andreas, 2012-09-28: only consider non-mutual funs (or those whose recursion status has not yet been determined)
-                 funAbstr = ConcreteDef} -> do
-      ps0 <- filterM validProj $ candidateArgs [] t
+    def@Function{funProjection = Left MaybeProjection, funClauses = cls,
+                 funSplitTree = st0, funCompiled = cc0, funInv = NotInjective,
+                 funMutual = Just [], -- Andreas, 2012-09-28: only consider non-mutual funs
+                 funOpaque = TransparentDef} | not (def ^. funAbstract) -> do
+      ps0 <- candidateArgs [] t
       reportSLn "tc.proj.like" 30 $ if null ps0 then "  no candidates found"
-                                                else "  candidates: " ++ show ps0
+                                                else "  candidates: " ++ prettyShow ps0
       unless (null ps0) $ do
         -- Andreas 2012-09-26: only consider non-recursive functions for proj.like.
         -- Issue 700: problems with recursive funs. in term.checker and reduction
         ifM recursive (reportSLn "tc.proj.like" 30 $ "  recursive functions are not considered for projection-likeness") $ do
           {- else -}
           case lastMaybe (filter (checkOccurs cls . snd) ps0) of
-            Nothing -> reportSLn "tc.proj.like" 50 $
-              "  occurs check failed\n    clauses = " ++ show cls
+            Nothing -> reportSDoc "tc.proj.like" 50 $ nest 2 $ vcat
+              [ "occurs check failed"
+              , nest 2 $ "clauses =" <?> vcat (map pretty cls) ]
             Just (d, n) -> do
               -- Yes, we are projection-like!
-              reportSDoc "tc.proj.like" 10 $ sep
-                [ prettyTCM x <+> text " : " <+> prettyTCM t
-                , text $ " is projection like in argument " ++ show n ++ " for type " ++ show d
+              reportSDoc "tc.proj.like" 10 $ vcat
+                [ prettyTCM x <+> " : " <+> prettyTCM t
+                , nest 2 $ sep
+                  [ "is projection like in argument",  prettyTCM n, "for type", prettyTCM (unArg d) ]
                 ]
               __CRASH_WHEN__ "tc.proj.like.crash" 1000
 
               let cls' = map (dropArgs n) cls
                   cc   = dropArgs n cc0
-              reportSLn "tc.proj.like" 60 $ "  rewrote clauses to\n    " ++ show cc
+                  st   = dropArgs n st0
+              reportSLn "tc.proj.like" 60 $ unlines
+                [ "  rewrote clauses to"
+                , "    " ++ show cc
+                ]
 
               -- Andreas, 2013-10-20 build parameter dropping function
               let pIndex = n + 1
@@ -280,8 +316,9 @@ makeProjection x = -- if True then return () else do
                     , projLams     = ProjLams $ map (argFromDom . fmap fst) tel
                     }
               let newDef = def
-                           { funProjection     = Just projection
+                           { funProjection     = Right projection
                            , funClauses        = cls'
+                           , funSplitTree      = st
                            , funCompiled       = cc
                            , funInv            = dropArgs n $ funInv def
                            }
@@ -292,45 +329,52 @@ makeProjection x = -- if True then return () else do
                                    }
     Function{funInv = Inverse{}} ->
       reportSLn "tc.proj.like" 30 $ "  injective functions can't be projections"
-    Function{funAbstr = AbstractDef} ->
+    d@Function{} | d ^. funAbstract ->
       reportSLn "tc.proj.like" 30 $ "  abstract functions can't be projections"
-    Function{funProjection = Just{}} ->
+    Function{funOpaque = OpaqueDef _} ->
+      reportSLn "tc.proj.like" 30 $ "  opaque functions can't be projections"
+    Function{funProjection = Right{}} ->
       reportSLn "tc.proj.like" 30 $ "  already projection like"
+    Function{funProjection = Left NeverProjection} ->
+      reportSLn "tc.proj.like" 30 $ "  the user has asked for it not to be projection-like"
     Function{funMutual = Just (_:_)} ->
       reportSLn "tc.proj.like" 30 $ "  mutual functions can't be projections"
     Function{funMutual = Nothing} ->
       reportSLn "tc.proj.like" 30 $ "  mutuality check has not run yet"
-    Axiom          -> reportSLn "tc.proj.like" 30 $ "  not a function, but Axiom"
+    Function{} -> __IMPOSSIBLE__ -- match is complete, but GHC does not see this (because of d^.funAbstract)
+    Axiom{}        -> reportSLn "tc.proj.like" 30 $ "  not a function, but Axiom"
+    DataOrRecSig{} -> reportSLn "tc.proj.like" 30 $ "  not a function, but DataOrRecSig"
+    GeneralizableVar{} -> reportSLn "tc.proj.like" 30 $ "  not a function, but GeneralizableVar"
     AbstractDefn{} -> reportSLn "tc.proj.like" 30 $ "  not a function, but AbstractDefn"
     Constructor{}  -> reportSLn "tc.proj.like" 30 $ "  not a function, but Constructor"
     Datatype{}     -> reportSLn "tc.proj.like" 30 $ "  not a function, but Datatype"
     Primitive{}    -> reportSLn "tc.proj.like" 30 $ "  not a function, but Primitive"
+    PrimitiveSort{} -> reportSLn "tc.proj.like" 30 $ "  not a function, but PrimitiveSort"
     Record{}       -> reportSLn "tc.proj.like" 30 $ "  not a function, but Record"
   where
-    -- @validProj (d,n)@ checks whether the head @d@ of the type of the
-    -- @n@th argument is injective in all args (i.d. being name of data/record/axiom).
-    validProj :: (Arg QName, Int) -> TCM Bool
-    validProj (_, 0) = return False
-    validProj (d, _) = eligibleForProjectionLike (unArg d)
+    -- If the user wrote a record expression as rhs,
+    -- the recordExpressionsToCopatterns translation will turn this into copatterns,
+    -- violating the conditions of projection-likeness.
+    -- Andreas, 2019-07-11, issue #3843.
+    isRecordExpression :: Term -> Bool
+    isRecordExpression = \case
+      Con _ ConORec _ -> True
+      _ -> False
 
-    -- NOTE: If the following definition turns out to be slow, then
-    -- one could perhaps reuse information computed by the termination
-    -- and/or positivity checkers.
-    recursive = do
-      occs <- computeOccurrences x
-      let xocc = Map.lookup (ADef x) occs
-      case xocc of
-        Just (_ : _) -> return True -- recursive occurrence
-        _            -> return False
+    recursive = getMutual x >>= \case
+      Just []     -> pure False
+      Just (_:[]) -> pure True
+      Just _      -> __IMPOSSIBLE__ -- makeProjection only gets called on singleton mutual blocks
+      _           -> pure False
 
     checkOccurs cls n = all (nonOccur n) cls
 
     nonOccur n cl =
-      and [ take n p == [0..n - 1]
-          , onlyMatch n ps  -- projection-like functions are only allowed to match on the eliminatee
-                            -- otherwise we may end up projecting from constructor applications, in
-                            -- which case we can't reconstruct the dropped parameters
-          , checkBody m n b ]
+        (take n p == [0..n - 1]) &&
+        onlyMatch n ps &&  -- projection-like functions are only allowed to match on the eliminatee
+                          -- otherwise we may end up projecting from constructor applications, in
+                          -- which case we can't reconstruct the dropped parameters
+        checkBody m n b
       where
         Perm _ p = fromMaybe __IMPOSSIBLE__ $ clausePerm cl
         ps       = namedClausePats cl
@@ -347,36 +391,138 @@ makeProjection x = -- if True then return () else do
         shallowMatch _             = True
         noMatches = all (noMatch . namedArg)
         noMatch ConP{} = False
+        noMatch DefP{} = False
         noMatch LitP{} = False
         noMatch ProjP{}= False
         noMatch VarP{} = True
         noMatch DotP{} = True
-        noMatch AbsurdP{} = True
+        noMatch IApplyP{} = True
 
     -- Make sure non of the parameters occurs in the body of the function.
-    checkBody m n b = not . getAny $ runFree badVar IgnoreNot b
-      where badVar x = Any $ m - n <= x && x < m
+    checkBody m n b = not $ anyFreeVar badVar b
+      where badVar x = m - n <= x && x < m
 
     -- @candidateArgs [var 0,...,var(n-1)] t@ adds @(n,d)@ to the output,
-    -- if @t@ is a function-type with domain @t 0 .. (n-1)@
+    -- if @t@ is a function-type with domain @d 0 .. (n-1)@
     -- (the domain of @t@ is the type of the arg @n@).
+    -- Andreas, 2026-08-06, issue #8686:
+    -- The applications @d 0 .. (n-1)@ must be relevant.
     --
     -- This means that from the type of arg @n@ all previous arguments
-    -- can be computed by a simple matching.
-    -- (Provided the @d@ is data/record/postulate, checked in @validProj@).
+    -- can be computed by a simple matching,
+    -- provided the @d@ is a data/record/postulate.
     --
     -- E.g. f : {x : _}(y : _){z : _} -> D x y z -> ...
     -- will return (D,3) as a candidate (amongst maybe others).
     --
-    candidateArgs :: [Term] -> Type -> [(Arg QName, Int)]
+    -- Precondition: t is in telescope normal form, i.e., all leading @Pi@s are exposed.
+    candidateArgs :: [Term] -> Type -> TCM [(Arg QName, Int)]
     candidateArgs vs t =
-      case ignoreSharing $ unEl t of
-        Pi a b
-          | Def d es <- ignoreSharing $ unEl $ unDom a,
-            Just us  <- allApplyElims es,
-            vs == map unArg us -> (d <$ argFromDom a, length vs) : candidateRec b
-          | otherwise          -> candidateRec b
-        _                      -> []
+      case unEl t of
+        -- Andreas, 2026-08-26, issue #8686 (2)
+        -- We need to reduce the domain @a@ here otherwise its form (e.g. @D x y z@)
+        -- might not be preserved, violating the promise of projection-likeness that
+        -- the "parameters" can be reconstructed from the type of the principal argument.
+        -- However, full reduction is too expensive, busting test/Succeed/InstanceExpensiveContext.
+        -- Since projection-likeness is just an optimization, and thus need not be complete,
+        -- we have our choice of reduction, as long as we reduce enough to guarantee soundness
+        -- of projection likeness.
+        -- Luckily, reducing copy indirections from module applications should be sufficient,
+        -- because this is the only way heads that are @eligibleForProjectionLike@ can reduce.
+        -- Reducing copy indirections should be cheap.
+        Pi a b -> if null vs then continue else reduceDefCopies (unEl (unDom a)) >>= \case
+          Def d es -> ifNotM (eligibleForProjectionLike d) continue {-else-}
+            if | Just us  <- allApplyElims es
+               , all (not . isIrrelevant) us
+               , vs == map unArg us
+                 -> ((d <$ argFromDom a, length vs) :) <$> continue
+               | otherwise -> continue
+          _ -> continue
+          where continue = candidateRec b
+        _ -> return []
       where
-        candidateRec NoAbs{}   = []
+        candidateRec NoAbs{}   = return []
         candidateRec (Abs x t) = candidateArgs (var (size vs) : vs) t
+
+{-# SPECIALIZE inferNeutral :: Term -> TCM Type #-}
+-- | Infer type of a neutral term.
+--   See also @infer@ in @Agda.TypeChecking.CheckInternal@, which has a very similar
+--   logic but also type checks all arguments.
+--
+--   Precondition: the term is not a projection-like function in prefix ('Def') form.
+inferNeutral :: (PureTCM m, MonadBlock m) => Term -> m Type
+inferNeutral u = do
+  reportSDoc "tc.infer" 20 $ "inferNeutral" <+> prettyTCM u
+  reportSDoc "tc.infer" 40 $ "inferNeutral (rawer)" <+> pretty u
+  reportSDoc "tc.infer" 40 $ "in Context" <+> (prettyTCM =<< getContextTelescope)
+  case u of
+    Var i es -> do
+      a <- typeOfBV i
+      loop a (Var i) es
+    Def f es -> do
+      -- f is not a lone projection-like function, see precondition.
+      whenJustM (isRelevantProjection f) $ \_ -> impossible
+      a <- defType <$> getConstInfo f
+      loop a (Def f) es
+    MetaV x es -> do -- we assume meta instantiations to be well-typed
+      a <- metaType x
+      loop a (MetaV x) es
+    Con{} -> impossible
+    Lit{} -> impossible
+    Lam{} -> impossible
+    Pi{} -> impossible
+    Sort{} -> impossible
+    Level{} -> impossible
+    Dummy{} -> impossible
+    DontCare{} -> impossible
+  where
+    impossible :: (HasCallStack, MonadDebug m) => m a
+    impossible = __IMPOSSIBLE_VERBOSE__ $ unlines
+      [ "inferNeutral: non-inferable term:"
+      , "  " ++ prettyShow u
+      ]
+    loop :: (PureTCM m, MonadBlock m) => Type -> (Elims -> Term) -> Elims -> m Type
+    loop t hd [] = return t
+    loop t hd (e:es) = do
+      t' <- case e of
+        Apply (Arg ai v) ->
+          ifPiTypeB t (\_ b -> return $ b `absApp` v)
+            (patternViolation . getBlocker) -- Andreas, 2025-12-06, issue #8263 not __IMPOSSIBLE__
+        IApply x y r ->
+          ifPathB t (\_ b -> return $ b `absApp` r)
+            (patternViolation . getBlocker) -- Andreas, 2025-12-06, issue #8263 this might not be __IMPOSSIBLE__ either, play it safe!
+        Proj o f -> do
+          -- @projectTyped@ expects the type to be reduced.
+          t <- reduce t
+          ifJustM (projectTyped (hd []) t o f) (\(_,_,t') -> return t') __IMPOSSIBLE__
+      loop t' (hd . (e:)) es
+
+{-# SPECIALIZE computeDefType :: QName -> Elims -> TCM Type #-}
+-- | Compute the head type of a Def application. For projection-like functions
+--   this requires inferring the type of the principal argument.
+computeDefType :: (PureTCM m, MonadBlock m) => QName -> Elims -> m Type
+computeDefType f es = do
+  def <- getConstInfo f
+  -- To compute the type @a@ of a projection-like @f@,
+  -- we have to infer the type of its first argument.
+  let defaultResult = return $ defType def
+  -- Find a first argument to @f@.
+  case es of
+    _ | projectionArgs def <= 0 -> defaultResult
+    (Apply arg : _) -> do
+      -- Infer its type.
+      reportSDoc "tc.infer" 30 $
+        "inferring type of internal arg: " <+> prettyTCM arg
+      -- Jesper, 2023-02-06: infer crashes on non-inferable terms,
+      -- e.g. applications of projection-like functions. Hence we bring them
+      -- into postfix form.
+      targ <- inferNeutral =<< elimView LoneProjectionLikeToLambda (unArg arg)
+      reportSDoc "tc.infer" 30 $
+        "inferred type: " <+> prettyTCM targ
+      -- getDefType wants the argument type reduced.
+      -- Andreas, 2016-02-09, Issue 1825: The type of arg might be
+      -- a meta-variable, e.g. in interactive development.
+      -- In this case, we postpone.
+      targ <- abortIfBlocked targ
+      fromMaybeM __IMPOSSIBLE__ $ getDefType f targ
+    _ -> defaultResult

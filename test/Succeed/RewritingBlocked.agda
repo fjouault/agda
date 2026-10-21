@@ -1,4 +1,4 @@
-{-# OPTIONS --rewriting #-}
+{-# OPTIONS --rewriting --local-confluence-check #-}
 
 -- {-# OPTIONS -v rewriting:100 -v tc.conv.atom:30 -v tc.inj.use:30 #-}
 

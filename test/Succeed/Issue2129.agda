@@ -5,6 +5,7 @@ open import Agda.Builtin.List
 open import Agda.Builtin.Nat
 open import Agda.Builtin.Unit
 open import Agda.Builtin.Equality
+open import Agda.Builtin.Sigma
 
 data Wrap (A : Set) : Set where
   [_] : A → Wrap A
@@ -13,8 +14,9 @@ macro
   give : Wrap Term → Term → TC ⊤
   give [ t ] hole = unify hole t
 
-pattern vArg x = arg (arg-info visible relevant) x
-pattern hArg x = arg (arg-info hidden  relevant) x
+pattern default-modality = modality relevant quantity-ω
+pattern vArg x = arg (arg-info visible default-modality) x
+pattern hArg x = arg (arg-info hidden  default-modality) x
 
 -- Naming the variable "_" doesn't affect the deBruijn indices for lambda and pi
 
@@ -33,7 +35,10 @@ id-ok = refl
 -- Underscores should behave the same for clauses as for lambda and pi
 
 idClause : Clause
-idClause = clause (hArg (var "_") ∷ vArg (var "_") ∷ []) (var 0 [])
+idClause = clause
+             (("_" , vArg unknown) ∷ ("_" , hArg unknown) ∷ [])
+             (hArg (var 1) ∷ vArg (var 0) ∷ [])
+             (var 0 [])
 
 infixr 4 _>>=_
 _>>=_ = bindTC

@@ -1,9 +1,8 @@
 -- Andreas, 2016-02-01 KEEP in compilation loop to prevent bit-rotting.
 
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 
 -- | Standalone program for testing size constraint solver.
 
@@ -14,6 +13,7 @@ module Main where
 
 -- {-
 import Control.Monad
+import Control.Monad.Trans
 
 import Data.Functor
 import Data.Char (isSpace)
@@ -23,11 +23,13 @@ import qualified Data.Set as Set
 import System.Exit
 import System.Environment (getArgs)
 
+import qualified Agda.TypeChecking.Monad as TCM
+import Agda.TypeChecking.Pretty           (PrettyTCM(..))
 import Agda.TypeChecking.SizedTypes.Utils (setDebugging, traceM)
 import Agda.TypeChecking.SizedTypes.Syntax
 import Agda.TypeChecking.SizedTypes.WarshallSolver
 
-import Agda.Utils.Pretty (Pretty, prettyShow)
+import Agda.Syntax.Common.Pretty (Pretty(..), prettyShow, render, (<+>))
 
 import Parser
 
@@ -76,12 +78,13 @@ main = do
 
   abortOnError $ verifySolution hg cs sol
 
-abort :: String -> IO a
+abort :: Error -> IO a
 abort msg = do
-  putStrLn $ "Error: " ++ msg
+  _ <- TCM.runTCMTop $
+         liftIO . putStrLn . render . ("Error:" <+>) =<< msg
   exitFailure
 
-abortOnError :: Either String a -> IO a
+abortOnError :: Either Error a -> IO a
 abortOnError = either abort return
 
 pprint :: Pretty a => a -> IO ()
@@ -97,9 +100,9 @@ parseFile input = ( map parse hyps
                   )
   where
     (ls1, ls2)   = break isSeparator input
-    (hyps, rest) = if null ls2 then ([], ls1) else (ls1, tail ls2)
+    (hyps, rest) = case ls2 of {[] -> ([], ls1); (_ : tls2) -> (ls1, tls2)}
     (ls1', ls2') = break isSeparator rest
-    (pols, cons) = if null ls2' then ([], ls1') else (ls1', tail ls2')
+    (pols, cons) = case ls2' of {[] -> ([], ls1'); (_ : tls2') -> (ls1', tls2')}
 
 
 -- | A separator is a line consisting entirely of dashes,
@@ -108,3 +111,6 @@ isSeparator :: String -> Bool
 isSeparator s = length dashes >= 2 && all isSpace rest
   where (dashes, rest) = span (== '-') s
 -- -}
+
+instance PrettyTCM Flex where
+  prettyTCM = return . pretty

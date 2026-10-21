@@ -1,3 +1,4 @@
+Issue292c.agda:41.19-21: error: [UnsolvedConstraints]
 Failed to solve the following constraints:
-  Is empty: unit2 ≅ unit1
-      [ at Issue292c.agda:41,19-21 ]
+  Is empty: unit2 ≅ unit1 (stuck)
+      [ at Issue292c.agda:41.19-21 ]

@@ -1,18 +1,20 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 module Agda.Compiler.Treeless.Compare (equalTerms) where
 
 import Agda.Syntax.Treeless
 import Agda.TypeChecking.Substitute
-import Agda.Compiler.Treeless.Subst
+import Agda.Compiler.Treeless.Subst () --instance only
 
 equalTerms :: TTerm -> TTerm -> Bool
 equalTerms u v =
   case (evalPrims u, evalPrims v) of
-    (TLet s u@(TCase 0 _ _ _), TLet t v@(TCase 0 _ _ _)) ->
+    (TLet _ s u@(TCase 0 _ _ _), TLet _ t v@(TCase 0 _ _ _)) ->
       equalTerms s t && equalTerms u v
-    (TLet _ (TCase 0 _ _ _), _)      -> False
-    (_, TLet _ (TCase 0 _ _ _))      -> False
-    (TLet t u, v)                    -> equalTerms (subst 0 t u) v
-    (u, TLet t v)                    -> equalTerms u (subst 0 t v)
+    (TLet _ _ (TCase 0 _ _ _), _)    -> False
+    (_, TLet _ _ (TCase 0 _ _ _))    -> False
+    (TLet _ t u, v)                  -> equalTerms (subst 0 t u) v
+    (u, TLet _ t v)                  -> equalTerms u (subst 0 t v)
     (u, v) | u == v                  -> True
     (TApp f us, TApp g vs)           -> eqList equalTerms (f : us) (g : vs)
     (TCase x _ d as, TCase y _ e bs) -> x == y && equalTerms d e && eqList equalAlts as bs
@@ -52,4 +54,13 @@ applyPrim PEqS _ _ = Nothing
 applyPrim PEqQ _ _ = Nothing
 applyPrim PIf  _ _ = Nothing
 applyPrim PSeq _ _ = Nothing
+applyPrim PAdd64 _ _ = Nothing
+applyPrim PSub64 _ _ = Nothing
+applyPrim PMul64 _ _ = Nothing
+applyPrim PQuot64 _ _ = Nothing
+applyPrim PRem64 _ _ = Nothing
+applyPrim PLt64  _ _ = Nothing
+applyPrim PEq64 _ _ = Nothing
+applyPrim PITo64 _ _ = Nothing
+applyPrim P64ToI _ _ = Nothing
 

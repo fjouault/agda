@@ -1,5 +1,6 @@
-{-# LANGUAGE CPP                 #-}
-{-# LANGUAGE DeriveDataTypeable  #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+{-# OPTIONS_GHC -Wunused-matches #-}
+{-# OPTIONS_GHC -Wunused-binds #-}
 
 {-| As a concrete name, a notation is a non-empty list of alternating 'IdPart's and holes.
     In contrast to concrete names, holes can be binders.
@@ -14,32 +15,44 @@
 
 module Agda.Syntax.Notation where
 
-import Control.Applicative
+import Prelude hiding ( null, zip, zipWith )
+
 import Control.DeepSeq
 import Control.Monad
+import Control.Monad.Except
 
 import qualified Data.List as List
-import Data.Maybe
 
-import Data.Data (Data)
-import Data.Typeable (Typeable)
+import GHC.Generics (Generic)
 
+import qualified Agda.Syntax.Abstract.Name as A
 import Agda.Syntax.Common
+import Agda.Syntax.Common.Pretty
+import Agda.Syntax.Concrete.Name
 import Agda.Syntax.Position
 
-import Agda.Utils.Except ( MonadError(throwError) )
+import Agda.Utils.Lens
 import Agda.Utils.List
+import Agda.Utils.List1           ( List1, pattern (:|) )
+import qualified Agda.Utils.List1 as List1
+import Agda.Utils.ListInf         ( pattern (:<) )
+import qualified Agda.Utils.ListInf as ListInf
+import Agda.Utils.Set1            ( Set1 )
+import qualified Agda.Utils.Set1  as Set1
+import Agda.Utils.Null
+import Agda.Utils.Singleton
+import Agda.Utils.Zip
 
 import Agda.Utils.Impossible
-#include "undefined.h"
 
--- | Data type constructed in the Happy parser; converted to 'GenPart'
---   before it leaves the Happy code.
+-- | Data type constructed in the Happy parser; converted to
+-- 'NotationPart' before it leaves the Happy code.
 data HoleName
-  = LambdaHole { _bindHoleName :: RawName
-               , holeName      :: RawName }
-    -- ^ @\ x -> y@; 1st argument is the bound name (unused for now).
-  | ExprHole   { holeName      :: RawName }
+  = LambdaHole { _bindHoleNames :: List1 RString
+               , holeName       :: RString
+               }
+    -- ^ @λ x₁ … xₙ → y@: The first argument contains the bound names.
+  | ExprHole   { holeName      :: RString }
     -- ^ Simple named hole with hiding.
 
 -- | Is the hole a binder?
@@ -47,64 +60,30 @@ isLambdaHole :: HoleName -> Bool
 isLambdaHole (LambdaHole _ _) = True
 isLambdaHole _ = False
 
--- | Notation as provided by the @syntax@ declaration.
-type Notation = [GenPart]
-
--- | Part of a Notation
-data GenPart
-  = BindHole !Int
-    -- ^ Argument is the position of the hole (with binding) where the binding should occur.
-  | NormalHole (NamedArg Int)
-    -- ^ Argument is where the expression should go.
-  | WildHole !Int
-    -- ^ An underscore in binding position.
-  | IdPart RawName
-  deriving (Typeable, Data, Show, Eq, Ord)
-
-instance KillRange GenPart where
-  killRange p = case p of
-    IdPart x     -> IdPart x
-    BindHole i   -> BindHole i
-    WildHole i   -> WildHole i
-    NormalHole x -> NormalHole $ killRange x
-
-instance NFData GenPart where
-  rnf (BindHole _)   = ()
-  rnf (NormalHole a) = rnf a
-  rnf (WildHole _)   = ()
-  rnf (IdPart a)     = rnf a
-
 -- | Get a flat list of identifier parts of a notation.
-stringParts :: Notation -> [RawName]
-stringParts gs = [ x | IdPart x <- gs ]
+stringParts :: Notation -> [String]
+stringParts gs = [ rangedThing x | IdPart x <- gs ]
 
 -- | Target argument position of a part (Nothing if it is not a hole).
-holeTarget :: GenPart -> Maybe Int
-holeTarget (BindHole   n) = Just n
-holeTarget (WildHole   n) = Just n
-holeTarget (NormalHole n) = Just $ namedArg n
+holeTarget :: NotationPart -> Maybe Int
+holeTarget (VarPart _ n)  = Just $ holeNumber $ rangedThing n
+holeTarget (WildPart n)   = Just $ holeNumber $ rangedThing n
+holeTarget (HolePart _ n) = Just $ rangedThing $ namedArg n
 holeTarget IdPart{}       = Nothing
 
--- | Is the part a hole? WildHoles don't count since they don't correspond to
---   anything the user writes.
-isAHole :: GenPart -> Bool
-isAHole BindHole{}   = True
-isAHole NormalHole{} = True
-isAHole WildHole{}   = False
-isAHole IdPart{}     = False
-
--- | Is the part a normal hole?
-isNormalHole :: GenPart -> Bool
-isNormalHole NormalHole{} = True
-isNormalHole BindHole{}   = False
-isNormalHole WildHole{}   = False
-isNormalHole IdPart{}     = False
+-- | Is the part a hole?
+isAHole :: NotationPart -> Bool
+isAHole HolePart{} = True
+isAHole VarPart{}  = False
+isAHole WildPart{} = False
+isAHole IdPart{}   = False
 
 -- | Is the part a binder?
-isBindingHole :: GenPart -> Bool
-isBindingHole (BindHole _) = True
-isBindingHole (WildHole _) = True
-isBindingHole _ = False
+isBinder :: NotationPart -> Bool
+isBinder HolePart{} = False
+isBinder VarPart{}  = True
+isBinder WildPart{} = True
+isBinder IdPart{}   = False
 
 -- | Classification of notations.
 
@@ -114,89 +93,351 @@ data NotationKind
   | PostfixNotation -- ^ Ex: @bla_blub_@.
   | NonfixNotation  -- ^ Ex: @bla_blub@.
   | NoNotation
-   deriving (Eq, Show)
+   deriving (Eq, Show, Generic)
 
 -- | Classify a notation by presence of leading and/or trailing
 -- /normal/ holes.
 notationKind :: Notation -> NotationKind
 notationKind []  = NoNotation
-notationKind syn =
-  case (isNormalHole $ head syn, isNormalHole $ last syn) of
+notationKind (h:syn) =
+  case (isAHole h, isAHole $ last1 h syn) of
     (True , True ) -> InfixNotation
     (True , False) -> PostfixNotation
     (False, True ) -> PrefixNotation
     (False, False) -> NonfixNotation
 
+-- | Analogue of 'isPrePostOrInfixOperator': prefix, infix, or postfix.
+isPrePostOrInfixNotation :: Notation -> Bool
+isPrePostOrInfixNotation n = case notationKind n of
+  InfixNotation   -> True
+  PrefixNotation  -> True
+  PostfixNotation -> True
+  NonfixNotation  -> False
+  NoNotation      -> False
+
 -- | From notation with names to notation with indices.
 --
---   Example:
+--   An example (with some parts of the code omitted):
+--   The lists
+--   @["for", "x", "∈", "xs", "return", "e"]@
+--   and
+--   @['LambdaHole' ("x" :| []) "e", 'ExprHole' "xs"]@
+--   are mapped to the following notation:
 --   @
---      ids   = ["for", "x", "∈", "xs", "return", "e"]
---      holes = [ LambdaHole "x" "e",  ExprHole "xs" ]
---   @
---   creates the notation
---   @
---      [ IdPart "for"    , BindHole 0
---      , IdPart "∈"      , NormalHole 1
---      , IdPart "return" , NormalHole 0
+--      [ 'IdPart' "for"    , 'VarPart' ('BoundVariablePosition' 0 0)
+--      , 'IdPart' "∈"      , 'HolePart' 1
+--      , 'IdPart' "return" , 'HolePart' 0
 --      ]
 --   @
-mkNotation :: [NamedArg HoleName] -> [RawName] -> Either String Notation
+mkNotation :: [NamedArg HoleName] -> [RString] -> Either String Notation
 mkNotation _ [] = throwError "empty notation is disallowed"
 mkNotation holes ids = do
   unless uniqueHoleNames     $ throwError "syntax must use unique argument names"
   let xs :: Notation = map mkPart ids
-  unless (isAlternating xs)  $ throwError "syntax must alternate holes and non-holes"
   unless (isExprLinear xs)   $ throwError "syntax must use holes exactly once"
   unless (isLambdaLinear xs) $ throwError "syntax must use binding holes exactly once"
-  return $ insertWildHoles xs
+  unless (noAdjacentHoles xs)  $ throwError $ concat
+     [ "syntax must not contain adjacent holes ("
+     , prettyHoles
+     , ")"
+     ]
+  -- Andreas, 2018-10-18, issue #3285:
+  -- syntax that is just a single hole is ill-formed and crashes the operator parser
+  when   (isSingleHole xs)   $ throwError "syntax cannot be a single hole"
+  return $ insertWildParts xs
     where
-      mkPart ident = fromMaybe (IdPart ident) $ lookup ident holeMap
+      holeNames :: [RString]
+      holeNames = map namedArg holes >>= \case
+        LambdaHole _ y -> [y]
+        ExprHole y     -> [y]
+
+      prettyHoles :: String
+      prettyHoles = List.unwords $ map (rawNameToString . rangedThing) holeNames
+
+      mkPart ident = maybe (IdPart ident) (`withRangeOf` ident) $ lookup ident holeMap
 
       holeNumbers   = [0 .. length holes - 1]
+
+      numberedHoles :: [(Int, NamedArg HoleName)]
       numberedHoles = zip holeNumbers holes
 
-      -- The WildHoles don't correspond to anything in the right-hand side so
+      -- The WildParts don't correspond to anything in the right-hand side so
       -- we add them next to their corresponding body. Slightly subtle: due to
       -- the way the operator parsing works they can't be added first or last.
-      insertWildHoles xs = foldr ins xs wilds
+      insertWildParts :: [NotationPart] -> [NotationPart]
+      insertWildParts xs = foldr ins xs wilds
         where
-          wilds = [ i | (_, WildHole i) <- holeMap ]
-          ins w (NormalHole h : hs)
-            | namedArg h == w = NormalHole h : WildHole w : hs
+          wilds = [ i | (_, WildPart i) <- holeMap ]
+
+          ins w (HolePart r h : hs)
+            | namedArg h == fmap holeNumber w =
+              HolePart r h : WildPart w : hs
           ins w (h : hs) = h : insBefore w hs
           ins _ [] = __IMPOSSIBLE__
 
-          insBefore w (NormalHole h : hs)
-            | namedArg h == w = WildHole w : NormalHole h : hs
+          insBefore w (HolePart r h : hs)
+            | namedArg h == fmap holeNumber w =
+              WildPart w : HolePart r h : hs
           insBefore w (h : hs) = h : insBefore w hs
           insBefore _ [] = __IMPOSSIBLE__
 
-      -- Create a map (association list) from hole names to holes.
-      -- A @LambdaHole@ contributes two entries:
-      -- both names are mapped to the same number,
-      -- but distinguished by BindHole vs. NormalHole.
+      -- A map (association list) from hole names to notation parts. A
+      -- @LambdaHole@ contributes one or more entries, one @HolePart@
+      -- and zero or more @VarPart@s or @WildParts@, all mapped to the
+      -- same number.
+      holeMap :: [(RString, NotationPart)]
       holeMap = do
         (i, h) <- numberedHoles
-        let normalHole = NormalHole $ fmap (i <$) h
+        let ri x   = Ranged (getRange x) i
+            rp x n = Ranged (getRange x) $
+                     BoundVariablePosition
+                       { holeNumber = i
+                       , varNumber  = n
+                       }
+            hole y = HolePart noRange $ fmap (ri y <$) h
+                              -- This range is filled in by mkPart.
         case namedArg h of
-          ExprHole y       -> [(y, normalHole)]
-          LambdaHole "_" y -> [("_", WildHole i), (y, normalHole)]
-          LambdaHole x y   -> [(x, BindHole i), (y, normalHole)]
+          ExprHole y      -> [(y, hole y)]
+          LambdaHole xs y -> [(y, hole y)] ++
+            zipWith
+              (\ n x -> case rangedThing x of
+                "_" -> (x, WildPart (rp x n))
+                _   -> (x, VarPart noRange (rp x n)))
+                                   -- Filled in by mkPart.
+              [0..]
+              (List1.toList xs)
 
       -- Check whether all hole names are distinct.
       -- The hole names are the keys of the @holeMap@.
-      uniqueHoleNames = distinct [ x | (x, _) <- holeMap, x /= "_" ]
+      uniqueHoleNames = distinct [ x | (x, _) <- holeMap, rangedThing x /= "_" ]
 
-      isExprLinear   xs = List.sort [ i | x <- xs, isNormalHole x, let Just i = holeTarget x ] == holeNumbers
-      isLambdaLinear xs = List.sort [ x | BindHole x <- xs ] ==
-                          [ i | (i, h) <- numberedHoles,
-                                LambdaHole x _ <- [namedArg h], x /= "_" ]
+      isExprLinear xs =
+        List.sort [ i | x <- xs, isAHole x, let Just i = holeTarget x ]
+          ==
+        holeNumbers
 
-      isAlternating :: [GenPart] -> Bool
-      isAlternating []       = __IMPOSSIBLE__
-      isAlternating [x]      = True
-      isAlternating (x:y:xs) = isAHole x /= isAHole y && isAlternating (y:xs)
+      isLambdaLinear xs =
+        List.sort [ rangedThing x | VarPart _ x <- xs ]
+          ==
+        [ BoundVariablePosition { holeNumber = i, varNumber = v }
+        | (i, h) <- numberedHoles
+        , LambdaHole vs _ <- [namedArg h]
+        , (v, x) <- zip [0..] $ map rangedThing $ List1.toList vs
+        , x /= "_"
+        ]
 
-noNotation :: Notation
-noNotation = []
+      noAdjacentHoles :: [NotationPart] -> Bool
+      noAdjacentHoles =
+        noAdj .
+        filter (\h -> case h of
+                   HolePart{} -> True
+                   IdPart{}   -> True
+                   _          -> False)
+        where
+        noAdj []       = __IMPOSSIBLE__
+        noAdj [_]      = True
+        noAdj (x:y:xs) =
+          not (isAHole x && isAHole y) &&
+          noAdj (y:xs)
+
+      isSingleHole :: [NotationPart] -> Bool
+      isSingleHole = \case
+        [ IdPart{} ] -> False
+        [ _hole ]    -> True
+        _            -> False
+
+-- | All the notation information related to a name.
+data NewNotation = NewNotation
+  { notaName  :: QName
+  , notaNames :: Set1 A.Name
+    -- ^ The names the syntax and/or fixity belong to.
+    --
+    -- Invariant: Every name in the list matches 'notaName'.
+  , notaFixity :: Fixity
+    -- ^ Associativity and precedence (fixity) of the names.
+  , notation :: Notation
+    -- ^ Syntax associated with the names.
+  , notaIsOperator :: Bool
+    -- ^ True if the notation comes from an operator (rather than a
+    -- syntax declaration).
+  } deriving (Show, Generic)
+
+instance LensFixity NewNotation where
+  lensFixity f nota = f (notaFixity nota) <&> \ fx -> nota { notaFixity = fx }
+
+-- | If an operator has no specific notation, then it is computed from
+-- its name.
+namesToNotation :: QName -> A.Name -> NewNotation
+namesToNotation q n = NewNotation
+  { notaName       = q
+  , notaNames      = singleton n
+  , notaFixity     = f
+  , notation       = if null syn then syntaxOf (unqualify q) else syn
+  , notaIsOperator = null syn
+  }
+  where Fixity' f syn _ = A.nameFixity n
+
+-- | Replace 'noFixity' by 'defaultFixity'.
+useDefaultFixity :: NewNotation -> NewNotation
+useDefaultFixity n
+  | notaFixity n == noFixity = n { notaFixity = defaultFixity }
+  | otherwise                = n
+
+-- | Return the 'IdPart's of a notation, the first part qualified,
+--   the other parts unqualified.
+--   This allows for qualified use of operators, e.g.,
+--   @M.for x ∈ xs return e@, or @x ℕ.+ y@.
+notationNames :: NewNotation -> [QName]
+notationNames (NewNotation q _ _ parts _) =
+  zipWith ($) (reQualify :< ListInf.repeat QName) [ simpleName $ rangedThing x | IdPart x <- parts ]
+  where
+    -- The qualification of @q@.
+    modules     = List1.init (qnameParts q)
+    -- Putting the qualification onto @x@.
+    reQualify x = List.foldr Qual (QName x) modules
+
+-- | Create a 'Notation' (without binders) from a concrete 'Name'.
+--   Does the obvious thing:
+--   'Hole's become 'HolePart's, 'Id's become 'IdParts'.
+--   If 'Name' has no 'Hole's, it returns 'noNotation'.
+syntaxOf :: Name -> Notation
+syntaxOf y
+  | isOperator y = mkSyn 0 $ List1.toList $ nameNameParts y
+  | otherwise    = noNotation
+  where
+    -- Turn a concrete name into a Notation,
+    -- numbering the holes from left to right.
+    -- Result will have no 'BindingHole's.
+    mkSyn :: Int -> [NamePart] -> Notation
+    mkSyn _ []          = []
+    mkSyn n (Hole : xs) = HolePart noRange (defaultNamedArg $ unranged n) : mkSyn (1 + n) xs
+    mkSyn n (Id x : xs) = IdPart (unranged x) : mkSyn n xs
+
+-- | Merges 'NewNotation's that have the same precedence level and
+-- notation, with two exceptions:
+--
+-- * Operators and notations coming from syntax declarations are kept
+--   separate.
+--
+-- * If /all/ instances of a given 'NewNotation' have the same
+--   precedence level or are \"unrelated\", then they are merged. They
+--   get the given precedence level, if any, and otherwise they become
+--   unrelated (but related to each other).
+--
+-- If 'NewNotation's that are merged have distinct associativities,
+-- then they get 'NonAssoc' as their associativity.
+--
+-- Precondition: No 'A.Name' may occur in more than one list element.
+-- Every 'NewNotation' must have the same 'notaName'.
+--
+-- Postcondition: No 'A.Name' occurs in more than one list element.
+mergeNotations :: List1 NewNotation -> List1 NewNotation
+mergeNotations ns@(_ :| []) = ns
+mergeNotations ns =
+  fmap merge
+  . List1.concatMap1 groupIfLevelsMatch
+  . List1.groupOn1 (notation &&& notaIsOperator)
+  $ ns
+  where
+  groupIfLevelsMatch :: List1 NewNotation -> List1 (List1 NewNotation)
+  groupIfLevelsMatch ns =
+    if allEqual (map fixityLevel related)
+    then singleton $ sameAssoc $ sameLevel ns
+    else fmap singleton ns
+    where
+    -- Fixities of operators whose precedence level is not Unrelated.
+    related = List1.mapMaybe (maybeRelated . notaFixity) ns
+      where
+        maybeRelated f =
+          case fixityLevel f of
+            Unrelated  -> Nothing
+            Related {} -> Just f
+
+    -- Precondition: All related operators have the same precedence
+    -- level.
+    --
+    -- Gives all unrelated operators the same level.
+    sameLevel = fmap (set (_notaFixity . _fixityLevel) level)
+      where
+      level = case related of
+        f : _ -> fixityLevel f
+        []    -> Unrelated
+
+    -- If all related operators have the same associativity, then the
+    -- unrelated operators get the same associativity, and otherwise
+    -- all operators get the associativity NonAssoc.
+    sameAssoc = fmap (set (_notaFixity . _fixityAssoc) assoc)
+      where
+      assoc = case related of
+        f : _ | allEqual (map fixityAssoc related) -> fixityAssoc f
+        _                                          -> NonAssoc
+
+  merge :: List1 NewNotation -> NewNotation
+  merge ns@(n :| _) = n { notaNames = Set1.unions $ fmap notaNames ns }
+
+-- | Check if a notation contains any lambdas (in which case it cannot be used in a pattern).
+isLambdaNotation :: NewNotation -> Bool
+isLambdaNotation n = any isBinder (notation n)
+  where
+    isBinder VarPart{}  = True
+    isBinder WildPart{} = True
+    isBinder IdPart{}   = False
+    isBinder HolePart{} = False
+
+-- | Lens for 'Fixity' in 'NewNotation'.
+
+_notaFixity :: Lens' NewNotation Fixity
+_notaFixity f r = f (notaFixity r) <&> \x -> r { notaFixity = x }
+
+-- * Sections
+
+-- | Sections, as well as non-sectioned operators.
+
+data NotationSection = NotationSection
+  { sectNotation  :: NewNotation
+  , sectKind      :: NotationKind
+    -- ^ For non-sectioned operators this should match the notation's
+    -- 'notationKind'.
+  , sectLevel     :: Maybe FixityLevel
+    -- ^ Effective precedence level. 'Nothing' for closed notations.
+  , sectIsSection :: Bool
+    -- ^ 'False' for non-sectioned operators.
+  }
+  deriving (Show, Generic)
+
+-- | Converts a notation to a (non-)section.
+
+noSection :: NewNotation -> NotationSection
+noSection n = NotationSection
+  { sectNotation  = n
+  , sectKind      = notationKind (notation n)
+  , sectLevel     = Just (fixityLevel (notaFixity n))
+  , sectIsSection = False
+  }
+
+
+-- * Pretty printing
+
+instance Pretty NewNotation where
+  pretty (NewNotation x _xs fx nota isOp) = hsepWith "=" px pn
+    where
+    px = fsep [ if isOp then empty else "syntax" , pretty fx , pretty x ]
+    pn = if isOp then empty else pretty nota
+
+instance Pretty NotationKind where pretty = pshow
+
+instance Pretty NotationSection where
+  pretty (NotationSection nota kind mlevel isSection)
+    | isSection = fsep
+        [ "section"
+        , pretty kind
+        , maybe empty pretty mlevel
+        , pretty nota
+        ]
+    | otherwise = pretty nota
+
+-- NFData instances
+
+instance NFData NotationKind
+instance NFData NewNotation
+instance NFData NotationSection

@@ -1,0 +1,45 @@
+-- Andreas, 2022-02-23, configuration to build with mtl-2.3-rc3
+-- Andreas, 2022-11-04, configuration to build with mtl-2.3.1
+-- Invocation:
+-- $ ln -s cabal.project.local.mtl23 cabal.project.local
+-- $ cabal build --builddir dist-mtl23 -f +enable-cluster-counting
+
+flags: +enable-cluster-counting
+constraints: text-icu == 0.8.*
+
+-- mtl
+------------------------------------------------------------------------
+
+constraints: mtl == 2.3.1
+allow-newer: *:mtl
+
+-- =====================================================================
+-- Released versions needed to test mtl-2.3.1
+-- =====================================================================
+
+-- transformers
+------------------------------------------------------------------------
+
+constraints: transformers == 0.6.*
+allow-newer: *:transformers
+
+-- =====================================================================
+-- Unreleased versions needed to test mtl-2.3.1
+-- =====================================================================
+
+-- happy
+------------------------------------------------------------------------
+
+source-repository-package
+  type: git
+  location: git@github.com:simonmar/happy.git
+  subdir: .
+  subdir: packages/backend-glr
+  subdir: packages/backend-lalr
+  subdir: packages/codegen-common
+  subdir: packages/frontend
+  subdir: packages/grammar
+  subdir: packages/tabular
+
+constraints: happy == 1.21.*
+allow-newer: *:happy

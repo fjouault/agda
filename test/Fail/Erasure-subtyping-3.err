@@ -1,0 +1,8 @@
+Erasure-subtyping-3.agda:4.7-8: error: [UnequalTypes]
+The function type
+  A → B
+is not a subtype of
+  @0 A → B
+because:
+  one has unrestricted domain, while the other is erased.
+when checking that the expression g has type @0 A → B

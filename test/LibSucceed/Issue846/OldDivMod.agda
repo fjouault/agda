@@ -8,10 +8,11 @@ module Issue846.OldDivMod where
 
 open import Data.Nat as Nat
 open import Data.Nat.Properties
-open SemiringSolver
+open import Data.Nat.Solver
+open +-*-Solver
 open import Data.Fin as Fin using (Fin; zero; suc; toℕ; fromℕ)
 import Data.Fin.Properties as Fin
-open import Induction.Nat
+open import Data.Nat.Induction
 open import Relation.Nullary.Decidable
 open import Relation.Binary.PropositionalEquality
 open ≡-Reasoning
@@ -23,15 +24,15 @@ open import Function
 private
 
   lem₁ : (m k : ℕ) →
-         Nat.suc m ≡ suc (toℕ (Fin.inject+ k (fromℕ m)) + 0)
+         Nat.suc m ≡ suc (toℕ (fromℕ m Fin.↑ˡ k) + 0)
   lem₁ m k = cong suc $ begin
     m
-      ≡⟨ sym $ Fin.to-from m ⟩
+      ≡⟨ sym $ Fin.toℕ-fromℕ m ⟩
     toℕ (fromℕ m)
-      ≡⟨ Fin.inject+-lemma k (fromℕ m) ⟩
-    toℕ (Fin.inject+ k (fromℕ m))
+      ≡⟨ sym $ Fin.toℕ-↑ˡ (fromℕ m) k ⟩
+    toℕ (fromℕ m Fin.↑ˡ k)
       ≡⟨ solve 1 (λ x → x := x :+ con 0) refl _ ⟩
-    toℕ (Fin.inject+ k (fromℕ m)) + 0
+    toℕ (fromℕ m Fin.↑ˡ k) + 0
       ∎
 
   lem₂ : ∀ n → _
@@ -90,10 +91,10 @@ _divMod_ m n {≢0} = <′-rec Pred dm m n {≢0}
   dm zero    rec (suc n)            = result 0 zero refl
   dm (suc m) rec (suc n)            with compare m n
   dm (suc m) rec (suc .(suc m + k)) | less .m k    = result 0 r (lem₁ m k)
-                                        where r = suc (Fin.inject+ k (fromℕ m))
+                                        where r = suc (fromℕ m Fin.↑ˡ k)
   dm (suc m) rec (suc .m)           | equal .m     = result 1 zero (lem₂ m)
   dm (suc .(suc n + k)) rec (suc n) | greater .n k =
-    1+ rec (suc k) le (suc n)
+    1+ rec le _
     where le = s≤′s (s≤′s (n≤′m+n n k))
 
 -- Integer division.

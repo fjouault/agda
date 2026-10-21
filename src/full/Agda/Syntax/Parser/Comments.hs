@@ -1,4 +1,4 @@
--- {-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 {-| This module defines the lex action to lex nested comments. As is well-known
     this cannot be done by regular expressions (which, incidently, is probably
@@ -19,8 +19,6 @@ import Agda.Syntax.Parser.Alex
 import Agda.Syntax.Parser.LookAhead
 import Agda.Syntax.Position
 
-import Agda.Utils.Monad
-
 -- | Should comment tokens be output?
 
 keepComments :: LexPredicate
@@ -35,8 +33,10 @@ keepCommentsM = fmap parseKeepComments getParseFlags
 --   In the end the comment is discarded and 'lexToken' is called to lex a real
 --   token.
 nestedComment :: LexAction Token
-nestedComment inp inp' _ =
+nestedComment = LexAction $ \ inp inp' _ ->
     do  setLexInput inp'
+        let err :: forall a. String -> LookAhead a
+            err _ = liftP $ parseErrorAt (lexPos inp) "Unterminated '{-'"
         runLookAhead err $ skipBlock "{-" "-}"
         keep <- keepCommentsM
         if keep then do
@@ -44,26 +44,25 @@ nestedComment inp inp' _ =
           let p1 = lexPos inp; p2 = lexPos inp''
               i = posToInterval (lexSrcFile inp) p1 p2
               s = case (p1, p2) of
-                    (Pn { posPos = p1 }, Pn { posPos = p2 }) ->
+                    (Pn' { posPos = p1 }, Pn' { posPos = p2 }) ->
                       List.genericTake (p2 - p1) $ lexInput inp
           return $ TokComment (i, s)
          else
           lexToken
-    where
-        err _ = liftP $ parseErrorAt (lexPos inp) "Unterminated '{-'"
+
 
 -- | Lex a hole (@{! ... !}@). Holes can be nested.
 --   Returns @'TokSymbol' 'SymQuestionMark'@.
 hole :: LexAction Token
-hole inp inp' _ =
+hole = LexAction $ \ inp inp' _ ->
     do  setLexInput inp'
+        let err :: forall a. String -> LookAhead a
+            err _ = liftP $ parseErrorAt (lexPos inp) "Unterminated '{!'"
         runLookAhead err $ skipBlock "{!" "!}"
         p <- lexPos <$> getLexInput
         return $
           TokSymbol SymQuestionMark $
           posToInterval (lexSrcFile inp) (lexPos inp) p
-    where
-        err _ = liftP $ parseErrorAt (lexPos inp) "Unterminated '{!'"
 
 -- | Skip a block of text enclosed by the given open and close strings. Assumes
 --   the first open string has been consumed. Open-close pairs may be nested.

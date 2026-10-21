@@ -1,4 +1,6 @@
-Issue998c.agda:5,9-10
-A !=< A of type Set
-(because one is a variable and one a defined identifier)
+Issue998c.agda:5.9-10: error: [UnequalTypes]
+The type
+  A
+is not a subtype of
+  Issue998c.A
 when checking that the expression a has type A

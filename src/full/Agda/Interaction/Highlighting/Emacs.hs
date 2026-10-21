@@ -1,56 +1,35 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Functions which give precise syntax highlighting info to Emacs.
 
 module Agda.Interaction.Highlighting.Emacs
-  ( lispifyHighlightingInfo
+  ( HighlightingInfo
+  , lispifyHighlightingInfo
+  , lispifyHighlightingInfo_
+  , lispifyTokenBased
   ) where
 
-import Agda.Interaction.Highlighting.Precise
-import Agda.Interaction.Highlighting.Range
-import Agda.Interaction.EmacsCommand
-import Agda.Syntax.Common
-import Agda.TypeChecking.Monad
-  (TCM, envHighlightingMethod, HighlightingMethod(..), ModuleToSource)
-import Agda.Utils.FileName
-import qualified Agda.Utils.IO.UTF8 as UTF8
-import Agda.Utils.String
+import Prelude hiding (null)
 
-import Control.Applicative
-import qualified Control.Exception as E
-import Control.Monad.Reader
-import Data.Char
-import qualified Data.Map as Map
+import qualified Data.List as List
 import Data.Maybe
-import Data.Monoid
-import qualified System.Directory as D
-import qualified System.IO as IO
 
-#include "undefined.h"
-import Agda.Utils.Impossible
+import Agda.Syntax.Common.Pretty (prettyShow)
 
-------------------------------------------------------------------------
--- Read/show functions
+import Agda.Interaction.Highlighting.Common
+import Agda.Interaction.Highlighting.Precise
+import Agda.Utils.Range (Range(..))
+import Agda.Interaction.Emacs.Lisp
+import Agda.Interaction.Response
 
--- | Converts the 'aspect' and 'otherAspects' fields to atoms readable
--- by the Emacs interface.
+import Agda.TypeChecking.Monad (HighlightingMethod(..), ModuleToSource, topLevelModuleFilePath)
 
-toAtoms :: Aspects -> [String]
-toAtoms m = map toAtom (otherAspects m) ++ toAtoms' (aspect m)
-  where
-  toAtom :: Show a => a -> String
-  toAtom = map toLower . show
+import Agda.Utils.CallStack    (HasCallStack)
+import Agda.Utils.FileName     (AbsolutePath, filePath)
+import Agda.Utils.IO.TempFile  (writeToTempFile)
+import Agda.Utils.Null
+import Agda.Utils.String       (quote)
 
-  kindToAtom (Constructor Inductive)   = "inductiveconstructor"
-  kindToAtom (Constructor CoInductive) = "coinductiveconstructor"
-  kindToAtom k                         = toAtom k
-
-  toAtoms' Nothing               = []
-  toAtoms' (Just (Name mKind op)) =
-    map kindToAtom (maybeToList mKind) ++ opAtom
-    where opAtom | op        = ["operator"]
-                 | otherwise = []
-  toAtoms' (Just a) = [toAtom a]
 
 -- | Shows meta information in such a way that it can easily be read
 -- by Emacs.
@@ -64,13 +43,35 @@ showAspects modFile (r, m) = L $
       ++
     [L $ map A $ toAtoms m]
       ++
-    [A $ maybe "nil" quote $ note m]
-      ++
-    (maybeToList $ fmap defSite $ definitionSite m)
+    dropNils (
+      [lispifyTokenBased (tokenBased m)]
+        ++
+      [A $ ifNull (note m) "nil" quote]
+        ++
+      maybeToList (defSite <$> definitionSite m))
   where
   defSite (DefinitionSite m p _ _) =
     Cons (A $ quote $ filePath f) (A $ show p)
-    where f = Map.findWithDefault __IMPOSSIBLE__ m modFile
+    where
+      f :: HasCallStack => AbsolutePath
+      f = topLevelModuleFilePath modFile m  -- partial function, so use CallStack!
+
+  dropNils = List.dropWhileEnd (== A "nil")
+
+-- | Formats the 'TokenBased' tag for the Emacs backend. No quotes are
+-- added.
+
+lispifyTokenBased :: TokenBased -> Lisp String
+lispifyTokenBased TokenBased        = A "t"
+lispifyTokenBased NotOnlyTokenBased = A "nil"
+
+-- | Run 'showAspects' on a whole 'RangeMap'.
+lispifyHighlightingInfo_ ::
+     ModuleToSource
+       -- ^ Must contain a mapping for every definition site's module.
+  -> HighlightingInfo
+  -> [Lisp String]
+lispifyHighlightingInfo_ m2s = map (showAspects m2s) . toList
 
 -- | Turns syntax highlighting information into a list of
 -- S-expressions.
@@ -82,28 +83,33 @@ showAspects modFile (r, m) = L $
 
 lispifyHighlightingInfo
   :: HighlightingInfo
+  -> RemoveTokenBasedHighlighting
   -> HighlightingMethod
   -> ModuleToSource
      -- ^ Must contain a mapping for every definition site's module.
+  -> Maybe FilePath
   -> IO (Lisp String)
-lispifyHighlightingInfo h method modFile = do
-  case ranges h of
-    _             | method == Direct                   -> direct
-    ((_, mi) : _) | otherAspects mi == [TypeChecks] ||
-                    mi == mempty                       -> direct
-    _                                                  -> indirect
+lispifyHighlightingInfo h remove method modFile target =
+  case chooseHighlightingMethod h method of
+    Direct   -> direct
+    Indirect -> indirect
   where
-  info     = map (showAspects modFile) (ranges h)
+  info :: [Lisp String]
+  info =
+    A (case remove of
+        RemoveHighlighting -> "remove"
+        KeepHighlighting   -> "nil") :
+    lispifyHighlightingInfo_ modFile h
 
-  direct   = return $ L (A "agda2-highlight-add-annotations" :
-                         map Q info)
+  direct :: IO (Lisp String)
+  direct = return $ L $
+    A "agda2-highlight-add-annotations" :
+    A (maybe "nil" quote target) : map Q info
 
+  indirect :: IO (Lisp String)
   indirect = do
-    dir <- D.getTemporaryDirectory
-    f   <- E.bracket (IO.openTempFile dir "agda2-mode")
-                     (IO.hClose . snd) $ \ (f, h) -> do
-             UTF8.hPutStr h (show $ L info)
-             return f
+    filepath <- writeToTempFile (prettyShow $ L info)
     return $ L [ A "agda2-highlight-load-and-delete-action"
-               , A (quote f)
+               , A (quote filepath)
+               , A (maybe "nil" quote target)
                ]

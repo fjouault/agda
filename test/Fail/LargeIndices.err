@@ -1,4 +1,7 @@
-LargeIndices.agda:5,3-26
-The type of the constructor does not fit in the sort of the
-datatype, since Set a is not less or equal than Set
-when checking the constructor inv in the declaration of Img
+LargeIndices.agda:5.3-6: error: [ConstructorDoesNotFitInData]
+Constructor inv
+of inferred sort Set a
+does not fit into data type of sort Set.
+(Reason: Set a is not less or equal than Set)
+when checking that the type A of an argument to the constructor inv
+fits in the sort Set of the datatype.

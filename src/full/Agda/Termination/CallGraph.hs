@@ -1,5 +1,5 @@
-{-# LANGUAGE CPP                        #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 {-# LANGUAGE ImplicitParams             #-}
 
 -- | Call graphs and related concepts, more or less as defined in
@@ -11,40 +11,44 @@
 module Agda.Termination.CallGraph
   ( -- * Calls
     Node
-  , Call, mkCall, mkCall', source, target, callMatrixSet
+  , Call, source, target, callMatrixSet
+  , mkCall, mkCall' -- exported for the sake of testing, otherwise we use 'insert'
   , (>*<)
     -- * Call graphs
   , CallGraph(..)
+  , loops
   , targetNodes
   , fromList
   , toList
   , union
   , insert
   , complete, completionStep
+  -- , strengthenLoopDiagonals -- bad heuristics, see https://github.com/agda/agda/pull/8184#issuecomment-3487147737
   -- , prettyBehaviour
   ) where
 
 import Prelude hiding (null)
 
-import qualified Data.List as List
-import Data.Semigroup
+import Data.List qualified as List
 import Data.Set (Set)
 
-import Agda.Termination.CallMatrix (CallMatrix, CallMatrixAug(..), CMSet(..), CallComb(..))
-import qualified Agda.Termination.CallMatrix as CMSet
+import Agda.Syntax.Common.Pretty
+
+import Agda.Termination.CallMatrix (CallMatrix, CallMatrixAug(..), CMSet(..), CallComb(..)) -- , mapCMSet, mapCallMatrixAug, mapCallMatrix)
+import Agda.Termination.CallMatrix qualified as CMSet
 import Agda.Termination.CutOff
-import Agda.Termination.SparseMatrix as Matrix
+-- import Agda.Termination.Order        ( makeIncreaseInfinite )
+-- import Agda.Termination.SparseMatrix ( mapDiagonalNonZeros )
 
 import Agda.Utils.Favorites (Favorites)
-import qualified Agda.Utils.Favorites as Fav
+import Agda.Utils.Favorites qualified as Fav
 import Agda.Utils.Graph.AdjacencyMap.Unidirectional (Edge(..),Graph(..))
-import qualified Agda.Utils.Graph.AdjacencyMap.Unidirectional as Graph
+import Agda.Utils.Graph.AdjacencyMap.Unidirectional qualified as Graph
 
 import Agda.Utils.Function
-import Agda.Utils.Monad
+
 import Agda.Utils.Null
 import Agda.Utils.PartialOrd
-import Agda.Utils.Pretty hiding ((<>))
 import Agda.Utils.Singleton
 import Agda.Utils.Tuple
 
@@ -62,7 +66,7 @@ type Node = Int
 --   It can be labelled with several call matrices if there
 --   are several pathes from one function to another.
 
-type Call cinfo = Edge Node Node (CMSet cinfo)
+type Call cinfo = Edge Node (CMSet cinfo)
 
 callMatrixSet :: Call cinfo -> CMSet cinfo
 callMatrixSet = label
@@ -71,6 +75,7 @@ callMatrixSet = label
 mkCall :: Node -> Node -> CallMatrix -> cinfo -> Call cinfo
 mkCall s t m cinfo = Edge s t $ singleton $ CallMatrixAug m cinfo
 
+-- @mkCall'@ is only used in our Internal tests.
 -- | Make a call with empty @cinfo@.
 mkCall' :: Monoid cinfo => Node -> Node -> CallMatrix -> Call cinfo
 mkCall' s t m = mkCall s t m mempty
@@ -83,9 +88,16 @@ mkCall' s t m = mkCall s t m mempty
 -- meta information for different calls can be combined when the calls
 -- are combined.
 
-newtype CallGraph cinfo = CallGraph { theCallGraph :: Graph Node Node (CMSet cinfo) }
+newtype CallGraph cinfo = CallGraph { theCallGraph :: Graph Node (CMSet cinfo) }
   deriving (Show)
 
+mapCallGraph :: (Graph Node (CMSet cinfo) -> Graph Node (CMSet cinfo)) -> CallGraph cinfo -> CallGraph cinfo
+mapCallGraph f (CallGraph g) = CallGraph (f g)
+
+-- | Returns all nodes with self-loops.
+
+loops :: CallGraph cinfo -> [(Node, CMSet cinfo)]
+loops = Graph.loops . theCallGraph
 
 -- | Returns all the nodes with incoming edges.  Somewhat expensive. @O(e)@.
 
@@ -101,8 +113,8 @@ toList = Graph.edges . theCallGraph
 -- | Converts a list of calls with associated meta information to a
 --   call graph.
 
-fromList :: [Call cinfo] -> CallGraph cinfo
-fromList = CallGraph . Graph.fromListWith CMSet.union
+fromListCG :: [Call cinfo] -> CallGraph cinfo
+fromListCG = CallGraph . Graph.fromEdgesWith CMSet.union
 
 -- | 'null' checks whether the call graph is completely disconnected.
 instance Null (CallGraph cinfo) where
@@ -123,6 +135,12 @@ instance Semigroup (CallGraph cinfo) where
 instance Monoid (CallGraph cinfo) where
   mempty  = empty
   mappend = (<>)
+
+instance Singleton (Call cinfo) (CallGraph cinfo) where
+  singleton = fromList . singleton
+
+instance Collection (Call cinfo) (CallGraph cinfo) where
+  fromList = fromListCG
 
 -- | Inserts a call into a call graph.
 
@@ -146,14 +164,14 @@ instance PartialOrd a => CombineNewOld (Favorites a) where
 
 deriving instance CombineNewOld (CMSet cinfo)
 
-instance (Monoid a, CombineNewOld a, Ord s, Ord t) => CombineNewOld (Graph s t a) where
+instance (Monoid a, CombineNewOld a, Ord n) => CombineNewOld (Graph n a) where
   combineNewOld new old = Graph.unzip $ Graph.unionWith comb new' old'
     where
       new' = (,mempty) <$> new
       old' = (mempty,) <$> old
       comb (new1,old1) (new2,old2)  -- TODO: ensure old1 is null
-        = mapFst (new2 `mappend`) $ combineNewOld new1 old2
-        -- -- | old1 == mempty = mapFst (new2 `mappend`) $ combineNewOld new1 old2
+        = first (new2 `mappend`) $ combineNewOld new1 old2
+        -- -- | old1 == mempty = first (new2 `mappend`) $ combineNewOld new1 old2
         -- -- | otherwise      = __IMPOSSIBLE__
 
       -- Filter unlabelled edges from the resulting new graph.
@@ -166,17 +184,36 @@ instance (Monoid a, CombineNewOld a, Ord s, Ord t) => CombineNewOld (Graph s t a
 
 -- GHC supports implicit-parameter constraints in instance declarations
 -- only from 7.4.  To maintain compatibility with 7.2, we skip this instance:
+-- Andreas, 2025-10-29, not allowed in GHC 9.12:
+-- https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/implicit_parameters.html#implicit-parameter-type-constraints
 -- KEEP:
 -- instance (Monoid cinfo, ?cutoff :: CutOff) => CombineNewOld (CallGraph cinfo) where
---   combineNewOld (CallGraph new) (CallGraph old) = CallGraph -*- CallGraph $ combineNewOld comb old
+--   combineNewOld (CallGraph new) (CallGraph old) = CallGraph *** CallGraph $ combineNewOld comb old
 --     -- combined calls:
 --     where comb = Graph.composeWith (>*<) CMSet.union new old
 
 -- Non-overloaded version:
-combineNewOldCallGraph :: (Monoid cinfo, ?cutoff :: CutOff) => CombineNewOldT (CallGraph cinfo)
-combineNewOldCallGraph (CallGraph new) (CallGraph old) = CallGraph -*- CallGraph $ combineNewOld comb old
+combineNewOldCallGraph :: forall cinfo. (Monoid cinfo, ?cutoff :: CutOff) => CombineNewOldT (CallGraph cinfo)
+combineNewOldCallGraph (CallGraph new) (CallGraph old) = CallGraph *** CallGraph $ combineNewOld comb old
     -- combined calls:
-    where comb = Graph.composeWith (>*<) CMSet.union new old
+    where
+      comb :: Graph Node (CMSet cinfo)
+      comb = -- strengthenLoopDiagonals' $ -- bad heuristics, see https://github.com/agda/agda/pull/8184#issuecomment-3487147737
+        Graph.composeWith (>*<) CMSet.union new old
+
+-- Andreas, 2025-11-04
+-- bad heuristics, see https://github.com/agda/agda/pull/8184#issuecomment-3487147737
+-- -- | Any increase in the diagonal of a loop can be strengthened to infinite increase
+-- --   since we can iterate loops indefinitely.
+-- strengthenLoopDiagonals' :: Graph Node (CMSet cinfo) -> Graph Node (CMSet cinfo)
+-- strengthenLoopDiagonals' =
+--   Graph.mapLoops $ mapCMSet $ fmap $ mapCallMatrixAug $ mapCallMatrix $
+--     mapDiagonalNonZeros makeIncreaseInfinite
+
+-- -- | Any increase in the diagonal of a loop can be strengthened to infinite increase
+-- --   since we can iterate loops indefinitely.
+-- strengthenLoopDiagonals :: CallGraph cinfo -> CallGraph cinfo
+-- strengthenLoopDiagonals = mapCallGraph $ strengthenLoopDiagonals'
 
 -- | Call graph comparison.
 --   A graph @cs'@ is ``worse'' than @cs@ if it has a new edge (call)
@@ -192,11 +229,15 @@ combineNewOldCallGraph (CallGraph new) (CallGraph old) = CallGraph -*- CallGraph
 -- complete if it contains all indirect calls; if @f -> g@ and @g ->
 -- h@ are present in the graph, then @f -> h@ should also be present.
 
-complete :: (?cutoff :: CutOff) => Monoid cinfo => CallGraph cinfo -> CallGraph cinfo
-complete cs = repeatWhile (mapFst (not . null) . completionStep cs) cs
+complete :: (Monoid cinfo, ?cutoff :: CutOff) => CallGraph cinfo -> CallGraph cinfo
+complete cs = repeatWhile (first (not . null) . completionStep cs) cs
 
-completionStep :: (?cutoff :: CutOff) => Monoid cinfo =>
-  CallGraph cinfo -> CallGraph cinfo -> (CallGraph cinfo, CallGraph cinfo)
+completionStep :: (Monoid cinfo, ?cutoff :: CutOff)
+  => CallGraph cinfo
+       -- ^ The original call graph.
+  -> CallGraph cinfo
+       -- ^ The current completion.
+  -> (CallGraph cinfo, CallGraph cinfo)
 completionStep gOrig gThis = combineNewOldCallGraph gOrig gThis
 
 ------------------------------------------------------------------------
@@ -226,4 +267,3 @@ instance Pretty cinfo => Pretty (CallGraph cinfo) where
 -- --    , "Behaviour: " ++ show (diagonal $ mat $ cm c)  -- TODO
 -- --    , "Meta info: " ++ show cinfo
 --     ]
-

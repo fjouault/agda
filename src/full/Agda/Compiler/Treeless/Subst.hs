@@ -1,48 +1,59 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-orphans       #-}
 
 module Agda.Compiler.Treeless.Subst where
 
-import Control.Applicative
-import qualified Data.Map as Map
-import Data.Map (Map)
-import Data.Semigroup (Semigroup, Monoid, (<>), mempty, mappend, All(..), Any(..))
+import qualified Data.IntMap as IntMap
+import Data.IntMap (IntMap)
 import Data.Maybe
+import Data.Semigroup ( All(..), Any(..) )
 
 import Agda.Syntax.Treeless
-import Agda.Syntax.Internal (Substitution'(..))
 import Agda.TypeChecking.Substitute
+
+import Agda.Utils.Impossible
 
 instance DeBruijn TTerm where
   deBruijnVar = TVar
   deBruijnView (TVar i) = Just i
   deBruijnView _ = Nothing
 
-instance Subst TTerm TTerm where
-  applySubst IdS t = t
-  applySubst rho t = case t of
-      TDef{}    -> t
-      TLit{}    -> t
-      TCon{}    -> t
-      TPrim{}   -> t
-      TUnit{}   -> t
-      TSort{}   -> t
-      TErased{} -> t
-      TError{}  -> t
+instance Subst TTerm where
+  type SubstArg TTerm = TTerm
+
+  applySubst IdS = id
+  applySubst rho = \case
+      t@TDef{}    -> t
+      t@TLit{}    -> t
+      t@TCon{}    -> t
+      t@TPrim{}   -> t
+      t@TUnit{}   -> t
+      t@TSort{}   -> t
+      t@TErased{} -> t
+      t@TError{}  -> t
       TVar i         -> lookupS rho i
       TApp f ts      -> tApp (applySubst rho f) (applySubst rho ts)
       TLam b         -> TLam (applySubst (liftS 1 rho) b)
-      TLet e b       -> TLet (applySubst rho e) (applySubst (liftS 1 rho) b)
+      TLet s e b     -> TLet s (applySubst rho e)
+                          (applySubst (liftS 1 rho) b)
       TCase i t d bs ->
         case applySubst rho (TVar i) of
           TVar j  -> TCase j t (applySubst rho d) (applySubst rho bs)
-          e       -> TLet e $ TCase 0 t (applySubst rho' d) (applySubst rho' bs)
-            where rho' = wkS 1 rho
+          e       -> TLet s e $
+                     TCase 0 t (applySubst rho' d) (applySubst rho' bs)
+          where
+          rho' = wkS 1 rho
+          -- If the match is lazy, use a non-strict let, otherwise a
+          -- strict let. Note that, if the backend is strict, then
+          -- 'Agda.Compiler.ToTreeless.casetree' makes all matches
+          -- strict.
+          s = if caseLazy t then NonStrict else Strict
+      TCoerce e -> TCoerce (applySubst rho e)
     where
       tApp (TPrim PSeq) [TErased, b] = b
       tApp f ts = TApp f ts
 
-instance Subst TTerm TAlt where
+instance Subst TAlt where
+  type SubstArg TAlt = TTerm
   applySubst rho (TACon c i b) = TACon c i (applySubst (liftS i rho) b)
   applySubst rho (TALit l b)   = TALit l (applySubst rho b)
   applySubst rho (TAGuard g b) = TAGuard (applySubst rho g) (applySubst rho b)
@@ -72,29 +83,38 @@ instance Monoid Occurs where
   mempty  = Occurs 0 mempty mempty
   mappend = (<>)
 
+
+-- Andreas, 2019-07-10: this free variable computation should be rewritten
+-- in the style of TypeChecking.Free.Lazy.
+-- https://github.com/agda/agda/commit/03eb3945114a4ccdb449f22d69db8d6eaa4699b8#commitcomment-34249120
+-- András, 2026-02-13: now called TypeChecking.Free.Generic
+
 class HasFree a where
-  freeVars :: a -> Map Int Occurs
+  freeVars :: a -> IntMap Occurs
 
 freeIn :: HasFree a => Int -> a -> Bool
-freeIn i x = Map.member i (freeVars x)
+freeIn i x = IntMap.member i (freeVars x)
 
 occursIn :: HasFree a => Int -> a -> Occurs
-occursIn i x = fromMaybe mempty $ Map.lookup i (freeVars x)
+occursIn i x = fromMaybe mempty $ IntMap.lookup i (freeVars x)
 
 instance HasFree Int where
-  freeVars x = Map.singleton x once
+  freeVars x = IntMap.singleton x once
 
 instance HasFree a => HasFree [a] where
-  freeVars xs = Map.unionsWith mappend $ map freeVars xs
+  freeVars xs = IntMap.unionsWith mappend $ map freeVars xs
 
 instance (HasFree a, HasFree b) => HasFree (a, b) where
-  freeVars (x, y) = Map.unionWith mappend (freeVars x) (freeVars y)
+  freeVars (x, y) = IntMap.unionWith mappend (freeVars x) (freeVars y)
 
 data Binder a = Binder Int a
 
 instance HasFree a => HasFree (Binder a) where
   freeVars (Binder 0 x) = freeVars x
-  freeVars (Binder k x) = Map.filterWithKey (\ k _ -> k >= 0) $ Map.mapKeysMonotonic (subtract k) $ freeVars x
+  freeVars (Binder k x) = dropNeg $ IntMap.mapKeysMonotonic (subtract k) $ freeVars x
+    where
+      -- keep only elements > -1
+      dropNeg = snd . IntMap.split (-1)
 
 newtype InSeq a = InSeq a
 
@@ -102,24 +122,32 @@ instance HasFree a => HasFree (InSeq a) where
   freeVars (InSeq x) = inSeq <$> freeVars x
 
 instance HasFree TTerm where
-  freeVars t = case t of
-    TDef{}    -> Map.empty
-    TLit{}    -> Map.empty
-    TCon{}    -> Map.empty
-    TPrim{}   -> Map.empty
-    TUnit{}   -> Map.empty
-    TSort{}   -> Map.empty
-    TErased{} -> Map.empty
-    TError{}  -> Map.empty
+  freeVars = \case
+    TDef{}    -> IntMap.empty
+    TLit{}    -> IntMap.empty
+    TCon{}    -> IntMap.empty
+    TPrim{}   -> IntMap.empty
+    TUnit{}   -> IntMap.empty
+    TSort{}   -> IntMap.empty
+    TErased{} -> IntMap.empty
+    TError{}  -> IntMap.empty
     TVar i         -> freeVars i
     TApp (TPrim PSeq) [TVar x, b] -> freeVars (InSeq x, b)
     TApp f ts      -> freeVars (f, ts)
     TLam b         -> underLambda <$> freeVars (Binder 1 b)
-    TLet e b       -> freeVars (e, Binder 1 b)
+    TLet _ e b     -> freeVars (e, Binder 1 b)
     TCase i _ d bs -> freeVars (i, (d, bs))
+    TCoerce t      -> freeVars t
 
 instance HasFree TAlt where
-  freeVars a = case a of
+  freeVars = \case
     TACon _ i b -> freeVars (Binder i b)
     TALit _ b   -> freeVars b
     TAGuard g b -> freeVars (g, b)
+
+-- | Strenghtening.
+tryStrengthen :: (HasFree a, Subst a) => Int -> a -> Maybe a
+tryStrengthen n t =
+  case IntMap.minViewWithKey (freeVars t) of
+    Just ((i, _), _) | i < n -> Nothing
+    _ -> Just $ applySubst (strengthenS impossible n) t

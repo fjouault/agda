@@ -1,7 +1,8 @@
+{-# OPTIONS --cubical-compatible --level-universe --safe #-}
+
 module Common.Equality where
 
 open import Agda.Builtin.Equality public
-open import Agda.Builtin.TrustMe public
 open import Common.Level
 
 subst : ∀ {a p}{A : Set a}(P : A → Set p){x y : A} → x ≡ y → P x → P y

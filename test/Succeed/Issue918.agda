@@ -11,7 +11,7 @@ Note the spurious Tm datatype that isn't used anywhere? Remove it, move its decl
 Now uncomment the two implicit arguments at the bottom of the code. All metavars are now resolved. Now put the Tm datatype back in - yellow spots reappear, but different from before!
 -}
 
-{-# OPTIONS --without-K #-}
+{-# OPTIONS --cubical-compatible #-}
 module Issue918 where
 
 record ⊤ : Set where
@@ -59,8 +59,8 @@ ctx-hom-split-iso : {m k : ℕ} {Δ : U m} {T : V k}
                   → Σ (ctx-hom m Δ) (λ _ → V k)
 ctx-hom-split-iso {k = zero}  = λ Δ → (Δ , tt)
 ctx-hom-split-iso {m} {k = suc k} {Δ} {(A , T)} =
-    (λ {((Γ , A) , T) → (Γ , (A , T))})
-  ∘ ctx-hom-split-iso --{m = suc m} {Δ = (Δ , A)}
+    ((λ {((Γ , A) , T) → (Γ , (A , T))}))
+  ∘ ctx-hom-split-iso {m = suc m} --{Δ = (Δ , A)}
 
 data Tm where
 

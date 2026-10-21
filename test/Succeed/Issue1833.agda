@@ -1,8 +1,9 @@
-
+{-# OPTIONS --large-indices #-}
 module _ where
 
 open import Common.Prelude hiding (_>>=_)
 open import Common.Reflection
+open import Agda.Builtin.Sigma
 
 infix -100 This:_ this:_
 data This:_ {a} {A : Set a} : A → Set where
@@ -17,24 +18,31 @@ macro
 
 -- The context on the rhs of each of the two functions below is the same, a single String
 
-Γ = vArg (def (quote String) []) ∷ []
+Γ : Telescope
+Γ = ("s" , vArg (def (quote String) [])) ∷ []
 
 context-Γ₀ : String → This: Γ
 context-Γ₀ s = this: evalT getContext
 
 module _ (S : String) where
-  context-Γ₁ : This: Γ
+  Γ' : Telescope
+  Γ' = ("S" , vArg (def (quote String) [])) ∷ []
+
+  context-Γ₁ : This: Γ'
   context-Γ₁ = this: evalT getContext
 
-replicate : {A : Set} → Nat → A → List A
-replicate zero x = []
-replicate (suc n) x = x ∷ replicate n x
+downMap : {A : Set} → (Nat → A) → Nat → List A
+downMap f zero    = []
+downMap f (suc n) = f n ∷ downMap f n
 
 f-type : Term
 f-type = def (quote String) []
 
+f-tel : Nat → List (Σ String λ _ → Arg Type)
+f-tel n = downMap (λ _ → "_" , vArg unknown) n
+
 f-pats : Nat → List (Arg Pattern)
-f-pats n = replicate n (vArg (var "_"))
+f-pats n = downMap (λ x → vArg (var x)) n
 
 f-term : Nat → Term
 f-term n = var n []
@@ -42,7 +50,7 @@ f-term n = var n []
 defineFresh : Nat → Nat → TC QName
 defineFresh #pats #term =
   freshName "f" >>= λ f →
-  define (vArg f) (funDef f-type (clause (f-pats #pats) (f-term #term) ∷ [])) >>= λ _ →
+  define (vArg f) (funDef f-type (clause (f-tel #pats) (f-pats #pats) (f-term #term) ∷ [])) >>= λ _ →
   returnTC f
 
 freshFun : Nat → Nat → TC Bool

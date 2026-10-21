@@ -1,59 +1,68 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE DeriveDataTypeable #-}
-#endif
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Strict tries (based on "Data.Map.Strict" and "Agda.Utils.Maybe.Strict").
+--
+-- Note that if 'delete' or 'adjust' are used, one may end up with non-canonical
+-- subtries, i.e., those that do not contain any value (@Data.List.null . toList@)
+-- but may be @Eq@-different to other empty tries (@/= empty@).
 
 module Agda.Utils.Trie
   ( Trie(..)
   , empty, singleton, everyPrefix, insert, insertWith, union, unionWith
+  , fromList
+  , prefixBy
+  -- Andreas 2024-11-16:
+  -- Deletion does not clean up the trie, thus violates equational laws
+  -- with the given Eq that does not quotient out the different representations
+  -- of empty subtries.
+  -- E.g. @delete k . insert k v . delete k /= delete k@.
+  -- @adjust@ has a similar problem.
   , adjust, delete
   , toList, toAscList, toListOrderedBy
   , lookup, member, lookupPath, lookupTrie
   , mapSubTries, filter
+  , valueAt
   ) where
 
 import Prelude hiding (null, lookup, filter)
-import qualified Prelude
 
-import Control.Monad
-import Data.Function
-import Data.Functor
-import Data.Foldable (Foldable)
-import qualified Data.Maybe as Lazy
+import Control.DeepSeq
+
+import Data.Function (on)
+import Data.Maybe qualified as Lazy
 import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Monoid
-import qualified Data.List as List
+import Data.Map.Strict qualified as Map
 
-#if __GLASGOW_HASKELL__ <= 708
-import Data.Typeable ( Typeable )
-#endif
+import Data.List qualified as List
 
-import qualified Agda.Utils.Maybe.Strict as Strict
+import Agda.Utils.Maybe.Strict qualified as Strict
 import Agda.Utils.Null
+import Agda.Utils.Lens
 
 -- | Finite map from @[k]@ to @v@.
 --
 --   With the strict 'Maybe' type, 'Trie' is also strict in 'v'.
 data Trie k v = Trie !(Strict.Maybe v) !(Map k (Trie k v))
-  deriving ( Show
-           , Eq
-           , Functor
-           , Foldable
-#if __GLASGOW_HASKELL__ <= 708
-           , Typeable
-#endif
-           )
+  deriving
+    ( Show
+    , Eq
+        -- Andreas, 2024-11-16: The derived Eq isn't extensional.
+        -- It disguishes different representation of the empty Trie.
+        -- (E.g. the empty map and the map that only contains Nothing values.)
+    , Functor
+    , Foldable
+    )
+
+instance (NFData k, NFData v) => NFData (Trie k v) where
+  rnf (Trie a b) = rnf a `seq` rnf b
 
 -- | Empty trie.
 instance Null (Trie k v) where
   empty = Trie Strict.Nothing Map.empty
-  null (Trie v t) = null v && null t
+  null (Trie v t) = null v && all null t
+    -- Andreas, 2024-11-16: since we allow non-canoncial tries,
+    -- we have to check that every subtrie is empty,
+    -- not just that there are no subtries.
 
 -- | Helper function used to implement 'singleton' and 'everyPrefix'.
 singletonOrEveryPrefix :: Bool -> [k] -> v -> Trie k v
@@ -72,6 +81,11 @@ singleton = singletonOrEveryPrefix False
 everyPrefix :: [k] -> v -> Trie k v
 everyPrefix = singletonOrEveryPrefix True
 
+-- | Prefix every key by the given prefix.
+prefixBy :: [k] -> Trie k v -> Trie k v
+prefixBy []     t = t
+prefixBy (k:ks) t = Trie Strict.Nothing $ Map.singleton k $ prefixBy ks t
+
 -- | Left biased union.
 --
 --   @union = unionWith (\ new old -> new)@.
@@ -87,17 +101,34 @@ unionWith f (Trie v ss) (Trie w ts) =
 --
 --   @insert = insertWith (\ new old -> new)@
 insert :: (Ord k) => [k] -> v -> Trie k v -> Trie k v
-insert k v t = union (singleton k v) t
+insert k v t = (singleton k v) `union` t
 
 -- | Insert with function merging new value with old value.
 insertWith :: (Ord k) => (v -> v -> v) -> [k] -> v -> Trie k v -> Trie k v
 insertWith f k v t = unionWith f (singleton k v) t
 
+fromList :: Ord k => [([k],v)] -> Trie k v
+fromList = foldl (\ t (ks, v) -> insert ks v t) empty
+
+-- Andreas, 2024-11-16: delete does not clean up empty subtrees,
+-- so it is not correct wrt. @Eq@.
+
 -- | Delete value at key, but leave subtree intact.
+--
+-- Disclaimer: may return a non-canoncial trie
+-- because it does not clean up subtries that become empty.
+--
 delete :: Ord k => [k] -> Trie k v -> Trie k v
 delete path = adjust path (const Strict.Nothing)
 
+-- Andreas, 2024-11-16: adjust does not clean up empty subtrees,
+-- so it is not correct wrt. @Eq@.
+
 -- | Adjust value at key, leave subtree intact.
+--
+-- Disclaimer: may return a non-canoncial trie
+-- because it does not clean up subtries that become empty.
+--
 adjust ::
   Ord k =>
   [k] -> (Strict.Maybe v -> Strict.Maybe v) -> Trie k v -> Trie k v
@@ -173,3 +204,8 @@ filter p (Trie mv ts) = Trie mv' (Map.filter (not . null) $ filter p <$> ts)
         Strict.Just v | p v -> mv
         _                   -> Strict.Nothing
 
+-- | Key lens.
+valueAt :: Ord k => [k] -> Lens' (Trie k v) (Maybe v)
+valueAt path f t = f (lookup path t) <&> \ case
+  Nothing -> delete path t
+  Just v  -> insert path v t

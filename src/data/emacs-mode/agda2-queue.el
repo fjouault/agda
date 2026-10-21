@@ -1,4 +1,6 @@
+;; -*- lexical-binding: t -*-
 ;;; agda2-queue.el --- Simple FIFO character queues.
+;; SPDX-License-Identifier: MIT License
 
 (defun agda2-queue-empty ()
   "Creates a new empty FIFO character queue.

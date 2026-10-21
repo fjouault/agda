@@ -1,0 +1,1 @@
+--ghc --ghc-dont-call-ghc --no-main

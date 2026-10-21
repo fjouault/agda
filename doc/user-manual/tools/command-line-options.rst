@@ -7,261 +7,2747 @@ Command-line options
 Command-line options
 --------------------
 
-Agda accepts the following options.
+Agda accepts the following options on the command line.
+Where noted, these options can also serve as *pragma options*,
+i.e., be supplied in a file via the ``{-# OPTIONS ... #-}`` pragma
+or in the ``flags`` section of an ``.agda-lib`` file.
+
+Setup and information
+~~~~~~~~~~~~~~~~~~~~~
+
+Some options cause Agda to perform tasks at startup like mandatory setup
+or printing some information.
+These options are not exclusive, they can be used with other options,
+albeit this seldom makes sense.
+They are not executed in the order given on the command line,
+but in the fixed order listed in the following:
+
+.. option:: --setup
+
+     .. versionadded:: 2.8.0
+
+     Extract Agda's data files (primitive library, emacs mode etc.)
+     to the data directory (see :option:`--print-agda-data-dir`).
+
+.. option:: --version, -V
+
+     Show version number and cabal flags used in this build of Agda.
+
+     Overwrites :option:`--numeric-version`.
+
+.. option:: --numeric-version
+
+     Show just the version number.
+
+     Overwrites :option:`--version`.
+
+.. option:: --help[={TOPIC}], -?[{TOPIC}]
+
+     Show basically this help, or more help about ``TOPIC``.
+     Available topics:
+
+     - ``emacs-mode``:
+       Explain the option :option:`--emacs-mode`.
+
+     - ``error``:
+       List the names of Agda's errors.
+
+     - ``warning``:
+       List warning groups and individual warnings and their default status.
+       Instruct how to toggle benign warnings.
+
+     Overwrites itself, i.e., only the last of several :option:`--help` options is effective.
+
+.. option:: --print-options
+
+     .. versionadded:: 2.9.0
+
+     Print a simple list of all options, suitable for implementing bash completion.
+
+.. option:: --build-library
+
+     .. versionadded:: 2.8.0
+
+     Expects an ``.agda-lib`` file in the current directory
+     (or in a parent directory) and type-checks all Agda files
+     found in the ``include`` directories of the library or
+     in subdirectories thereof.
+
+.. option:: --print-agda-app-dir
+
+     .. versionadded:: 2.6.4.1
+
+     Outputs the (:envvar:`AGDA_DIR`) directory containing Agda's
+     application configuration files, such as the ``defaults`` and
+     ``libraries`` files, as described in :ref:`package-system`.
+
+.. option:: --print-agda-dir
+
+     .. versionadded:: 2.6.2
+
+     Alias of :option:`--print-agda-data-dir`.
+
+.. option:: --print-agda-data-dir
+
+     .. versionadded:: 2.6.4.1
+
+     Outputs the root of the directory structure holding Agda's data
+     files such as core libraries, style files for the backends, etc.
+
+     Since 2.8.0, the data directory is determined as follows:
+
+     - The *default data directory* is defined at build time, either
+       as the standard data directory defined by Cabal, or, if the
+       ``use-xdg-data-home`` Cabal flag is enabled,
+       as ``$XDG_DATA_HOME/agda/$AGDA_VERSION``.
+
+     - The *data directory* can be set at runtime using the :envvar:`Agda_datadir`
+       environment variable and defaults to the default data directory.
+       It can be printed with this flag.
+
+.. option:: --emacs-mode={COMMAND}
+
+     .. versionadded:: 2.8.0
+
+     Administer the Agda Emacs mode,
+     a task previously managed by the ``agda-mode`` executable.
+
+     Available commands:
+
+     - ``setup``:
+       Install the Emacs mode into ``.emacs``.
+
+     - ``compile``:
+       Compile the Elisp files of the Emacs mode.
+
+     - ``locate``:
+       Print the path to the Emacs mode.
+
+     More information in :ref:`Section Emacs <install-agda-mode>`.
+
+     This option can be given several times to perform several commands.
+
 
 General options
 ~~~~~~~~~~~~~~~
 
-=================================  ================  ===========================================
-:samp:`--version`                  :samp:`-V`        Show version number
+.. option:: --interaction
 
-:samp:`--help`                     :samp:`-?`        Show basically this help
+     For use with the Emacs mode (no need to invoke yourself).
 
-:samp:`--interactive`              :samp:`-I`        Start in interactive mode
-                                                     (no longer supported)
+.. option:: --parallel[=N], -j[N]
 
-:samp:`--interaction`                                For use with the Emacs mode
-                                                     (no need to invoke yourself)
-=================================  ================  ===========================================
+     .. versionadded:: 2.9.0
+
+     Type check in parallel. N is optional, and controls the number of
+     threads to use for checking. If ``N`` is omitted, or explicitly set
+     to 0, the number of processors is used. The default, ``-j1``, means
+     type checking is sequential. Parallelism has module granularity.
+
+     Parallel type checking trades space for time, with (generally) a
+     decrease in wall-clock time *larger* than the corresponding
+     increase in total memory usage. Type-checking of a module can not
+     start until all of its dependencies have been checked, so wider
+     dependency graphs will see more speedup than taller dependency
+     graphs.
+
+     Using *too many* cores can make the space-time tradeoff worse. The
+     appropriate number will depend on the specifics of the project
+     being checked.
+
+     A reasonable number to start with is ``-j8``.
+
+.. option:: --interaction-json
+
+     .. versionadded:: 2.6.1
+
+     For use with other editors such as Atom (no need to invoke
+     yourself).
+
+.. option:: --interaction-exit-on-error
+
+     .. versionadded:: 2.6.3
+
+     Makes Agda exit with a non-zero exit code if :option:`--interaction` or
+     :option:`--interaction-json` are used and a type error is encountered. The
+     option also makes Agda exit with exit code 113 if Agda fails to
+     parse a command.
+
+     This option might for instance be used if Agda is controlled from
+     a script.
+
+.. option:: --interactive, -I
+
+     Start in interactive mode (not maintained).
+
+.. option:: --trace-imports[=(0|1|2|3)]
+
+     .. versionadded:: 2.6.4
+
+     Configure printing of messages when an imported module is accessed during type-checking.
+
+     .. list-table::
+
+       * - ``0``
+         - Do not print any messages about checking a module.
+       * - ``1``
+         - | Print only `Checking ...` when an access to an uncompiled module occurs.
+           | This is the default behavior if ``--trace-imports`` is not specified.
+       * - ``2``
+         - | Use the effect of ``1``, but also print `Finished ...`
+           | when a compilation of an uncompiled module is finished.
+           | This is the behavior if ``--trace-imports`` is specified without a value.
+       * - ``3``
+         - | Use the effect of ``2``, but also print `Loading ...`
+           | when a compiled module (interface) is accessed during the type-checking.
+
+.. option:: --colour[=(auto|always|never)], --color[=(auto|always|never)]
+
+    .. versionadded:: 2.6.4
+
+      Configure whether or not Agda's standard output diagnostics should
+      use ANSI terminal colours for syntax highlighting (e.g. error
+      messages, warnings).
+
+    .. list-table::
+
+        * - ``always``
+          - Always print diagnostic in colour.
+        * - ``auto``
+          - | Automatically determine whether or not it is safe for
+            | standard output to include colours. Colours will be used
+            | when writing directly to a terminal device on Linux and
+            | macOS.
+            |
+            | This is the default value.
+        * - ``never``
+          - Never print output in colour.
+
+    The American spelling, ``--color``, is also accepted.
+
+    **Note:** Currently, the colour scheme for terminal output can not
+    be configured. If the colours are not legible on your terminal,
+    please use ``--colour=never`` for now.
+
+.. option:: --only-scope-checking
+
+     .. versionadded:: 2.5.3
+
+     Only scope-check the top-level module, do not type-check it (see
+     :ref:`quickLaTeX`).
+
+.. option:: --transliterate
+
+     .. versionadded:: 2.6.3
+
+     When writing to stdout or stderr Agda will (hopefully) replace
+     code points that are not supported by the current locale or code
+     page by something else, perhaps question marks.
+
+     This option is not supported when :option:`--interaction` or
+     :option:`--interaction-json` are used, because when those options
+     are used Agda uses UTF-8 when writing to stdout (and when reading
+     from stdin).
+
+.. _literate-options:
+
+Literate programming
+~~~~~~~~~~~~~~~~~~~~
+
+.. option:: --literate-markdown-only-agda-blocks
+
+     .. versionadded:: 2.9.0
+
+     In literate Markdown (``.lagda.md``) and Typst (``.lagda.typ``) files,
+     only treat code blocks explicitly marked with ``````agda`` as Agda code.
+     Unmarked code blocks (``````) are treated as verbatim text and are not
+     type-checked.
+
+     See :ref:`literate-markdown-only-agda-blocks` for more details.
+
+.. option:: --no-literate-markdown-only-agda-blocks
+
+     .. versionadded:: 2.9.0
+
+     Treat also unmarked code blocks as Agda code in literate Markdown and Typst files
+     (default).
+
+.. _compilation-options:
 
 Compilation
 ~~~~~~~~~~~
 
 See :ref:`compilers` for backend-specific options.
 
-=================================  ================  ===========================================
-:samp:`--no-main`                                    Do not treat the requested module as the
-                                                     main module of a program when compiling
+.. option:: --compile-dir={DIR}
 
-:samp:`--compile-dir={DIR}`                          Set :samp:`{DIR}` as directory for compiler
-                                                     output (default: the project root)
+     Set ``DIR`` as directory for compiler output (default: the
+     project root).
 
-:samp:`--no-forcing`                                 Disable the forcing optimisation
-=================================  ================  ===========================================
+.. option:: --no-main
+
+     Do not treat the requested/current module as the main module of a program
+     when compiling.
+
+     Pragma option since 2.5.3.
+
+.. option:: --main
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-main`.
 
 Generating highlighted source code
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-=================================  ================  ===========================================
-:samp:`--vim`                                        Generate Vim_ highlighting files
+.. option:: --dependency-graph={FILE}
 
-:samp:`--latex`                                      Generate LaTeX with highlighted source code
-                                                     (see :ref:`generating-latex`)
+     .. versionadded:: 2.3.0
 
-:samp:`--latex-dir={DIR}`                            Set directory in which LaTeX files are
-                                                     placed to :samp:`{DIR}` (default: latex)
+     Generate a Dot_ file ``FILE`` with a module dependency graph.
 
-:samp:`--count-clusters`                             Count extended grapheme clusters when
-                                                     generating LaTeX
-                                                     code (see :ref:`grapheme-clusters`)
+.. option:: --dependency-graph-include={LIBRARY}
 
-:samp:`--html`                                       Generate HTML files with highlighted source
-                                                     code (see :ref:`generating-html`)
+     .. versionadded:: 2.6.3
 
-:samp:`--html-dir={DIR}`                             Set directory in which HTML files are
-                                                     placed to :samp:`{DIR}` (default: html)
+     Include modules from the given library in the dependency graph.
+     This option can be used multiple times to include modules from
+     several libraries. If this option is not used at all, then all
+     modules are included. (Note that the module given on the command
+     line might not be included.)
 
-:samp:`--css={URL}`                                  Set URL of the CSS file used by the HTML
-                                                     files to :samp:`{URL}` (can be relative)
+     A module ``M`` is considered to be in the library ``L`` if ``L``
+     is the ``name`` of an ``.agda-lib`` file
+     :ref:`associated<The_agda-lib_files_associated_to_a_given_Agda_file>`
+     to ``M`` (even if ``M``'s file cannot be found via the
+     ``include`` paths given in the ``.agda-lib`` file).
 
-:samp:`--dependency-graph={FILE}`                    Generate a Dot_ file :samp:`{FILE}` with a
-                                                     module dependency graph
-=================================  ================  ===========================================
+.. option:: --html
+
+     .. versionadded:: 2.2.0
+
+     Generate HTML files with highlighted source code (see
+     :ref:`generating-html` for description and further options).
+
+.. option:: --latex
+
+     .. versionadded:: 2.3.2
+
+     Generate LaTeX with highlighted source code (see
+     :ref:`generating-latex` for description and further options).
+
+.. option:: --vim
+
+     Generate Vim_ highlighting files.
 
 Imports and libraries
 ~~~~~~~~~~~~~~~~~~~~~
 
 (see :ref:`package-system`)
 
-=================================  ================  ===========================================
-:samp:`--ignore-interfaces`                          Ignore interface files (re-type check
-                                                     everything)
+.. option:: --ignore-all-interfaces
 
-:samp:`--include-path={DIR}`       :samp:`-i={DIR}`  Look for imports in :samp:`{DIR}`
+     .. versionadded:: 2.6.0
 
-:samp:`--library={DIR}`            :samp:`-l={LIB}`  Use library :samp:`{LIB}`
+     Don't read *any* interface files, including builtin and primitive
+     modules; only use this if you know what you are doing!
 
-:samp:`--library-file={FILE}`                        Use :samp:`{FILE}` instead of the standard
-                                                     libraries file
+.. option:: --ignore-interfaces
 
-:samp:`--no-libraries`                               Don't use any library files
+     Don't read interface files (re-type check everything, except for
+     builtin and primitive modules).
 
-:samp:`--no-default-libraries`                       Don't use default library files
-=================================  ================  ===========================================
+.. option:: --no-write-interfaces
 
-Sharing and caching
-~~~~~~~~~~~~~~~~~~~
+     .. versionadded:: 2.9.0
 
-=================================  ================  ===========================================
-:samp:`--sharing`                                    Enable sharing and call-by-need evaluation
-                                                     (experimental) (default: OFF)
+     Don't write out interface files after type-checking a module.
 
-:samp:`--no-sharing`                                 Disable sharing and call-by-need evaluation
+.. option:: --include-path={DIR}, -i {DIR}
 
-:samp:`--caching`                                    Enable caching of typechecking
-                                                     (experimental) (default: OFF)
+     Look for imports in ``DIR``.
+     This option can be given multiple times.
 
-:samp:`--no-caching`                                 Disable caching of typechecking
+.. option:: --library={DIR}, -l {LIB}
 
-:samp:`--only-scope-checking`                        Only scope-check the top-level module,
-                                                     do not type-check it
-=================================  ================  ===========================================
+     .. versionadded:: 2.5.1
 
+     Use library ``LIB``.
+
+.. option:: --library-file={FILE}
+
+     .. versionadded:: 2.5.1
+
+     Use ``FILE`` instead of the standard ``libraries`` file.
+
+.. option:: --no-default-libraries
+
+     .. versionadded:: 2.5.1
+
+     Don't use default library files.
+
+.. option:: --no-libraries
+
+     .. versionadded:: 2.5.2
+
+     Don't use any library files.
 
 .. _command-line-pragmas:
 
 Command-line and pragma options
 -------------------------------
 
-The following options can also be given in .agda files in the
-``{-# OPTIONS --{opt₁} --{opt₂} ... #-}`` form at the top of the file.
+The following options can also be given in Agda files using the
+:ref:`OPTIONS<options-pragma>` pragma.
+
+Performance
+~~~~~~~~~~~
+
+.. option:: --auto-inline
+
+     .. versionadded:: 2.6.2
+
+     Turn on automatic compile-time inlining. See :ref:`inline-pragma` for more information.
+
+.. option:: --no-auto-inline
+
+     .. versionadded:: 2.5.4
+
+     Disable automatic compile-time inlining (default). Only definitions marked
+     ``INLINE`` will be inlined.
+     Default since 2.6.2.
+
+.. option:: --caching, --no-caching
+
+     .. versionadded:: 2.5.4
+
+     Enable or disable caching of typechecking.
+
+     Default: ``--caching``.
+
+.. option:: --call-by-name
+
+     .. versionadded:: 2.6.2
+
+     Disable call-by-need evaluation in the Agda Abstract Machine.
+
+.. option:: --no-call-by-name
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--call-by-name`.
+
+.. option:: --no-fast-reduce
+
+     .. versionadded:: 2.6.0
+
+     Disable reduction using the Agda Abstract Machine.
+
+.. option:: --fast-reduce
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-fast-reduce`.
+
+.. option:: --no-forcing
+
+     .. versionadded:: 2.2.10
+
+     Disable the forcing optimisation. Since Agda 2.6.1 it is a pragma
+     option.
+
+.. option:: --forcing
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-forcing`.
+
+.. option:: --no-projection-like
+
+     .. versionadded:: 2.6.1
+
+     Turn off the analysis whether a type signature likens that of a
+     projection.
+
+     Projection-likeness is an optimization that reduces the size of
+     terms by dropping parameter-like reconstructible function
+     arguments. Thus, it is advisable to leave this optimization on,
+     the flag is meant for debugging Agda.
+
+     See also the :ref:`NOT_PROJECTION_LIKE<not_projection_like-pragma>` pragma.
+
+.. option:: --projection-like
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-projection-like`.
 
 Printing and debugging
 ~~~~~~~~~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--show-implicit`                                                Show implicit arguments when printing
+.. option:: --no-unicode
 
-:samp:`--show-irrelevant`                                              Show irrelevant arguments when printing
+     .. versionadded:: 2.5.4
 
-:samp:`--verbose={N}`                               :samp:`-v={N}`     Set verbosity level to :samp:`{N}`
-==================================================  =================  ===========================================
+     Do not use unicode characters to print terms.
+
+.. option:: --unicode
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-unicode`.
+
+.. option:: --show-identity-substitutions
+
+     .. versionadded:: 2.6.2
+
+     Show all arguments of metavariables when pretty-printing a term,
+     even if they amount to just applying all the variables in the context.
+
+.. option:: --no-show-identity-substitutions
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--show-identity-substitutions`.
+
+.. option:: --show-implicit
+
+     Show implicit arguments when printing.
+
+.. option:: --no-show-implicit
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--show-implicit`.
+
+.. option:: --show-irrelevant
+
+     .. versionadded:: 2.3.2
+
+     Show irrelevant arguments when printing.
+
+.. option:: --no-show-irrelevant
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--show-irrelevant`.
+
+.. option:: --verbose={N}, -v {N}
+
+     Set verbosity level to ``N``. This only has an effect if
+     Agda was installed with the ``debug`` Cabal flag.
+     See :ref:`debugging` for more information.
+
+.. option:: --profile={PROF}
+
+     .. versionadded:: 2.6.3
+
+    Turn on profiling option ``PROF``. Available options are
+
+    .. list-table::
+
+       * - ``internal``
+         - Measure time taken by various parts of the system (type checking, serialization, etc)
+       * - ``modules``
+         - Measure time spent on individual (Agda) modules
+       * - ``definitions``
+         - Measure time spent on individual (Agda) definitions
+       * - ``sharing``
+         - Measure things related to sharing
+       * - ``serialize``
+         - Collect detailed statistics about serialization
+       * - ``constraints``
+         - Collect statistics about constraint solving
+       * - ``metas``
+         - Count number of created metavariables
+       * - ``interactive``
+         - Measure time of interactive commands
+       * - ``conversion``
+         - Count number of times various steps of the conversion algorithm are
+           used (reduction, eta-expansion, syntactic equality, etc)
+
+
+    Only one of ``internal``, ``modules``, and ``definitions`` can be turned on
+    at a time. You can also give ``--profile=all`` to turn on all profiling
+    options (choosing ``internal`` over ``modules`` and ``definitions``, use
+    ``--profile=modules --profile=all`` to pick ``modules`` instead).
 
 Copatterns and projections
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--copatterns`                                                   Enable definitions by copattern
-                                                                       matching (default; see :ref:`copatterns`)
+.. option:: --copatterns, --no-copatterns
 
-:samp:`--no-copatterns`                                                Disable definitions by copattern
-                                                                       matching
+     .. versionadded:: 2.4.0
 
-:samp:`--postfix-projections`                                          Make postfix projection notation the
-                                                                       default
-==================================================  =================  ===========================================
+     Enable or disable definitions by copattern matching (see
+     :ref:`copatterns`).
+
+     Default: ``--copatterns`` (since 2.4.2.4).
+
+.. option:: --postfix-projections
+
+     .. versionadded:: 2.5.2
+
+     Make postfix projection notation the default.
+     On by default since 2.7.0.
+
+.. option:: --no-postfix-projections
+
+     .. versionadded:: 2.6.4
+
+     Opposite of :option:`--postfix-projections`.
 
 Experimental features
 ~~~~~~~~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--proof-irrelevance`                                            Enable proof irrelevance
-                                                                       (experimental feature)
+.. option:: --allow-exec
 
-:samp:`--injective-type-constructors`                                  Enable injective type constructors
-                                                                       (makes Agda anti-classical and
-                                                                       possibly inconsistent)
+     .. versionadded:: 2.6.2
 
-:samp:`--guardedness-preserving-type-constructors`                     Treat type constructors as
-                                                                       inductive constructors when checking
-                                                                       productivity
+     Enable system calls during type checking (see :ref:`reflection`).
 
-:samp:`--experimental-irrelevance`                                     Enable potentially unsound irrelevance
-                                                                       features (irrelevant levels, irrelevant
-                                                                       data matching)
-                                                                       (see :ref:`irrelevance`)
+.. option:: --no-allow-exec
 
-:samp:`--rewriting`                                                    Enable declaration and use of REWRITE
-                                                                       rules
-                                                                       (see :ref:`rewriting`)
+     .. versionadded:: 2.6.4
 
-:samp:`--cubical`                                                      Enable cubical features
-                                                                       (see :ref:`cubical`)
-==================================================  =================  ===========================================
+     Default, opposite of :option:`--allow-exec`.
+
+.. option:: --confluence-check, --local-confluence-check, --no-confluence-check
+
+     .. versionadded:: 2.6.1
+
+     Enable optional (global or local) confluence checking of REWRITE
+     rules (see :ref:`confluence-check`).
+
+     Default is :option:`--no-confluence-check`.
+
+.. option:: --cubical, --cubical=full
+
+     .. versionadded:: 2.6.0
+
+     Enable cubical features. Turns on :option:`--cubical=compatible`
+     and :option:`--without-K` (see :ref:`cubical`).
+
+.. option:: --cubical=erased, --erased-cubical
+
+     .. versionadded:: 2.6.3
+
+     Enable a :ref:`variant<erased-cubical>` of Cubical Agda, and turn
+     on :option:`--cubical=compatible` and :option:`--without-K`.
+
+.. option:: --cubical=no-glue
+
+     .. versionadded:: 2.9.0
+
+     Enable a :ref:`variant<cubical-without-glue>` of Cubical Agda
+     without the :ref:`Glue types<glue-types>`.
+     Turns on :option:`--cubical=compatible` and :option:`--without-K`.
+
+.. option:: --experimental-irrelevance
+
+     .. versionadded:: 2.3.0
+
+     Enable potentially unsound irrelevance features (irrelevant
+     levels, irrelevant data matching) (see :ref:`irrelevance`).
+
+     Implies :option:`--irrelevance`.
+
+.. option:: --no-experimental-irrelevance
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--experimental-irrelevance`.
+
+.. option:: --guarded
+
+     .. versionadded:: 2.6.2
+
+     Enable locks and ticks for guarded recursion
+     (see :ref:`Guarded Type Theory <guarded>`).
+
+.. option:: --no-guarded
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--guarded`.
+
+.. option:: --injective-type-constructors
+
+     .. versionadded:: 2.2.8
+
+     Enable injective type constructors.
+
+     This makes Agda anti-classical: injective type constructors are incompatible
+     with the law of excluded middle, see theorem 93 (attributed to Chung-Kil Hur)
+     by Cockx and Devriese :ref:`[1] <command-line-options-refs>`.
+
+     It is also incompatible with univalence, by theorem 92 of the same paper.
+
+     Additionally, this possibly makes Agda inconsistent.
+
+.. option:: --no-injective-type-constructors
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--injective-type-constructors`.
+
+.. option:: --irrelevant-projections, --no-irrelevant-projections
+
+     .. versionadded:: 2.5.4
+
+     Enable [disable] projection of irrelevant record fields (see
+     :ref:`irrelevance`). The option ``--irrelevant-projections``
+     makes Agda inconsistent.
+
+     Implies :option:`--irrelevance`.
+
+     Default (since version 2.6.1): ``--no-irrelevant-projections``.
+
+.. option:: --lossy-unification, --no-lossy-unification
+
+     .. versionadded:: 2.6.2
+
+     Enable a constraint-solving heuristic akin to first-order unification, see :ref:`lossy-unification`.
+     Implies :option:`--no-require-unique-meta-solutions`.
+
+.. option:: --no-lossy-unification
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--lossy-unification`.
+
+.. option:: --require-unique-meta-solutions, --no-require-unique-meta-solutions
+
+      .. versionadded:: 2.7.0
+
+    When turned off, type checking is allowed to use heuristics to solve meta
+    variables that do not necessarily guarantee unique solutions. In
+    particular, it can make use of :ref:`INJECTIVE_FOR_INFERENCE <injective-for-inference-pragma>`
+    pragmas.
+
+    ``--no-require-unique-meta-solutions`` is implied by the :option:`--lossy-unification` flag.
+
+    Default: ``--require-unique-meta-solutions``
+
+.. option:: --irrelevance, --no-irrelevance
+
+     .. versionadded:: 2.9.0
+
+     Enable or disable declaration and use of irrelevant function spaces, record
+     fields, and declarations (see :ref:`irrelevance <irrelevance>`).
+
+     Default: ``--irrelevance``.
+
+.. option:: --prop, --no-prop
+
+     .. versionadded:: 2.6.0
+
+     Enable or disable declaration and use of
+     definitionally proof-irrelevant propositions
+     (see :ref:`proof-irrelevant propositions <prop>`).
+
+     Default: ``--no-prop``.
+     In this case, ``Prop`` is since 2.6.4 not in scope
+     by default (:option:`--import-sorts`).
+
+.. option:: --rewriting
+
+     .. versionadded:: 2.4.2.4
+
+     Enable declaration and use of REWRITE rules (see
+     :ref:`rewriting`).
+
+.. option:: --no-rewriting
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--rewriting`.
+
+.. option:: --local-rewriting
+
+     .. versionadded:: 2.9.0
+
+     Enable declaring local rewrite rules with the ``@rewrite`` attribute (see
+     :ref:`local-rewriting`).
+
+.. option:: --no-local-rewriting
+
+     .. versionadded:: 2.9.0
+
+     Default, opposite of :option:`--local-rewriting`.
+
+.. option:: --two-level
+
+     .. versionadded:: 2.6.2
+
+     Enable the use of strict (non-fibrant) type universes ``SSet``
+     *(two-level type theory)*.
+     Since 2.6.4, brings ``SSet`` into scope unless :option:`--no-import-sorts`.
+
+.. option:: --no-two-level
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--two-level`.
+
+
 
 Errors and warnings
 ~~~~~~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--allow-unsolved-metas`                                         Succeed and create interface file
-                                                                       regardless of unsolved meta variables
-                                                                       (see :ref:`metavariables`)
+.. option:: --allow-incomplete-matches
 
-:samp:`--no-positivity-check`                                          Do not warn about not strictly positive
-                                                                       data types
-                                                                       (see :ref:`positivity-checking`)
+     .. versionadded:: 2.6.1
 
-:samp:`--no-termination-check`                                         Do not warn about possibly
-                                                                       nonterminating code
-                                                                       (see :ref:`termination-checking`)
+     Succeed and create interface file regardless of incomplete
+     pattern-matching definitions. See also the
+     :ref:`NON_COVERING<non_covering-pragma>` pragma.
 
-:samp:`--warning={MODE}`                            :samp:`-W={MODE}`  Set warning mode to :samp:`{MODE}`
-                                                                       (available:
-                                                                       :samp:`warn` display warnings,
-                                                                       :samp:`error` turn warnings into errors,
-                                                                       and :samp:`ignore` ignore warnings)
-==================================================  =================  ===========================================
+.. option:: --no-allow-incomplete-matches
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--allow-incomplete-matches`.
+
+.. option:: --allow-unsolved-metas
+
+     Succeed and create interface file regardless of unsolved meta
+     variables (see :ref:`metavariables`).
+
+.. option:: --no-allow-unsolved-metas
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--allow-unsolved-metas`.
+
+.. option:: --no-positivity-check
+
+     Do not warn about not strictly positive data types (see
+     :ref:`positivity-checking`).
+
+.. option:: --positivity-check
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-positivity-check`.
+
+.. option:: --no-termination-check
+
+     Do not warn about possibly nonterminating code (see
+     :ref:`termination-checking`).
+
+.. option:: --termination-check
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-termination-check`.
+
+.. option:: --warning={GROUP|FLAG}, -W {GROUP|FLAG}
+
+     .. versionadded:: 2.5.3
+
+     Set warning group or flag (see :ref:`warnings`).
 
 Pattern matching and equality
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--without-K`                                                    Disables definitions using Streicher’s
-                                                                       K axiom (see :ref:`without-K`)
+.. option:: --exact-split, --no-exact-split
 
-:samp:`--with-K`                                                       Overrides a global ``--without-K``
-                                                                       in a file (see :ref:`without-K`)
+     .. versionadded:: 2.5.1
 
-:samp:`--no-pattern-matching`                                          Disable pattern matching completely
+     Require [do not require] all clauses in a definition to hold as
+     definitional equalities unless marked ``CATCHALL`` (see
+     :ref:`case-trees`).
 
-:samp:`--exact-split`                                                  Require all clauses in a definition to
-                                                                       hold as definitional equalities unless
-                                                                       marked ``CATCHALL``
-                                                                       (see :ref:`case-trees`)
+     Turns on the following warnings:
 
-:samp:`--no-exact-split`                                               Do not require all clauses in a definition
-                                                                       to hold as definitional equalities
-                                                                       (default)
+     * :option:`CoverageNoExactSplit`
+     * :option:`InlineNoExactSplit`
+     * :option:`ShouldBeEtaRecordPattern`
 
-:samp:`--no-eta-equality`                                              Default records to no-eta-equality
-                                                                       (see :ref:`eta-expansion`)
-==================================================  =================  ===========================================
+     Default: ``--no-exact-split``.
 
-Search depth
-~~~~~~~~~~~~
+.. option:: --hidden-argument-puns, --no-hidden-argument-puns
 
-==================================================  =================  ===========================================
-:samp:`--termination-depth={N}`                                        Allow termination checker to count
-                                                                       decrease/increase upto :samp:`{N}`
-                                                                       (default: 1;
-                                                                       see :ref:`termination-checking`)
+     .. versionadded:: 2.6.4
 
-:samp:`--instance-search-depth={N}`                                    Set instance search depth to
-                                                                       :samp:`{N}` (default: 500; see
-                                                                       :ref:`instance-arguments`)
-==================================================  =================  ===========================================
+     Enable [disable] :ref:`hidden argument puns
+     <hidden_argument_puns>`.
+
+     Default: ``--no-hidden-argument-puns``.
+
+.. option:: --no-eta-equality
+
+     .. versionadded:: 2.5.1
+
+     Default records to ``no-eta-equality`` (see :ref:`eta-expansion`).
+
+.. option:: --eta-equality
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-eta-equality`.
+
+.. option:: --cohesion
+
+     .. versionadded:: 2.6.3
+
+     Enable the cohesion modalities, in particular ``@♭`` (see
+     :ref:`flat`).
+
+.. option:: --no-cohesion
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--cohesion`.
+
+.. option:: --flat-split
+
+     .. versionadded:: 2.6.1
+
+     Enable pattern matching on ``@♭`` arguments (see
+     :ref:`pattern-matching-on-flat`).
+     Implies :option:`--cohesion`.
+
+.. option:: --no-flat-split
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--flat-split`.
+
+.. option:: --polarity, --no-polarity
+
+     .. versionadded:: 2.8.0
+
+     Enables the use of modal polarity annotations, and their interaction with
+     the positivity checker. See :ref:`polarity`.
+
+     Default: :option:`--no-polarity`.
+
+.. option:: --occurrence-analysis, --no-occurrence-analysis
+
+     .. versionadded:: 2.9.0
+
+     Turns on or off automated occurrence analysis for functions. See
+     :ref:`occurrence_analysis`.
+
+     Default: :option:`--occurrence-analysis`.
+
+.. option:: --no-pattern-matching
+
+     .. versionadded:: 2.4.0
+
+     Disable pattern matching completely.
+
+.. option:: --pattern-matching
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-pattern-matching`.
+
+.. option:: --with-K
+
+     .. versionadded:: 2.4.2
+
+     Overrides a global :option:`--without-K` in a file (see
+     :ref:`without-K`).
+
+.. option:: --without-K
+
+     .. versionadded:: 2.2.10
+
+     Disables reasoning principles incompatible with univalent type
+     theory, most importantly Streicher's K axiom (see
+     :ref:`without-K`).
+
+.. option:: --cubical=compatible, --cubical-compatible
+
+     .. versionadded:: 2.6.3
+
+     Generate internal support code necessary for use from Cubical Agda
+     (see :ref:`cubical-compatible`). Implies :option:`--without-K`.
+
+.. option:: --keep-pattern-variables
+
+     .. versionadded:: 2.6.1
+
+     Prevent interactive case splitting from replacing variables with
+     dot patterns (see :ref:`dot-patterns`).
+
+     Default since 2.7.0.
+
+.. option:: --no-keep-pattern-variables
+
+     .. versionadded:: 2.6.4
+
+     Opposite of :option:`--keep-pattern-variables`.
+
+.. option:: --infer-absurd-clauses, --no-infer-absurd-clauses
+
+     .. versionadded:: 2.6.4
+
+     ``--no-infer-absurd-clauses`` prevents interactive case splitting and coverage checking from automatically filtering out absurd clauses.
+     This means that these absurd clauses have to be written out in the Agda text.
+     Try this option if you experience type checking performance degradation with omitted absurd clauses.
+
+     Default: ``--infer-absurd-clauses``.
+
+.. option:: --large-indices, --no-large-indices
+
+     .. versionadded:: 2.6.4
+
+     Allow constructors to store values of types whose sort is larger
+     than that being defined, when these arguments are forced by the
+     constructor's type.
+
+     When :option:`--safe` is given, this flag can not be combined with
+     :option:`--without-K` or :option:`--forced-argument-recursion`,
+     since both of these combinations are known to be inconsistent.
+
+     When :option:`--no-forcing` is given, this option is redundant.
+
+     Default: ``--no-large-indices``.
+
+Recursion
+~~~~~~~~~
+
+.. option:: --forced-argument-recursion, --no-forced-argument-recursion
+
+     .. versionadded:: 2.6.4
+
+     Allow the use of forced constructor arguments as termination
+     metrics. This flag may be necessary for Agda to accept nontrivial
+     uses of induction-induction.
+
+     Default: ``--forced-argument-recursion``.
+
+.. option:: --guardedness, --no-guardedness
+
+     .. versionadded:: 2.6.0
+
+     Enable [disable] constructor-based guarded corecursion (see
+     :ref:`coinduction`).
+
+     The option ``--guardedness`` is inconsistent with sized types,
+     thus, it cannot be used with both :option:`--safe` and
+     :option:`--sized-types`.
+
+     Default: ``--no-guardedness`` (since 2.6.2).
+
+.. option:: --sized-types, --no-sized-types
+
+     .. versionadded:: 2.2.0
+
+     Enable [disable] sized types (see :ref:`sized-types`).
+
+     The option ``--sized-types`` is inconsistent with
+     constructor-based guarded corecursion,
+     thus, it cannot be used with both :option:`--safe`
+     and :option:`--guardedness`.
+
+     Default: ``--no-sized-types`` (since 2.6.2).
+
+.. option:: --termination-depth={N}
+
+     .. versionadded:: 2.2.8
+
+     Allow termination checker to count decrease/increase upto ``N``,
+     see :ref:`termination-checking`.
+
+     Defaults to 3 since 2.9.0.
+
+Sorts and universes
+~~~~~~~~~~~~~~~~~~~
+
+.. option:: --type-in-type
+
+     Ignore universe levels (this makes Agda inconsistent; see
+     :ref:`type-in-type <type-in-type>`).
+
+.. option:: --no-type-in-type
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--type-in-type`.
+
+.. option:: --omega-in-omega
+
+     .. versionadded:: 2.6.0
+
+     Enable typing rule ``Setω : Setω`` (this makes Agda inconsistent;
+     see :ref:`omega-in-omega <omega-in-omega>`).
+
+.. option:: --no-omega-in-omega
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--omega-in-omega`.
+
+.. option:: --level-universe, --no-level-universe
+
+     .. versionadded:: 2.6.4
+
+     Makes ``Level`` live in its own universe ``LevelUniv`` and
+     disallows having levels depend on terms that are not levels themselves.
+     When this option is turned off, ``LevelUniv`` still exists,
+     but reduces to ``Set`` (see :ref:`level-universe <level-universe>`).
+
+     Note: While compatible with the :option:`--cubical` option, this option is
+     currently not compatible with cubical builtin files.
+
+     Default: :option:`--no-level-universe`.
+
+.. option:: --universe-polymorphism, --no-universe-polymorphism
+
+     .. versionadded:: 2.3.0
+
+     Enable [disable] universe polymorphism (see
+     :ref:`universe-levels`).
+
+     Default: ``--universe-polymorphism``.
+
+.. option:: --cumulativity, --no-cumulativity
+
+     .. versionadded:: 2.6.1
+
+     Enable [disable] cumulative subtyping of universes, i.e.,
+     if ``A : Set i`` then also ``A : Set j`` for all ``j >= i``.
+
+     Default: ``--no-cumulativity``.
+
+Search depth and instances
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. option:: --instance-search-depth={N}
+
+     .. versionadded:: 2.5.2
+
+     Set instance search depth to ``N`` (default: 500; see
+     :ref:`instance-arguments`).
+
+.. option:: --inversion-max-depth={N}
+
+     .. versionadded:: 2.5.4
+
+     Set maximum depth for pattern match inversion to ``N`` (default:
+     50). Should only be needed in pathological cases.
+
+.. option:: --backtracking-instance-search, --no-backtracking-instance-search
+
+     .. versionadded:: 2.7.0
+
+     Consider [do not consider] recursive instance arguments during
+     pruning of instance candidates, see :ref:`backtracking-instances`
+
+     Default: ``--no-backtracking-instance-search``.
+
+     This option used to be called ``--overlapping-instances``.
+
+.. option:: --qualified-instances, --no-qualified-instances
+
+     .. versionadded:: 2.6.2
+
+     Consider [do not consider] instances that are (only) in scope
+     under a qualified name.
+
+     Default: ``--qualified-instances``.
+
+.. option:: --experimental-lazy-instances, --no-experimental-lazy-instances
+
+     .. versionadded:: 2.8.0
+
+     Opt into the experimental, faster implementation of instance
+     search. This is presently optional since it may potentially
+     introduce regressions in code which relies on the order of
+     constraint solving.
+
+     Default: ``--no-experimental-lazy-instances``.
+
+     The ``--experimental-lazy-instances`` behaviour will be made the
+     default and this flag will be removed in the future.
+
 
 Other features
 ~~~~~~~~~~~~~~
 
-==================================================  =================  ===========================================
-:samp:`--safe`                                                         Disable postulates, unsafe ``OPTION``
-                                                                       pragmas and ``primTrustMe``
-                                                                       (see :ref:`safe-agda`)
+.. option:: --double-check
 
-:samp:`--type-in-type`                                                 Ignore universe levels
-                                                                       (this makes Agda inconsistent; see
-                                                                       :ref:`universe-levels`)
+     Enable double-checking of all terms using the internal
+     typechecker.
+     Off by default.
 
-:samp:`--sized-types`                                                  Use sized types
-                                                                       (default, inconsistent with
-                                                                       "musical" coinduction; see
-                                                                       :ref:`sized-types`)
+.. option:: --no-double-check
 
-:samp:`--no-sized-types`                                               Disable sized types
-                                                                       (see :ref:`sized-types`)
+     .. versionadded:: 2.6.2
 
-:samp:`--universe-polymorphism`                                        Enable universe polymorphism (default;
-                                                                       see :ref:`universe-levels`)
+     Opposite of :option:`--double-check`.  On by default.
 
-:samp:`--no-universe-polymorphism`                                     Disable universe polymorphism
-                                                                       (see :ref:`universe-levels`)
+.. option:: --keep-covering-clauses
 
-:samp:`--no-irrelevant-projections`                                    Disable projection of irrelevant record
-                                                                       fields
-                                                                       (see :ref:`irrelevance`)
-==================================================  =================  ===========================================
+     .. versionadded:: 2.6.3
+
+     Save function clauses computed by the coverage checker to the interface file.
+     Required by some external backends.
+
+.. option:: --no-keep-covering-clauses
+
+     .. versionadded:: 2.6.4
+
+     Opposite of :option:`--keep-covering-clauses`, default.
+
+.. option:: --no-print-pattern-synonyms
+
+     .. versionadded:: 2.5.4
+
+     Always expand :ref:`pattern-synonyms` during printing. With this
+     option enabled you can use pattern synonyms freely, but Agda will
+     not use any pattern synonyms when printing goal types or error
+     messages, or when generating patterns for case splits.
+
+.. option:: --print-pattern-synonyms
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-print-pattern-synonyms`.
+
+.. option:: --no-syntactic-equality
+
+     .. versionadded:: 2.6.0
+
+     Disable the syntactic equality shortcut in the conversion
+     checker.
+
+.. option:: --syntactic-equality={N}
+
+     .. versionadded:: 2.6.3
+
+     Give the syntactic equality shortcut ``N`` units of fuel (``N``
+     must be a natural number).
+
+     If ``N`` is omitted, then the syntactic equality shortcut is
+     enabled without any restrictions. (This is the default.)
+
+     If ``N`` is given, then the syntactic equality shortcut is given
+     ``N`` units of fuel. The exact meaning of this is
+     implementation-dependent, but successful uses of the shortcut do
+     not affect the amount of fuel.
+
+     Note that this option is experimental and subject to change.
+
+.. option:: --safe
+
+     .. versionadded:: 2.3.0
+
+     Disable postulates, unsafe :ref:`OPTIONS<options-pragma>` pragmas
+     and ``primTrustMe``. Prevents to have both :option:`--sized-types` and
+     :option:`--guardedness` on.
+     Further reading: :ref:`safe-agda`.
+
+.. option:: --no-import-sorts
+
+     .. versionadded:: 2.6.2
+
+     Disable the implicit statement
+     ``open import Agda.Primitive using (Set; ...)``
+     at the start of each top-level Agda module.
+
+.. option:: --import-sorts
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-import-sorts`.
+
+     Brings ``Set`` into scope, and if :option:`--prop` is active,
+     also ``Prop``, and if :option:`--two-level` is active, even ``SSet``.
+
+.. option:: --no-load-primitives
+
+     .. versionadded:: 2.6.3
+
+     Do not load the primitive modules (``Agda.Primitive``,
+     ``Agda.Primitive.Cubical``) when type-checking this program. This is
+     useful if you want to declare Agda's very magical primitives in a
+     Literate Agda file of your choice.
+
+     If you are using this option, it is your responsibility to ensure
+     that all of the ``BUILTIN`` things defined in those modules are
+     loaded. Agda will not work otherwise.
+
+     Implies :option:`--no-import-sorts`.
+
+     Incompatible with :option:`--safe`.
+
+.. option:: --load-primitives
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--no-load-primitives`.
+
+.. option:: --save-metas, --no-save-metas
+
+     .. versionadded:: 2.6.3
+
+     Save [or do not save] meta-variables in ``.agdai`` files. Not saving means
+     that all meta-variable solutions are inlined into the interface. Currently,
+     even if :option:`--save-metas` is used, very few meta-variables are
+     actually saved, and this option is more like an anticipation of possible
+     future optimizations.
+
+     Default: :option:`--no-save-metas`.
+
+Erasure
+~~~~~~~
+
+.. option:: --erasure, --no-erasure
+
+     .. versionadded:: 2.6.4
+
+     Allow use of the annotations ``@0`` and ``@erased``; allow use of
+     names defined in Cubical Agda in Erased Cubical Agda; and mark
+     parameters as erased in the type signatures of constructors and
+     record fields (if :option:`--with-K` is not active this is not
+     done for indexed data types).
+
+     Default: :option:`--no-erasure`.
+
+.. option:: --erased-matches[={KINDS}], --no-erased-matches
+
+     .. versionadded:: 2.6.4
+     .. versionchanged:: 2.9.0
+
+     ``KINDS`` is a comma-separated list of zero or more of the
+     following options: ``none``, ``empty``, ``non-dependent``,
+     ``restricted`` and ``unrestricted``. These options have the
+     following meanings:
+
+     * ``none``: Do not enable any erased matches (this can be
+       overridden).
+
+     * ``empty``: Enable erased matches for empty types.
+
+     * ``non-dependent``: Enable erased matches for non-indexed,
+       single-constructor types.
+
+     * ``restricted``: Make it possible to import the module
+       ``Agda.Builtin.Erased.Box-cong``, which contains an
+       implementation of ``[]-cong``.
+
+     * ``unrestricted``: Enable unrestricted erased matches for
+       single-constructor types. If :option:`--safe` is active, then
+       this option is not allowed together with :option:`--without-K`.
+
+     These options are cumulative: multiple invocations of
+     ``--erased-matches`` with arguments are combined into one, and it
+     does not matter in what order the options are given. As an
+     example, ``--erased-matches=none,empty`` and
+     ``--erased-matches=empty --erased-matches=none`` mean the same
+     thing as ``--erased-matches=empty``.
+
+     If none of these options are given, then Agda behaves
+
+     * as if ``--erased-matches=none`` had been used if
+       :option:`--erasure` is not turned on (directly or indirectly),
+       otherwise
+
+     * as if ``--erased-matches=empty`` had been used if
+       :option:`--without-K` is active, and otherwise
+
+     * as if ``--erased-matches=empty,unrestricted`` had been used.
+
+     Note that these defaults can be overridden by, for instance,
+     ``--erased-matches=none``.
+
+     The option ``--erased-matches`` means almost the same thing as
+     ``--erased-matches=empty,non-dependent`` if :option:`--without-K`
+     is active, and otherwise it means almost the same thing as
+     ``--erased-matches=empty,unrestricted``. However, any use of
+     ``--erased-matches`` with explicit arguments takes precedence
+     over ``--erased-matches`` without arguments. For instance,
+     ``--erased-matches=none --erased-matches`` means the same thing
+     as ``--erased-matches=none``.
+
+     The option ``--no-erased-matches`` is a synonym for
+     ``--erased-matches=none``.
+
+     All variants of ``--erased-matches`` except for
+     ``--erased-matches=none`` enable :option:`--erasure`.
+
+.. option:: --erase-record-parameters
+
+     .. versionadded:: 2.6.3
+
+     Mark parameters as erased in record module telescopes.
+
+     Implies :option:`--erasure`.
+
+.. option:: --no-erase-record-parameters
+
+     .. versionadded:: 2.6.4
+
+     Default, opposite of :option:`--erase-record-parameters`.
+
+.. option:: --erased-funext, --no-erased-funext
+
+     .. versionadded:: 2.9.0
+
+     Enables use of `Agda.Builtin.Erased.Funext`. This module contains
+     an erased postulate of function extensionality. The idea is that
+     it should be safe to use this postulate (under :option:`--safe`
+     and in the absence of any Agda bugs):
+
+     * If :option:`--erased-matches` is not used with one of the
+       options ``empty``, ``non-dependent``, ``restricted`` or
+       ``unrestricted``, then canonicity should hold for non-erased
+       terms (if all opaque definitions are made transparent and the
+       context only contains erased assumptions).
+
+     * If :option:`--erased-matches` is used with the option
+       ``empty``, then canonicity should still hold if the context
+       plus the postulates are jointly consistent.
+
+     * If :option:`--erased-matches` is used with one of the options
+       ``non-dependent``, ``restricted`` or ``unrestricted``, then
+       reduction might get stuck, but compiled programs should still
+       run correctly.
+
+     Implies :option:`--erasure`. Default: ``--no-erased-funext``.
+
+.. option:: --erased-propext, --no-erased-propext
+
+     .. versionadded:: 2.9.0
+
+     Enables use of `Agda.Builtin.Erased.Propext`. This module
+     contains an erased postulate of propositional extensionality. The
+     idea is that it should be safe to use this postulate, see
+     :option:`--erased-funext`.
+
+     Implies :option:`--erasure`. Default: ``--no-erased-propext``.
+
+.. option:: --erased-quotients, --no-erased-quotients
+
+     .. versionadded:: 2.9.0
+
+     Enables use of `Agda.Builtin.Erased.Quotient`. This module gives
+     access to an implementation of set quotients with an eliminator
+     that computes for the point constructor. The higher
+     "constructors" are erased postulates. The idea is that it should
+     be safe to use these postulates, see :option:`--erased-funext`.
+
+     Implies :option:`--erased-funext`. Default:
+     ``--no-erased-quotients``.
+
+.. option:: --lossy-unification
+
+     .. versionadded:: 2.6.4
+
+     Enable lossy unification, see :ref:`lossy-unification`.
+
+.. option:: --quote-metas
+
+     .. versionadded:: 2.9.0
+
+     Allow typechecking to quote terms that contain metas, see :ref:`quote-metas`.
+
+.. option:: --no-quote-metas
+
+     .. versionadded:: 2.9.0
+
+     Block typechecking when attempting to quote terms that contain metas.
+
+     Opposite of :option:`--quote-metas`, default.
+
+.. _warnings:
+
+Warnings
+--------
+
+The :option:`-W` or :option:`--warning` option can be used to disable
+or enable different warnings. The flag ``-W error`` (or
+``--warning=error``) can be used to turn all warnings into errors,
+while ``-W noerror`` turns this off again.
+
+A group of warnings can be enabled by ``-W {GROUP}``, where ``GROUP``
+is one of the following:
+
+.. option:: all
+
+     All of the existing warnings.
+
+.. option:: warn
+
+     Default warning level.
+
+.. option:: ignore
+
+     Ignore all warnings.
+
+The command ``agda --help=warning`` provides information about which
+warnings are turned on by default.
+
+Benign warnings
+~~~~~~~~~~~~~~~
+
+Individual non-fatal warnings can be turned on and off by ``-W {NAME}`` and ``-W no{NAME}`` respectively.
+The list containing any warning ``NAME`` can be produced by ``agda --help=warning``:
+
+.. option:: AbsurdPatternRequiresAbsentRHS
+
+     .. versionadded:: 2.8.0
+
+     (Previously named ``AbsurdPatternRequiresNoRHS``.)
+
+     RHS given despite an absurd pattern in the LHS.
+
+.. option:: BuiltinDeclaresIdentifier
+
+     .. versionadded:: 2.7.0
+
+     A ``BUILTIN`` pragma that declares an identifier, but has been given an existing one.
+
+.. option:: AsPatternShadowsConstructorOrPatternSynonym
+
+     .. versionadded:: 2.6.2
+
+     ``@``-patterns that shadow constructors or pattern synonyms.
+
+.. option:: CantGeneralizeOverSorts
+
+     .. versionadded:: 2.6.0
+
+     Attempts to generalize over sort metas in ``variable`` declaration.
+
+.. option:: ClashesViaRenaming
+
+     .. versionadded:: 2.6.1
+
+     Clashes introduced by ``renaming``.
+
+.. option:: ConflictingPragmaOptions
+
+     .. versionadded:: 2.7.0
+
+     Conflicting pragma options. For instance, both ``--this`` and ``--no-that`` when
+     ``--this`` implies ``--that``.
+
+.. option:: ConfluenceCheckingIncompleteBecauseOfMeta
+
+     .. versionadded:: 2.7.0
+
+     Incomplete confluence checks because of unsolved metas.
+
+.. option:: ConfluenceForCubicalNotSupported
+
+     .. versionadded:: 2.7.0
+
+     Attempts to check confluence with :option:`--cubical`.
+
+.. option:: CoverageNoExactSplit
+
+     .. versionadded:: 2.5.3
+
+     Failed exact split checks.
+
+.. option:: DeprecationWarning
+
+     .. versionadded:: 2.5.3
+
+     Deprecated features.
+
+.. option:: DefinitionBeforeDeclaration
+
+     .. versionadded:: 2.9.0
+
+     Definitions that occur in ``mutual`` blocks before their declarations.
+
+.. option:: DivergentModalityInClause
+
+     .. versionadded:: 2.9.0
+
+     Modalities of clauses that diverge from the modality of the function.
+
+.. option:: DuplicateFields
+
+     .. versionadded:: 2.6.4
+
+     ``record`` expression with duplicate field names.
+
+.. option:: DuplicateRecordDirective
+
+     .. versionadded:: 2.7.0
+
+     Conflicting directives in a record declaration.
+
+.. option:: DuplicateRewriteRule
+
+     .. versionadded:: 2.7.0
+
+     Duplicate declaration of a name as :ref:`REWRITE<rewriting>` rule.
+
+.. option:: DuplicateUsing
+
+     .. versionadded:: 2.6.2
+
+     Repeated names in ``using`` directive.
+
+.. option:: EmptyAbstract
+
+     .. versionadded:: 2.5.4
+
+     Empty ``abstract`` blocks.
+
+.. option:: EmptyConstructor
+
+     .. versionadded:: 2.6.2
+
+     Empty ``data _ where`` blocks.
+
+.. option:: EmptyField
+
+     .. versionadded:: 2.6.1
+
+     Empty ``field`` blocks.
+
+.. option:: EmptyGeneralize
+
+     .. versionadded:: 2.6.0
+
+     Empty ``variable`` blocks.
+
+.. option:: EmptyInstance
+
+     .. versionadded:: 2.5.4
+
+     Empty ``instance`` blocks.
+
+.. option:: EmptyMacro
+
+     .. versionadded:: 2.5.4
+
+     Empty ``macro`` blocks.
+
+.. option:: EmptyMutual
+
+     .. versionadded:: 2.5.4
+
+     Empty ``mutual`` blocks.
+
+.. option:: EmptyPolarityPragma
+
+     .. versionadded:: 2.8.0
+
+     :ref:`POLARITY pragmas <polarity-pragma>` not giving any polarities.
+
+.. option:: EmptyPostulate
+
+     .. versionadded:: 2.5.4
+
+     Empty ``postulate`` blocks.
+
+.. option:: EmptyPrimitive
+
+     .. versionadded:: 2.6.0
+
+     Empty ``primitive`` blocks.
+
+.. option:: EmptyPrivate
+
+     .. versionadded:: 2.5.4
+
+     Empty ``private`` blocks.
+
+.. option:: EmptyRewritePragma
+
+     .. versionadded:: 2.5.2
+
+     Empty ``REWRITE`` pragmas.
+
+.. option:: EmptyWhere
+
+     .. versionadded:: 2.6.2
+
+     Empty ``where`` blocks.
+
+.. option:: FaceConstraintCannotBeHidden
+
+     .. versionadded:: 2.6.4
+
+     Face constraint patterns that are given as implicit arguments.
+
+.. option:: FaceConstraintCannotBeNamed
+
+     .. versionadded:: 2.6.4
+
+     Face constraint patterns that are given as named arguments.
+
+.. option:: FixingCohesion
+
+     .. versionadded:: 2.8.0
+
+     Invalid cohesion annotations, automatically corrected.
+
+.. option:: FixingPolarity
+
+     .. versionadded:: 2.8.0
+
+     Invalid polarity annotations, automatically corrected.
+
+.. option:: FixingRelevance
+
+     .. versionadded:: 2.8.0
+
+     Invalid relevance annotations, automatically corrected.
+
+.. option:: FixityDeclarationForNonOperator
+
+     .. versionadded:: 2.9.0
+
+     Fixity annotations on identifiers that are not proper operators.
+
+.. option:: FixityInRenamingModule
+
+     .. versionadded:: 2.6.1
+
+     Fixity annotations in ``renaming`` directives for a ``module``.
+
+.. option:: HiddenGeneralize
+
+     .. versionadded:: 2.6.3
+
+     Hidden identifiers in ``variable`` blocks.
+
+.. option:: IllegalDeclarationInDataDefinition
+
+     .. versionadded:: 2.6.4
+
+     Declarations inside of a ``data`` definition that are not constructor type signatures.
+
+.. option:: IllformedAsClause
+
+     .. versionadded:: 2.6.0
+
+     Illformed ``as``-clauses in ``import`` statements.
+
+.. option:: InlineNoExactSplit
+
+     .. versionadded:: 2.6.4
+
+     Failed exact splits after inlining a constructor, see :ref:`inline-pragma`.
+
+.. option:: InstanceNoOutputTypeName
+
+     .. versionadded:: 2.6.0
+
+     Instance arguments whose type does not end in a named or variable type;
+     such are never considered by instance search.
+
+.. option:: InstanceArgWithExplicitArg
+
+     .. versionadded:: 2.6.0
+
+     Instance arguments with explicit arguments;
+     such are never considered by instance search.
+
+.. option:: InstanceWithExplicitArg
+
+     .. versionadded:: 2.6.0
+
+     Instance declarations with explicit arguments;
+     such are never considered by instance search.
+
+.. option:: InteractionMetaBoundaries
+
+     .. versionadded:: 2.6.4
+
+     Interaction meta variables that have unsolved boundary constraints.
+
+.. option:: InvalidCatchallPragma
+
+     .. versionadded:: 2.5.4
+
+     :ref:`CATCHALL<catchall-pragma>` pragmas before a non-function clause.
+
+.. option:: InvalidCharacterLiteral
+
+     .. versionadded:: 2.6.4
+
+     Illegal character literals such as surrogate code points.
+
+.. option:: InvalidConstructorBlock
+
+     .. versionadded:: 2.6.2
+
+     ``constructor`` blocks outside of ``interleaved mutual`` blocks.
+
+.. option:: InvalidCoverageCheckPragma
+
+     .. versionadded:: 2.6.1
+
+     :ref:`NON_COVERING <non_covering-pragma>` pragmas before non-function or ``mutual`` blocks.
+
+.. option:: InvalidDataOrRecDefParameter
+
+     .. versionadded:: 2.9.0
+
+     A ``data/record D parameters where`` definition where the parameters do not match up
+     with the previously given signature or contain more than just names with hiding information.
+
+.. option:: InvalidNoPositivityCheckPragma
+
+     .. versionadded:: 2.5.4
+
+     :ref:`NO_POSITIVITY_CHECK <no_positivity_check-pragma>` pragmas before something
+     that is neither a ``data`` nor ``record`` declaration nor a ``mutual`` block.
+
+.. option:: InvalidNoUniverseCheckPragma
+
+     .. versionadded:: 2.6.0
+
+     :ref:`NO_UNIVERSE_CHECK <no_universe_check-pragma>` pragmas before declarations other than ``data`` or ``record`` declarations.
+
+.. option:: InvalidEtaEqualityPragma
+
+     .. versionadded:: 2.9.0
+
+     :ref:`ETA_EQUALITY <eta-pragma>` pragmas before declarations other than ``record`` declarations.
+
+.. option:: InvalidTacticAttribute
+
+     .. versionadded:: 2.9.0
+
+     :ref:`@(tactic ...) <tactic_arguments>` attributes where they are not supported.
+
+.. option:: InvalidTerminationCheckPragma
+
+     .. versionadded:: 2.5.4
+
+     :ref:`Termination checking pragmas <terminating-pragma>` before non-function or ``mutual`` blocks.
+
+.. option:: InversionDepthReached
+
+     .. versionadded:: 2.5.4
+
+     Inversions of pattern-matching failed due to exhausted inversion depth.
+
+.. option:: LibUnknownField
+
+     .. versionadded:: 2.6.0
+
+     Unknown fields in library files.
+
+.. option:: LocalRewritingConfluenceCheck
+
+     .. versionadded:: 2.9.0
+
+     Confluence checking (:option:`--confluence-check` or :option:`--local-confluence-check`) is not yet implemented for local rewrite rules (:option:`--local-rewriting`).
+
+.. option:: MisplacedAttributes
+
+     .. versionadded:: 2.8.0
+
+     Attributes where they cannot appear.
+
+.. option:: MisplacedRewrite
+
+     .. versionadded:: 2.9.0
+
+     Invalid local rewrite annotations, automatically ignored.
+
+.. option:: MissingTypeSignatureForOpaque
+
+     .. versionadded:: 2.7.0
+
+     ``abstract`` or ``opaque`` definitions that lack a type signature.
+
+.. option:: ModuleDoesntExport
+
+     .. versionadded:: 2.6.0
+
+     Names mentioned in an import statement which are not exported by
+     the module in question.
+
+.. option:: MultipleAttributes
+
+     .. versionadded:: 2.6.2
+
+     Multiple attributes given where only erasure is accepted.
+
+.. option:: NoMain
+
+     .. versionadded:: 2.7.0
+
+     Invoking the compiler on a module without a ``main`` function.
+     See also :option:`--no-main`.
+
+.. option:: NotAffectedByOpaque
+
+     .. versionadded:: 2.6.4
+
+     Declarations that should not be inside ``opaque`` blocks.
+
+.. option:: NotARewriteRule
+
+     .. versionadded:: 2.8.0
+
+     ``REWRITE`` pragmas referring to identifiers that are neither definitions nor constructors.
+
+.. option:: NotInScope
+
+     .. versionadded:: 2.6.1
+
+     Out of scope names.
+
+.. option:: OldBuiltin
+
+     .. versionadded:: 2.5.2
+
+     Deprecated :ref:`BUILTIN<built-ins>` pragmas.
+
+.. option:: OpenImportAbstract
+
+     .. versionadded:: 2.8.0
+
+     ``open`` or ``import`` statements in ``abstract`` blocks.
+
+.. option:: OpenImportPrivate
+
+     .. versionadded:: 2.8.0
+
+     ``open`` or ``import`` statements in ``private`` blocks.
+
+.. option:: OptionRenamed
+
+     .. versionadded:: 2.6.3
+
+     Renamed options.
+
+.. option:: PatternShadowsConstructor
+
+     .. versionadded:: 2.6.4
+
+     Pattern variables that shadow constructors.
+
+.. option:: PlentyInHardCompileTimeMode
+
+     .. versionadded:: 2.6.4
+
+     Use of attributes ``@ω`` or ``@plenty`` in hard compile-time mode.
+
+.. option:: PolarityPragmasButNotPostulates
+
+     .. versionadded:: 2.5.4
+
+     Polarity pragmas for non-postulates.
+
+.. option:: PragmaCompileErased
+
+     .. versionadded:: 2.6.1
+
+     :ref:`COMPILE<foreign-function-interface>` pragma targeting an erased symbol.
+
+.. option:: PragmaCompileList
+
+     .. versionadded:: 2.7.0
+
+     :ref:`COMPILE<foreign-function-interface>` pragma for GHC backend targeting lists.
+
+.. option:: PragmaCompileMaybe
+
+     .. versionadded:: 2.7.0
+
+     :ref:`COMPILE<foreign-function-interface>` pragma for GHC backend targeting ``MAYBE``.
+
+.. option:: PragmaCompileUnparsable
+
+     .. versionadded:: 2.8.0
+
+     Unparsable :ref:`COMPILE<foreign-function-interface>` GHC pragmas.
+
+.. option:: PragmaCompileWrong
+
+     .. versionadded:: 2.8.0
+
+     Ill-formed :ref:`COMPILE<foreign-function-interface>` GHC pragmas.
+
+.. option:: PragmaCompileWrongName
+
+     .. versionadded:: 2.8.0
+
+     :ref:`COMPILE<foreign-function-interface>` pragmas referring to identifiers that are neither definitions nor constructors.
+
+.. option:: PragmaExpectsDefinedSymbol
+
+     .. versionadded:: 2.8.0
+
+     Pragmas referring to identifiers that are not defined symbols.
+
+.. option:: PragmaExpectsUnambiguousConstructorOrFunction
+
+     .. versionadded:: 2.8.0
+
+     Pragmas referring to identifiers that are not unambiguous constructors or functions.
+
+.. option:: PragmaExpectsUnambiguousProjectionOrFunction
+
+     .. versionadded:: 2.8.0
+
+     Pragmas referring to identifiers that are not unambiguous projections or functions.
+
+.. option:: PragmaNoTerminationCheck
+
+     .. versionadded:: 2.6.0
+
+     :ref:`NO_TERMINATION_CHECK<terminating-pragma>` pragmas; such are deprecated.
+
+.. option:: InvalidDisplayForm
+
+     .. versionadded:: 2.8.0
+
+     An illegal :ref:`DISPLAY <display-pragma>` form; it will be ignored.
+
+.. option:: RewriteLHSNotDefinitionOrConstructor
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule head symbol is not a defined symbol or constructor.
+
+.. option:: RewriteVariablesNotBoundByLHS
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule does not bind all of its variables.
+
+.. option:: RewriteVariablesBoundMoreThanOnce
+
+     .. versionadded:: 2.7.0
+
+     Constructor-headed rewrite rule has non-linear parameters.
+
+.. option:: RewriteVariablesBoundInSingleton
+
+     .. versionadded:: 2.9.0
+
+     Rewrite rule binds some variables in possibly definitionally singular contexts.
+
+.. option:: RewriteLHSReduces
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule LHS is not in weak-head normal form.
+
+.. option:: RewriteHeadSymbolIsProjectionLikeFunction
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule head symbol is a projection-like function.
+
+.. option:: RewriteHeadSymbolIsTypeConstructor
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule head symbol is a type constructor.
+
+.. option:: RewriteHeadSymbolContainsMetas
+
+     .. versionadded:: 2.7.0
+
+     Definition of rewrite rule head symbol contains unsolved metas.
+
+.. option:: RewriteConstructorParametersNotGeneral
+
+     .. versionadded:: 2.7.0
+
+     Constructor-headed rewrite rule parameters are not fully general.
+
+.. option:: RewriteContainsUnsolvedMetaVariables
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule contains unsolved metas.
+
+.. option:: RewriteBlockedOnProblems
+
+     .. versionadded:: 2.7.0
+
+     Checking rewrite rule blocked by unsolved constraint.
+
+.. option:: RewriteRequiresDefinitions
+
+     .. versionadded:: 2.7.0
+
+     Checking rewrite rule blocked by missing definition.
+
+.. option:: RewriteDoesNotTargetRewriteRelation
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule does not target the rewrite relation.
+
+.. option:: RewriteBeforeFunctionDefinition
+
+     .. versionadded:: 2.7.0
+
+     Rewrite rule is not yet defined.
+
+.. option:: RewriteBeforeMutualFunctionDefinition
+
+     .. versionadded:: 2.7.0
+
+     Mutually declaration with the rewrite rule is not yet defined.
+
+.. option:: RewritesNothing
+
+     .. versionadded:: 2.8.0
+
+     ``rewrite`` clauses that do not fire.
+
+.. option:: ShadowingInTelescope
+
+     .. versionadded:: 2.6.1
+
+     Repeated variable name in telescope.
+
+.. option:: ShouldBeEtaRecordPattern
+
+     .. versionadded:: 2.9.0
+
+     Irrefutable record pattern without eta.
+
+     Off by default, enabled with :option:`--exact-split`.
+
+.. option:: TooManyArgumentsToSort
+
+     .. versionadded:: 2.8.0
+
+     E.g. ``Set`` used with more than one argument.
+
+.. option:: TooManyFields
+
+     .. versionadded:: 2.6.4
+
+     Record expression with invalid field names.
+
+.. option:: TooManyPolarities
+
+     .. versionadded:: 2.8.0
+
+     :ref:`POLARITY pragma <polarity-pragma>` with too many polarities given.
+
+.. option:: UnfoldingWrongName
+
+     .. versionadded:: 2.8.0
+
+     Names in an ``unfolding`` clause that are not unambiguous definitions.
+
+.. option:: UnfoldTransparentName
+
+     .. versionadded:: 2.6.4
+
+     Non-``opaque`` names mentioned in an ``unfolding`` clause.
+
+.. option:: UnguardedEtaRecord
+
+     .. versionadded:: 2.9.0
+
+     A record with ``eta-equality`` that Agda inferred as unguarded,
+     meaning it has recursive occurences that are not protected
+     by a type former that does not have eta equality
+     (such as a ``data`` or a ``no-eta-equality``
+     ``record`` type).
+
+.. option:: UnknownAttribute
+
+     .. versionadded:: 2.8.0
+
+     Unknown attributes.
+
+.. option:: UnknownFixityInMixfixDecl
+
+     .. versionadded:: 2.5.4
+
+     Mixfix names without an associated fixity declaration.
+
+.. option:: UnknownJSPrimitive
+
+     .. versionadded:: 2.9.0
+
+     A primitive compiled to ``Undefined`` by the JS backend because it
+     is not in the list of known primitives.
+
+.. option:: UnknownPolarity
+
+     .. versionadded:: 2.8.0
+
+     Unknown polarities.
+
+.. option:: UnreachableClauses
+
+     .. versionadded:: 2.5.3
+
+     Unreachable function clauses.
+
+.. option:: UnsupportedAttribute
+
+     .. versionadded:: 2.6.2
+
+     Unsupported attributes.
+
+.. option:: UnsupportedIndexedMatch
+
+     .. versionadded:: 2.6.3
+
+     Failures to compute full equivalence when splitting on indexed family.
+
+.. option:: UnusedImports
+
+     .. versionadded:: 2.9.0
+
+     Warn about openings of modules that do not bring identifiers or modules into scope that are subsequently used.
+     A module is used if it is referred to, e.g. as qualifier ``M`` in a qualified name ``M.x``,
+     or in ``open M``, or in a module application ``module N = M``.
+     If the ``open`` comes with an explicit ``using`` or ``renaming`` directive,
+     warn about individual unused identifiers and modules (typically those mentioned in the directive).
+     The modules of data and record types are not reported individually
+     unless they are mentioned explicitly in the directive.
+     There is no warning about ``public`` openings.
+     In the presence of option:`--no-qualified-instances`,
+     there are also no warnings about unused instances brought into scope.
+
+     This warning is off by default.
+
+.. option:: UnusedImports=all
+
+     .. versionadded:: 2.9.0
+
+     Same as :option:`UnusedImports`, but warn about each unused identifier also when no ``using`` or ``renaming`` directive is given.
+
+     Option ``-WnoUnusedImports`` disables both :option:`UnusedImports` and :option:`UnusedImports=all`.
+
+.. option:: UnusedVariablesInDisplayForm
+
+     .. versionadded:: 2.8.0
+
+     :ref:`DISPLAY <display-pragma>` forms that bind variables they do not use.
+
+.. option:: UselessAbstract
+
+     .. versionadded:: 2.5.4
+
+     ``abstract`` blocks where they have no effect.
+
+.. option:: UselessHiding
+
+     .. versionadded:: 2.6.2
+
+     Names in ``hiding`` directive that are anyway not imported.
+
+.. option:: UselessInline
+
+     .. versionadded:: 2.5.3
+
+     :ref:`INLINE<inline-pragma>` pragmas where they have no effect.
+
+.. option:: UselessImport
+
+     .. versionadded:: 2.9.0
+
+     ``import`` statements that do not bring anything into scope.
+
+.. option:: UselessInstance
+
+     .. versionadded:: 2.5.4
+
+     ``instance`` blocks where they have no effect.
+
+.. option:: UselessMacro
+
+     .. versionadded:: 2.7.0
+
+     ``macro`` blocks where they have no effect.
+
+.. option:: UselessOpaque
+
+     .. versionadded:: 2.6.4
+
+     ``opaque`` blocks that have no effect.
+
+.. option:: UselessPatternDeclarationForRecord
+
+     .. versionadded:: 2.6.2
+
+     ``pattern`` directives where they have no effect.
+
+.. option:: UselessPragma
+
+     .. versionadded:: 2.6.4
+
+     Pragmas that get ignored.
+
+.. option:: UselessPrivate
+
+     .. versionadded:: 2.5.4
+
+     ``private`` blocks where they have no effect.
+
+.. option:: UselessPublic
+
+     .. versionadded:: 2.5.3
+
+     ``public`` directives where they have no effect.
+
+.. option:: UselessTactic
+
+     .. versionadded:: 2.8.0
+
+     ``@tactic`` attributes in non-hidden and instance arguments.
+
+.. option:: UserWarning
+
+     .. versionadded:: 2.5.4
+
+     User-defined warnings added using one of the ``WARNING_ON_*`` pragmas.
+
+.. option:: WarningProblem
+
+     .. versionadded:: 2.7.0
+
+     Problem encountered with option :option:`-W`,
+     like an unknown warning or the attempt to switch off a non-benign warning.
+
+.. option:: WithClauseProjectionFixityMismatch
+
+     .. versionadded:: 2.8.0
+
+     Projection fixity different in with-clause compared to its parent clause.
+
+.. option:: WithoutKFlagPrimEraseEquality
+
+     .. versionadded:: 2.6.0
+
+     ``primEraseEquality`` used with the without-K flags.
+
+.. option:: WrongInstanceDeclaration
+
+     .. versionadded:: 2.6.0
+
+     Terms marked as eligible for instance search whose type does not end with a name.
+
+.. option:: CustomBackendWarning
+
+     .. versionadded:: 2.7.0
+
+     Warnings from custom backends.
+
+Error warnings
+~~~~~~~~~~~~~~
+
+Some warnings are fatal; those are errors Agda first ignores but eventually raises.
+Such *error warnings* are always on, they cannot be toggled by :option:`-W`.
+
+.. option:: AbstractInLetBindings
+
+     .. versionadded:: 2.8.0
+
+     Let bindings can not be made abstract.
+
+.. option:: CoinductiveEtaRecord
+
+     .. versionadded:: 2.7.0
+
+     Declaring a ``record`` type as both ``coinductive`` and having ``eta-equality``.
+
+.. option:: CoInfectiveImport
+
+     .. versionadded:: 2.6.0
+
+     Importing a file not using e.g. :option:`--safe` from one which does.
+
+.. option:: ConstructorDoesNotFitInData
+
+     .. versionadded:: 2.7.0
+
+     Constructor with arguments in a universe higher than the one of its data type.
+
+.. option:: CoverageIssue
+
+     .. versionadded:: 2.5.3
+
+     Failed coverage checks.
+
+.. option:: HiddenNotInArgumentPosition
+
+     .. versionadded:: 2.8.0
+
+     Hidden arguments ``{ x }`` can only appear as arguments to
+     functions, not as expressions by themselves.
+
+.. option:: InfectiveImport
+
+     .. versionadded:: 2.6.0
+
+     Importing a file using e.g. :option:`--cubical` into one which does not.
+
+.. option:: InferredLocalRewrite
+
+     .. versionadded:: 2.9.0
+
+     Tried to solve a meta with an '@rewrite' function.
+
+.. option:: InstanceNotInArgumentPosition
+
+     .. versionadded:: 2.8.0
+
+     Instance arguments ``⦃ x ⦄`` can only appear as arguments to
+     functions, not as expressions by themselves.
+
+.. option:: LocalRewriteOutsideTelescope
+
+     .. versionadded:: 2.9.0
+
+     '@rewrite' arguments are (currently) only allowed in module telescopes.
+
+.. option:: MacroInLetBindings
+
+     .. versionadded:: 2.8.0
+
+     Macros can not be let-bound.
+
+.. option:: MismatchedBrackets
+
+     .. versionadded:: 2.9.0
+
+     An idiom bracket opened with unicode (resp. ASCII) syntax must also
+     be closed with unicode (resp. ASCII) syntax.
+
+.. option:: MissingDataDeclaration
+
+     .. versionadded:: 2.8.0
+
+     Constructor definitions not associated to a data declaration.
+
+.. option:: MissingDefinitions
+
+     .. versionadded:: 2.6.0
+
+     Names declared without an accompanying definition.
+
+.. option:: NotAllowedInMutual
+
+     .. versionadded:: 2.6.0
+
+     Declarations that are not allowed in a mutual block.
+
+.. option:: NotStrictlyPositive
+
+     .. versionadded:: 2.5.2
+
+     Failed strict positivity checks.
+
+.. option:: OverlappingTokensWarning
+
+     .. versionadded:: 2.5.4
+
+     Multi-line comments spanning one or more literate text blocks.
+
+.. option:: PragmaCompiled
+
+     .. versionadded:: 2.6.0
+
+     :ref:`COMPILE<foreign-function-interface>` pragmas not allowed in safe mode.
+
+.. option:: RecursiveRecordNeedsInductivity
+
+     .. versionadded:: 2.7.0
+
+     Recursive records that are neither declared ``inductive`` nor ``coinductive``.
+
+.. option:: RewriteAmbiguousRules
+
+     .. versionadded:: 2.6.2
+
+     Failed global confluence checks because of overlapping rules.
+
+.. option:: RewriteMaybeNonConfluent
+
+     .. versionadded:: 2.6.1
+
+     Failed confluence checks while computing overlap.
+
+.. option:: RewriteMissingRule
+
+     .. versionadded:: 2.6.2
+
+     Failed global confluence checks because of missing rules.
+
+.. option:: RewriteNonConfluent
+
+     .. versionadded:: 2.6.1
+
+     Failed confluence checks while joining critical pairs.
+
+.. option:: SafeFlagInjective
+
+     .. versionadded:: 2.6.1
+
+     :ref:`INJECTIVE <injective-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagNoCoverageCheck
+
+     .. versionadded:: 2.6.1
+
+     :ref:`NON_COVERING <non_covering-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagNonTerminating
+
+     .. versionadded:: 2.5.3
+
+     :ref:`NON_TERMINATING <non_terminating-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagNoPositivityCheck
+
+     .. versionadded:: 2.5.3
+
+     :ref:`NO_POSITIVITY_CHECK <no_positivity_check-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagNoUniverseCheck
+
+     .. versionadded:: 2.6.0
+
+     :ref:`NO_UNIVERSE_CHECK <no_universe_check-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagPolarity
+
+     .. versionadded:: 2.5.3
+
+     :ref:`POLARITY <polarity-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagPostulate
+
+     .. versionadded:: 2.5.3
+
+     ``postulate`` blocks with the :option:`--safe` flag.
+
+.. option:: SafeFlagPragma
+
+     .. versionadded:: 2.5.3
+
+     Unsafe :ref:`OPTIONS <options-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagTerminating
+
+     .. versionadded:: 2.5.3
+
+     :ref:`TERMINATING <terminating-pragma>` pragmas with the :option:`--safe` flag.
+
+.. option:: SafeFlagWithoutKFlagPrimEraseEquality
+
+     .. versionadded:: 2.6.0
+
+     ``primEraseEquality`` used with the :option:`--safe` and :option:`--without-K` flags.
+
+.. option:: TerminationIssue
+
+     .. versionadded:: 2.5.2
+
+     Failed termination checks.
+
+.. option:: TopLevelPolarity
+
+     .. versionadded:: 2.8.0
+
+     Declaring definitions with an explicit polarity annotation.
+
+.. option:: UnknownNamesInFixityDecl
+
+     .. versionadded:: 2.5.4
+
+     Names not declared in the same scope as their syntax or fixity
+     declaration.
+
+.. option:: UnknownNamesInPolarityPragmas
+
+     .. versionadded:: 2.5.4
+
+     Names not declared in the same scope as their polarity pragmas.
+
+.. option:: UnsolvedConstraints
+
+     .. versionadded:: 2.5.2
+
+     Unsolved constraints.
+
+.. option:: UnsolvedInteractionMetas
+
+     .. versionadded:: 2.5.2
+
+     Unsolved interaction meta variables.
+
+.. option:: UnsolvedMetaVariables
+
+     .. versionadded:: 2.5.2
+
+     Unsolved meta variables.
 
 
-.. _Vim: http://www.vim.org/
+Command-line examples
+---------------------
+
+Run Agda with all warnings enabled, except for warnings about empty ``abstract`` blocks:
+
+.. code-block:: console
+
+   agda -W all --warning=noEmptyAbstract file.agda
+
+Run Agda on a file which uses the standard library.
+Note that you must have already created a ``libraries`` file
+as described in :ref:`package-system`.
+
+.. code-block:: console
+
+   agda -l standard-library -i. file.agda
+
+(Or if you have added ``standard-library`` to your ``defaults`` file, simply ``agda file.agda``.)
+
+
+.. _consistency-checking-options:
+
+Checking options for consistency
+--------------------------------
+
+Agda checks that options used in imported modules are consistent with
+each other.
+
+An *infective* option is an option that if used in one module, must be
+used in all modules that depend on this module. The following options
+are infective:
+
+* :option:`--cohesion`
+* :option:`--erased-funext`
+* :option:`--erased-matches`
+* :option:`--erased-propext`
+* :option:`--erased-quotients`
+* :option:`--erasure`
+* :option:`--flat-split`
+* :option:`--guarded`
+* :option:`--irrelevance`
+* :option:`--polarity`
+* :option:`--prop`
+* :option:`--rewriting`
+* :option:`--local-rewriting`
+* :option:`--two-level`
+
+Furthermore, the Cubical options are *jointly infective*
+in the following sense: if one of them is used in one module,
+modules depending on it should use a Cubical option
+at least as strong as the imported module.
+The Cubical options are listed below in increasing strength:
+
+- :ref:`Cubical without Glue<cubical-without-glue>` :option:`--cubical=no-glue`
+- :ref:`Cubical with Erased Glue<erased-cubical>` :option:`--cubical=erased` *
+- (Full) :ref:`Cubical` :option:`--cubical[=full]` *
+
+\* : Exceptionally,
+modules using Full Cubical :option:`--cubical[=full]` can be imported
+from modules using Erased Cubical :option:`--cubical=erased`
+if :option:`--erasure` is enabled and imports are only used in erased positions.
+See :ref:`here<variants>` for a summary.
+
+A *coinfective* option is an option that if used in one module, must
+be used in all modules that this module depends on. The following
+options are coinfective:
+
+* :option:`--level-universe`
+* :option:`--no-guardedness`
+* :option:`--no-sized-types`
+* :option:`--no-universe-polymorphism`
+* :option:`--safe`
+* :option:`--without-K`
+
+Furthermore the option :option:`--cubical=compatible` is mostly
+coinfective. If a module uses :option:`--cubical=compatible` then all
+modules that this module imports (directly) must also use
+:option:`--cubical=compatible`, with the following exception: if a
+module uses both :option:`--cubical=compatible` and
+:option:`--with-K`, then it is not required to use
+:option:`--cubical=compatible` in (directly) imported modules that use
+:option:`--with-K`. (Note that one cannot use
+:option:`--cubical=compatible` and :option:`--with-K` at the same time
+if :option:`--safe` is used.)
+
+Agda records the options used when generating an interface file. If
+any of the following options differ when trying to load the interface
+again, the source file is re-typechecked instead:
+
+* :option:`--allow-exec`
+* :option:`--allow-incomplete-matches`
+* :option:`--allow-unsolved-metas`
+* :option:`--backtracking-instance-search`
+* :option:`--call-by-name`
+* :option:`--cohesion`
+* :option:`--confluence-check`
+* :option:`--copatterns`
+* :option:`--cubical`
+* :option:`--cubical=compatible`
+* :option:`--cubical=erased`
+* :option:`--cumulativity`
+* :option:`--double-check`
+* :option:`--erase-record-parameters`
+* :option:`--erased-funext`
+* :option:`--erased-matches`
+* :option:`--erased-propext`
+* :option:`--erased-quotients`
+* :option:`--erasure`
+* :option:`--exact-split`
+* :option:`--experimental-irrelevance`
+* :option:`--flat-split`
+* :option:`--guarded`
+* :option:`--hidden-argument-puns`
+* :option:`--infer-absurd-clauses`
+* :option:`--injective-type-constructors`
+* :option:`--instance-search-depth`
+* :option:`--inversion-max-depth`
+* :option:`--irrelevance`
+* :option:`--irrelevant-projections`
+* :option:`--keep-covering-clauses`
+* :option:`--local-confluence-check`
+* :option:`--lossy-unification`
+* :option:`--no-auto-inline`
+* :option:`--no-eta-equality`
+* :option:`--no-fast-reduce`
+* :option:`--no-forcing`
+* :option:`--no-guardedness`
+* :option:`--no-import-sorts`
+* :option:`--no-load-primitives`
+* :option:`--no-occurrence-analysis`
+* :option:`--no-pattern-matching`
+* :option:`--no-positivity-check`
+* :option:`--no-projection-like`
+* :option:`--no-sized-types`
+* :option:`--no-termination-check`
+* :option:`--no-unicode`
+* :option:`--no-universe-polymorphism`
+* :option:`--omega-in-omega`
+* :option:`--polarity`
+* :option:`--prop`
+* :option:`--qualified-instances`
+* :option:`--quote-metas`
+* :option:`--rewriting`
+* :option:`--local-rewriting`
+* :option:`--safe`
+* :option:`--save-metas`
+* :option:`--syntactic-equality`
+* :option:`--termination-depth`
+* :option:`--two-level`
+* :option:`--type-in-type`
+* :option:`--warning`
+* :option:`--without-K`
+
+.. _Vim: https://www.vim.org/
 .. _Dot: http://www.graphviz.org/content/dot-language
+
+
+.. _command-line-options-refs:
+
+References
+----------
+
+[1] Jesper Cockx and Dominique Devriese. `"Proof-relevant unification: Dependent pattern matching with only the axioms of your type theory." <https://doi.org/10.1017/s095679681800014x>`_ In Journal of Functional Programming 28, 2018.

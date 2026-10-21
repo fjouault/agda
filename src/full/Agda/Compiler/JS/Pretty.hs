@@ -1,24 +1,191 @@
 module Agda.Compiler.JS.Pretty where
 
-import Prelude hiding ( null )
+import GHC.Generics (Generic)
+
+import Data.Char ( isAsciiLower, isAsciiUpper, isDigit )
 import Data.List ( intercalate )
-import Data.Set ( Set, toList, singleton, insert, member )
-import Data.Map ( Map, toAscList, empty, null )
-import Text.Regex.TDFA (makeRegex, matchTest, Regex)
+import Data.String ( IsString (fromString) )
+import Data.Set ( Set, toList, insert, member )
+import qualified Data.Set as Set
+import Data.Map ( Map, toAscList )
+import qualified Data.Text as T
 
 import Agda.Syntax.Common ( Nat )
+
+import Agda.Utils.Function ( applyWhen )
 import Agda.Utils.Hash
+import Agda.Utils.List ( indexWithDefault )
+import Agda.Utils.List1 ( List1, pattern (:|), (<|) )
+import qualified Agda.Utils.List1 as List1
+
+import Agda.Utils.Impossible
 
 import Agda.Compiler.JS.Syntax hiding (exports)
 
 -- Pretty-print a lambda-calculus expression as ECMAScript.
 
--- Since ECMAScript is C-like rather than Haskell-like, it's easier to
--- do the pretty-printing directly than use the Pretty library, which
--- assumes Haskell-like indentation.
+--- The indentation combinators of the pretty library does not fit C-like languages
+--- like ECMAScript.
+--- A simple pretty printer is implemented with a better `indent` and punctuation compaction.
+---
+--- More explanation:
+---
+--- I have struggled with different pretty printers, and at the end it was much easier
+--- to implement and use this ~100 SLOC code pretty printer library.
+--- It produces really better quality indentation than I could achieve with the
+--  standard pretty printers.
+--- This library code is only used in this module, and it is specialized to pretty
+--- print JavaScript code for the Agda backend, so I think its best place is in this module.
+data JSModuleStyle = JSES6 | JSCJS | JSAMD
+  deriving Generic
 
-br :: Int -> String
-br i = "\n" ++ take (2*i) (repeat ' ')
+data Doc
+    = Doc String
+    | Indent Int Doc
+    | Group Doc
+    | Beside Doc Doc
+    | Above Doc Doc
+    | Enclose Doc Doc Doc
+    | Space
+    | Empty
+
+minifiedCodeLinesLength :: Int
+minifiedCodeLinesLength = 500
+
+render :: Bool -> Doc -> String
+render minify = intercalate "\n" . joinLines . map (uncurry mkIndent) . go 0
+  where
+    joinLines :: [String] -> [String]
+    joinLines = applyWhen minify $ chunks 0 []
+      where
+        chunks len acc [] = [concat (reverse acc)]
+        chunks len acc (s: ss)
+            | len + n <= minifiedCodeLinesLength = chunks (len + n) (s: acc) ss
+            | otherwise = concat (reverse acc): chunks n [s] ss
+          where
+            n = length s
+
+    joinBy f [x] (y: ys) = f x y ++ ys
+    joinBy f (x:xs) ys = x: joinBy f xs ys
+    joinBy f xs ys = xs ++ ys
+
+    mkIndent n s | minify = s
+    mkIndent n "" = ""
+    mkIndent n s = replicate n ' ' ++ s
+
+    overlay (i, s) (j, s') | all punctuation (s ++ s') && n > 0 = [(i, s ++ mkIndent n s')]
+      where n = j - (i + length s)
+    overlay (j, s') (i, s) | all punctuation (s ++ s') && n > 0 = [(i, s' ++ mkIndent n s)]
+      where n = j - (i + length s)
+    overlay a b = [a, b]
+
+    punctuation = (`elem` ("(){}[];:, " :: String))
+
+    go i Space = [(i, " ") | not minify]
+    go i Empty = []
+    go i (Doc s) = [(i, s)]
+    go i (Beside d d') = joinBy (\(i, s) (_, s') -> [(i, s ++ s')]) (go i d) (go i d')
+    go i (Above d d') = joinBy overlay (go i d) (go i d')
+    go i (Indent j d) = go (i + j) d
+    go i (Enclose open close d) = go i $ Group $ Above open $ Above d close
+    go i (Group d)
+        | size ss < 40 = compact ss
+        | otherwise    = ss
+      where
+        ss = go i d
+        size = sum . map (length . snd)
+        compact [] = []
+        compact ((i, x): xs) = [(i, x ++ concatMap snd xs)]
+
+instance IsString Doc where
+    fromString = Doc
+
+instance Semigroup Doc where
+    Empty <> d = d
+    d <> Empty = d
+    d <> d' = Beside d d'
+
+instance Monoid Doc where
+    mempty = Empty
+    mappend = (<>)
+
+infixr 5 $+$
+infixr 5 $++$
+infixr 6 <+>  -- fixity has to match the one of Semigroup.(<>)
+
+($+$) :: Doc -> Doc -> Doc
+Empty $+$ d = d
+d $+$ Empty = d
+d $+$ d' = Above d d'
+
+-- | Separate by blank line.
+
+($++$) :: Doc -> Doc -> Doc
+Empty $++$ d = d
+d $++$ Empty = d
+d $++$ d' = d `Above` "" `Above` d'
+
+-- | Separate by space that will be removed by minify.
+--
+-- For non-removable space, use @d <> " " <> d'@.
+
+(<+>) :: Doc -> Doc -> Doc
+Empty <+> d = d
+d <+> Empty = d
+d <+> d' = d `Beside` Space `Beside` d'
+
+text :: String -> Doc
+text = Doc
+
+group :: Doc -> Doc
+group = Group
+
+indentBy :: Int -> Doc -> Doc
+indentBy i Empty = Empty
+indentBy i (Indent j d) = Indent (i + j) d
+indentBy i d = Indent i d
+
+enclose :: Doc -> Doc -> Doc -> Doc
+enclose open close (Enclose o c d) = Enclose (open <> o) (c <> close) d
+enclose open close (Indent _ (Enclose o c d)) = Enclose (open <> o) (c <> close) d
+enclose open close d = Enclose open close d
+
+----------------------------------------------------------------------------------------------
+
+space :: Doc
+space = Space
+
+indent :: Doc -> Doc
+indent = indentBy 2
+
+hcat :: [Doc] -> Doc
+hcat = foldr (<>) mempty
+
+vcat :: [Doc] -> Doc
+vcat = foldr ($+$) mempty
+
+-- | Concatenate vertically, separated by blank lines.
+
+vsep :: [Doc] -> Doc
+vsep = foldr ($++$) mempty
+
+punctuate :: Doc -> [Doc] -> Doc
+punctuate _ []     = mempty
+punctuate p (x:xs) = indent $ vcat $ go x xs
+                   where go y []     = [y]
+                         go y (z:zs) = (y <> p) : go z zs
+
+parens, brackets, braces :: Doc -> Doc
+parens   = enclose "(" ")"
+brackets = enclose "[" "]"
+braces   = enclose "{" "}"
+
+-- | Apply 'parens' to 'Doc' if boolean is true.
+mparens :: Bool -> Doc -> Doc
+mparens True  d = parens d
+mparens False d = d
+
+----------------------------------------------------------------------------------------------
 
 unescape :: Char -> String
 unescape '"'      = "\\\""
@@ -29,98 +196,158 @@ unescape '\x2028' = "\\u2028"
 unescape '\x2029' = "\\u2029"
 unescape c        = [c]
 
-unescapes :: String -> String
-unescapes s = concat (map unescape s)
+unescapes :: String -> Doc
+unescapes s = text $ concatMap unescape s
 
--- pretty n i e pretty-prints e, under n levels of de Bruijn binding,
--- with i levels of indentation.
+-- pretty (n,b) i e pretty-prints e, under n levels of de Bruijn binding
+--   if b is true then the output is minified
 
 class Pretty a where
-    pretty :: Nat -> Int -> a -> String
+    pretty :: (Nat, Bool, JSModuleStyle) -> a -> Doc
+    prettyPrec :: Int -> (Nat, Bool, JSModuleStyle) -> a -> Doc
+
+    pretty = prettyPrec 0
+    prettyPrec = const pretty
+
+    {-# MINIMAL pretty | prettyPrec #-}
+
+prettyShow :: Pretty a => Bool -> JSModuleStyle -> a -> String
+prettyShow minify ms = render minify . pretty (0, minify, ms)
+
+instance Pretty a => Pretty (Maybe a) where
+  prettyPrec p n = maybe mempty (prettyPrec p n)
 
 instance (Pretty a, Pretty b) => Pretty (a,b) where
-  pretty n i (x,y) = pretty n i x ++ ": " ++ pretty n (i+1) y
+  pretty n (x,y) = pretty n x <> ":" <+> pretty n y
 
 -- Pretty-print collections
 
 class Pretties a where
-    pretties :: Nat -> Int -> a -> [String]
+    pretties :: (Nat, Bool, JSModuleStyle) -> a -> [Doc]
 
 instance Pretty a => Pretties [a] where
-  pretties n i = map (pretty n i)
+  pretties n = map (pretty n)
+
+instance Pretty a => Pretties (List1 a) where
+  pretties n = pretties n . List1.toList
 
 instance (Pretty a, Pretty b) => Pretties (Map a b) where
-  pretties n i o = pretties n i (toAscList o)
+  pretties n = pretties n . toAscList
 
 -- Pretty print identifiers
 
 instance Pretty LocalId where
-  pretty n i (LocalId x) = "x" ++ show (n - x - 1)
+  pretty (n, _, _) (LocalId x) = text $ indexWithDefault __IMPOSSIBLE__ vars (n - x - 1)
+    where
+      vars = ("": map show [0..]) >>= \s -> map (:s) ['a'..'z']
 
 instance Pretty GlobalId where
-  pretty n i (GlobalId m) = variableName $ intercalate "_" m
+  pretty n (GlobalId m) = text $ variableName $ intercalate "_" m
 
 instance Pretty MemberId where
-  pretty n i (MemberId s) = "\"" ++ unescapes s ++ "\""
+  pretty _ (MemberId s) = "\"" <> unescapes s <> "\""
+  pretty n (MemberIndex i) = text (show i)
 
 -- Pretty print expressions
 
 instance Pretty Exp where
-  pretty n i (Self)                 = "exports"
-  pretty n i (Local x)              = pretty n i x
-  pretty n i (Global m)             = pretty n i m
-  pretty n i (Undefined)            = "undefined"
-  pretty n i (String s)             = "\"" ++ unescapes s ++ "\""
-  pretty n i (Char c)               = "\"" ++ unescape c ++ "\""
-  pretty n i (Integer x)            = "agdaRTS.primIntegerFromString(\"" ++ show x ++ "\")"
-  pretty n i (Double x)             = show x
-  pretty n i (Lambda x e)           =
-    "function (" ++
-      intercalate ", " (pretties (n+x) i (map LocalId [x-1, x-2 .. 0])) ++
-    ") " ++ block (n+x) i e
-  pretty n i (Object o) | null o    = "{}"
-  pretty n i (Object o) | otherwise =
-    "{" ++ br (i+1) ++ intercalate ("," ++ br (i+1)) (pretties n i o) ++ br i ++ "}"
-  pretty n i (Apply f es)           = pretty n i f ++ "(" ++ intercalate ", " (pretties n i es) ++ ")"
-  pretty n i (Lookup e l)           = pretty n i e ++ "[" ++ pretty n i l ++ "]"
-  pretty n i (If e f g)             =
-    "(" ++ pretty n i e ++ "? " ++ pretty n i f ++ ": " ++ pretty n i g ++ ")"
-  pretty n i (PreOp op e)           = "(" ++ op ++ " " ++ pretty n i e ++ ")"
-  pretty n i (BinOp e op f)         = "(" ++ pretty n i e ++ " " ++ op ++ " " ++ pretty n i f ++ ")"
-  pretty n i (Const c)              = c
-  pretty n i (PlainJS js)           = "(" ++ js ++ ")"
+  prettyPrec p n (Self)         = "exports"
+  prettyPrec p n (Local x)      = pretty n x
+  prettyPrec p n (Global m)     = pretty n m
+  prettyPrec p n (Undefined)    = "undefined"
+  prettyPrec p n (Null)         = "null"
+  prettyPrec p n (String s)     = "\"" <> unescapes (T.unpack s) <> "\""
+  prettyPrec p n (Char c)       = "\"" <> unescapes [c] <> "\""
+  prettyPrec p n (Integer x)    = text (show x) <> "n"
+  prettyPrec p n (Double x)     = text $ show x
+  prettyPrec p (n, min, ms) (Lambda x e) = mparens (p > 2) $
+    mparens (x /= 1) (punctuate "," (pretties (n + x, min, ms) (map LocalId [x-1, x-2 .. 0])))
+    <+> "=>" <+> block (n + x, min, ms) e
+  prettyPrec p n (Object o)     = braces $ punctuate "," $ pretties n o
+  prettyPrec p n (Array es)     = brackets $ punctuate "," [pretty n e | e <- es]
+  prettyPrec p n (MemberIdInString mid) = pretty n mid
+  prettyPrec p n (Ternary eCond eThen eElse) = (prettyPrec 17 n eCond <+> text "?" <+> prettyPrec 17 n eThen)
+                                            $+$ text ":" <+> prettyPrec 17 n eElse
+  prettyPrec p n (Apply f es)   = prettyPrec 17 n f <> parens (punctuate "," $ pretties n es)
+  prettyPrec p n (Lookup e l)   = prettyPrec 17 n e <> brackets (pretty n l)
+  prettyPrec p n (If e f g)     = mparens (p > 2) $
+    prettyPrec 3 n e <> "?" <+> prettyPrec 3 n f <> ":" <+> prettyPrec 2 n g
+  prettyPrec p n (PreOp op e)   = parens $ text op <> " " <> prettyPrec 17 n e
+  prettyPrec p n (BinOp e op f) = parens $ prettyPrec 17 n e <> " " <> text op <> " " <> prettyPrec 17 n f
+  prettyPrec p n (PlainJS js)   = text js
 
-block :: Nat -> Int -> Exp -> String
-block n i (If e f g) = "{" ++ br (i+1) ++ block' n (i+1) (If e f g) ++ br i ++ "}"
-block n i e          = "{" ++ br (i+1) ++ "return " ++ pretty n (i+1) e ++ ";" ++ br i ++ "}"
+block :: (Nat, Bool, JSModuleStyle) -> Exp -> Doc
+block n e = mparens (doNest e) $ prettyPrec 2 n e
+  where
+    doNest Object{} = True
+    doNest _ = False
 
-block' :: Nat -> Int -> Exp -> String
-block' n i (If e f g) = "if (" ++ pretty n i e ++ ") " ++ block n i f ++ " else " ++ block' n i g
-block' n i e          = block n i e
+modname :: GlobalId -> Doc
+modname (GlobalId ms) = text $ intercalate "." ms
 
-modname :: GlobalId -> String
-modname (GlobalId ms) = "\"" ++ intercalate "." ms ++ "\""
+exports :: (Nat, Bool, JSModuleStyle) -> Set JSQName -> [Export] -> Doc
+exports n lss [] = Empty
+exports n lss es0@(Export ls e : es)
+  -- If the parent of @ls@ is already defined (or no parent exists), @ls@ can be defined
+  | maybe True (`member` lss) parent =
+      "exports" <> hcat (map brackets (pretties n ls)) <+> "=" <+> indent (pretty n e) <> ";" $+$
+      exports n (insert ls lss) es
+  -- If the parent is not yet defined, first define it as empty object, and then continue with @ls@.
+  | otherwise =
+      exports n lss $ maybe es0 (\ ls' -> Export ls' (Object mempty) : es0) parent
+  where
+  parent = List1.nonEmpty $ List1.init ls
 
-
-exports :: Nat -> Int -> Set [MemberId] -> [Export] -> String
-exports n i lss [] = ""
-exports n i lss (Export ls e : es) | member (init ls) lss =
-  "exports[" ++ intercalate "][" (pretties n i ls) ++ "] = " ++ pretty n (i+1) e ++ ";" ++ br i ++
-  exports n i (insert ls lss) es
-exports n i lss (Export ls e : es) | otherwise =
-  exports n i lss (Export (init ls) (Object empty) : Export ls e : es)
+instance Pretty [(GlobalId, Export)] where
+  pretty n es
+    = vcat [ pretty n g <> hcat (map brackets (pretties n ls)) <+> "=" <+> indent (pretty n e) <> ";"
+           | (g, Export ls e) <- es ]
 
 instance Pretty Module where
-  pretty n i (Module m es ex) =
-    imports ++ br i
-      ++ exports n i (singleton []) es ++ br i
-      ++ maybe "" (pretty n i) ex
+  pretty opt@(n, min, JSES6) (Module m is es callMain) = vsep
+    [ "import agdaRTS from \"./agda-rts.mjs\";"
+    , imports
+    , "const exports = {};"
+    , exports opt Set.empty es
+    , pretty opt callMain
+    , ";export default exports;"
+    ]
+    $+$ ""
     where
-      js = toList (globals es)
-      imports = unlines $
-            ["var agdaRTS = require(\"agda-rts\");"] ++
-            ["var " ++ pretty n (i+1) e ++ " = require(" ++ modname e ++ ");"
-            | e <- js]
+      imports = vcat [
+        "import " <> indent (pretty opt e) <+> " from \"./" <> modname e <> ".mjs\";"
+        | e <- toList (globals es <> Set.fromList is)
+        ]
+      les = toList (globals es <> Set.fromList is)
+  pretty opt@(n, min, JSCJS) (Module m is es callMain) = vsep
+    [ "var agdaRTS" <+> "=" <+> "require(\"agda-rts\");"
+    , imports
+    , exports opt Set.empty es
+    , pretty opt callMain
+    ]
+    $+$ ""
+    where
+      imports = vcat [
+        "var " <> indent (pretty opt e) <+> "=" <+> "require(\"" <> modname e <> "\");"
+        | e <- toList (globals es <> Set.fromList is)
+        ]
+      les = toList (globals es <> Set.fromList is)
+  pretty opt@(n, min, JSAMD) (Module m is es callMain) = vsep
+    [ "define(['agda-rts'"
+      <+> hcat [ ", " <+> ("\"" <> modname e <> "\"") | e <- les ]
+      <+> "],"
+    , "function(agdaRTS"
+      <+> hcat [ ", " <+> pretty opt e | e <- les ]
+      <+> ") {"
+    , "var exports = {};"
+    , exports opt Set.empty es
+    , pretty opt callMain
+    , "; return exports; });"
+    ]
+    $+$ "" -- Final newline
+    where
+      les = toList (globals es <> Set.fromList is)
+
 
 variableName :: String -> String
 variableName s = if isValidJSIdent s then "z_" ++ s else "h_" ++ show (hashString s)
@@ -128,8 +355,13 @@ variableName s = if isValidJSIdent s then "z_" ++ s else "h_" ++ show (hashStrin
 -- | Check if a string is a valid JS identifier. The check ignores keywords
 -- as we prepend z_ to our identifiers. The check
 -- is conservative and may not admit all valid JS identifiers.
+
 isValidJSIdent :: String -> Bool
-isValidJSIdent s = matchTest regex s
+isValidJSIdent []     = False
+isValidJSIdent (c:cs) = validFirst c && all validOther cs
   where
-    regex :: Regex
-    regex = makeRegex "^[a-zA-Z_$][0-9a-zA-Z_$]*$"
+  validFirst :: Char -> Bool
+  validFirst c = isAsciiUpper c || isAsciiLower c || c == '_' || c == '$'
+
+  validOther :: Char -> Bool
+  validOther c = validFirst c || isDigit c

@@ -1,3 +1,8 @@
-Issue1976.agda:20,1-14
-A != B of type Set
-when checking that the clause F wrong = Set has type M.R B
+Issue1976.agda:20.1-8: error: [UnequalTerms]
+The terms
+  A
+and
+  B
+are not equal at type Set
+when checking the clause left hand side
+F wrong

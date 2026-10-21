@@ -1,0 +1,8 @@
+Relevance-subtyping-1.agda:4.7-8: error: [UnequalTypes]
+The function type
+  .A → B
+is not a subtype of
+  A → B
+because:
+  one has irrelevant domain, while the other is relevant.
+when checking that the expression g has type A → B

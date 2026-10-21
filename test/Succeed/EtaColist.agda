@@ -1,18 +1,19 @@
 -- Andreas, 2014-07-02 Documenting the ETA pragma
 
-open import Common.Equality
+{-# OPTIONS --guardedness #-}
+
+open import Agda.Builtin.Equality
 
 mutual
   data Colist (A : Set) : Set where
     []  : Colist A
     _∷_ : A → ∞Colist A → Colist A
 
+  {-# ETA_EQUALITY #-}
   record ∞Colist (A : Set) : Set where
     coinductive
     constructor delay
     field       force : Colist A
-
-{-# ETA ∞Colist #-}
 
 open ∞Colist
 

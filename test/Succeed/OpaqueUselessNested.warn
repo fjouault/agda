@@ -1,0 +1,67 @@
+OpaqueUselessNested.agda:4.1-7: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    opaque
+      unfolding {}
+      opaque
+        unfolding {}
+        mutual
+          data Foo : Set
+          data Foo where
+
+OpaqueUselessNested.agda:4.8-14: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    opaque
+      unfolding {}
+      mutual
+        data Foo : Set
+        data Foo where
+
+OpaqueUselessNested.agda:4.15-21: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    mutual
+      data Foo : Set
+      data Foo where
+
+———— All done; warnings encountered ————————————————————————
+
+OpaqueUselessNested.agda:4.1-7: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    opaque
+      unfolding {}
+      opaque
+        unfolding {}
+        mutual
+          data Foo : Set
+          data Foo where
+
+OpaqueUselessNested.agda:4.8-14: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    opaque
+      unfolding {}
+      mutual
+        data Foo : Set
+        data Foo where
+
+OpaqueUselessNested.agda:4.15-21: warning: -W[no]UselessOpaque
+This 'opaque' block has no effect.
+when scope checking the declaration
+  opaque
+    unfolding {}
+    mutual
+      data Foo : Set
+      data Foo where

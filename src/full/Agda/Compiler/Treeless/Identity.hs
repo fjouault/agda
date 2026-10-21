@@ -1,29 +1,33 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Compiler.Treeless.Identity
   ( detectIdentityFunctions ) where
 
-import Control.Applicative
-import Data.Foldable (foldMap)
-import Data.Semigroup
-import Data.List.NonEmpty (NonEmpty(..))
+import Prelude hiding ((!!))  -- don't use partial functions
+
+import Control.Applicative ( Alternative((<|>), empty) )
+import Data.Semigroup ( sconcat )
 import qualified Data.List as List
 
 import Agda.Syntax.Treeless
-import Agda.TypeChecking.Substitute
 import Agda.TypeChecking.Monad
-import Agda.Utils.Lens
+
+import Agda.Utils.List
+import Agda.Utils.List1 (pattern (:|))
+
+import Agda.Utils.Impossible
 
 detectIdentityFunctions :: QName -> TTerm -> TCM TTerm
 detectIdentityFunctions q t =
   case isIdentity q t of
     Nothing     -> return t
     Just (n, k) -> do
-      markInline q
+      markInline True q
       def <- theDef <$> getConstInfo q
       return $ mkTLam n $ TVar k
 
 -- If isIdentity f t = Just (n, k) then
--- f = t is equivalent to f = λ xₙ₋₁ .. x₀ → xk
+-- f = t is equivalent to f = λ xn₋₁ .. x₀ → xk
 isIdentity :: QName -> TTerm -> Maybe (Int, Int)
 isIdentity q t =
   trivialIdentity q t <|> recursiveIdentity q t
@@ -49,7 +53,7 @@ recursiveIdentity q t =
         identityArgs a args =
           length args == a && and (zipWith match (reverse args) [0..])
 
-        proj x args = reverse args !! x
+        proj x args = indexWithDefault __IMPOSSIBLE__ (reverse args) x
 
         match TErased              _  = True
         match (TVar z)             y = z == y
@@ -80,10 +84,11 @@ trivialIdentity q t =
       case t of
         TVar x | x >= k    -> IdIn [x - k]
                | otherwise -> notId
-        TLet _ b           -> go (k + 1) b
+        TLet _ _ b         -> go (k + 1) b
         TCase _ _ d bs     -> sconcat (go k d :| map (goAlt k) bs)
         TApp (TDef f) args
           | f == q         -> IdIn [ y | (TVar x, y) <- zip (reverse args) [0..], y + k == x ]
+        TCoerce v          -> go k v
         TApp{}             -> notId
         TLam{}             -> notId
         TLit{}             -> notId

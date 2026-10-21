@@ -1,0 +1,6 @@
+WrongPrimitiveModality.agda:13.6-32: error: [WrongArgInfoForPrimitive]
+Wrong definition properties for primitive primShowNat
+  Got:      at modality erased
+  Expected: at modality default
+when checking that the type of the primitive function primShowNat
+is Nat → String

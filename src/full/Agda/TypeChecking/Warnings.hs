@@ -1,61 +1,202 @@
-{-# LANGUAGE CPP #-}
 
-module Agda.TypeChecking.Warnings where
+module Agda.TypeChecking.Warnings
+  ( MonadWarning(..)
+  , warning'_, warning_, warning', warning, warnings
+  , raiseWarningsOnUsage
+  , isUnsolvedWarning
+  , isMetaWarning
+  , isMetaTCWarning
+  , onlyShowIfUnsolved
+  , WhichWarnings(..), classifyWarning
+  -- not exporting constructor of WarningsAndNonFatalErrors
+  , WarningsAndNonFatalErrors, tcWarnings, nonFatalErrors
+  , classifyWarnings
+  ) where
 
+import Control.Monad ( forM, unless, when )
+import Control.Monad.Except ( MonadError(..) )
+import Control.Monad.Reader ( ReaderT )
+import Control.Monad.State  ( StateT )
+import Control.Monad.Trans  ( MonadTrans, lift )
+import Control.Monad.Trans.Maybe
+import Control.Monad.Writer ( WriterT )
+
+import Data.Foldable
 import qualified Data.List as List
+import qualified Data.Map  as Map
+import qualified Data.Set  as Set
+import Data.Maybe     ( catMaybes )
+import Data.Text qualified as Text
 
 import Agda.TypeChecking.Monad.Base
-import {-# SOURCE #-} Agda.TypeChecking.Errors
-import {-# SOURCE #-} Agda.TypeChecking.Pretty
+import Agda.TypeChecking.Monad.Debug
+import Agda.TypeChecking.Monad.Caching  ( areWeCaching )
+import {-# SOURCE #-} Agda.TypeChecking.Monad.State () -- instance MonadFileId TCM
+import {-# SOURCE #-} Agda.TypeChecking.Pretty ( MonadPretty, prettyTCM, vcat, ($$) )
+import {-# SOURCE #-} Agda.TypeChecking.Pretty.Call
+import {-# SOURCE #-} Agda.TypeChecking.Pretty.Warning ( prettyWarning )
 
+import Agda.Syntax.Abstract.Name ( QName )
+import qualified Agda.Syntax.Common.Pretty as P
 import Agda.Syntax.Position
 import Agda.Syntax.Parser
+import Agda.Syntax.Internal.Blockers (neverUnblock)
 
 import Agda.Interaction.Options
+import Agda.Interaction.Options.Warnings
+import {-# SOURCE #-} Agda.Interaction.Highlighting.Generate (highlightWarning)
 
+import Agda.Version         ( docsUrl )
+
+import Agda.Utils.CallStack ( CallStack, HasCallStack, withCallerCallStack )
+import Agda.Utils.Function  ( applyUnless )
 import Agda.Utils.Lens
-import qualified Agda.Utils.Pretty as P
-import Agda.Utils.Except
+import Agda.Utils.List1 (List1)
+import qualified Agda.Utils.List1 as List1
+import Agda.Utils.Maybe
+import qualified Agda.Utils.Set1 as Set1
+import Agda.Utils.Singleton
 
-#if __GLASGOW_HASKELL__ <= 708
-import Control.Applicative ((<$>))
-#endif
+import Agda.Utils.Impossible
 
+-- * The warning monad
+---------------------------------------------------------------------------
 
+class (MonadPretty m, MonadError TCErr m) => MonadWarning m where
+  -- | Store a warning and generate highlighting from it.
+  addWarning ::
+       Bool       -- ^ Is the warning enabled?
+    -> TCWarning  -- ^ The warning.
+    -> m ()
 
-{-# SPECIALIZE genericWarning :: P.Doc -> TCM () #-}
-genericWarning :: MonadTCM tcm => P.Doc -> tcm ()
-genericWarning = warning . GenericWarning
+  default addWarning
+    :: (MonadWarning n, MonadTrans t, t n ~ m)
+    => Bool -> TCWarning -> m ()
+  addWarning enabled = lift . addWarning enabled
 
-{-# SPECIALIZE genericNonFatalError :: P.Doc -> TCM () #-}
-genericNonFatalError :: MonadTCM tcm => P.Doc -> tcm ()
-genericNonFatalError = warning . GenericNonFatalError
+-- instance MonadWarning m => MonadWarning (ExceptT e m)  -- Conflict with MonadError TCErr constraint
+instance MonadWarning m => MonadWarning (MaybeT m)
+instance MonadWarning m => MonadWarning (ReaderT r m)
+instance MonadWarning m => MonadWarning (StateT s m)
+instance (MonadWarning m, Monoid w) => MonadWarning (WriterT w m)
+
+instance MonadWarning TCM where
+  addWarning enabled tcwarn = ifImpureConv
+    (do stTCWarnings `modifyTCLens` Set.insert tcwarn
+        -- Andreas, 2025-04-01, issue #6994, no highlighting for disabled warnings
+        when enabled $ highlightWarning tcwarn)
+    (case classifyWarning (tcWarning tcwarn) of
+      ErrorWarnings -> patternViolation neverUnblock
+      AllWarnings   -> return ())
+
+-- * Raising warnings
+---------------------------------------------------------------------------
+warnUrl :: String -> String
+warnUrl = docsUrl . ("tools/command-line-options.html#cmdoption-arg-" ++)
+
+{-# SPECIALIZE warning'_ :: CallStack -> Warning -> TCM TCWarning #-}
+warning'_ :: (MonadWarning m) => CallStack -> Warning -> m TCWarning
+warning'_ loc w = do
+  r <- viewTC eRange
+  c <- viewTC eCall
+  b <- areWeCaching
+  let r' = case w of
+        -- Some warnings come with their own error locations.
+        NicifierIssue             w0 -> getRange w0
+        UnsolvedInteractionMetas  rs -> getRange rs
+        UnsolvedMetaVariables     rs -> getRange rs
+        UnsolvedConstraints       cs -> getRange cs
+        InteractionMetaBoundaries rs -> getRange rs
+        _ -> r
+  let wn = warningName w
+  let ws = warningNameToString wn
+  let wref = P.href (Text.pack (warnUrl ws)) (P.text ws)
+  p <- vcat
+    [ pure $ P.hsep
+      [ if null r' then mempty else P.pretty r' <> P.colon
+      , if wn `elem` errorWarnings then "error:" P.<+> P.brackets wref
+        else "warning: -W[no]" <> wref
+        -- Only benign warnings can be deactivated with -WnoXXX.
+      ]
+    , prettyWarning w
+    , prettyTCM c
+    ]
+  return $ TCWarning loc r' w p (P.render p) b
 
 {-# SPECIALIZE warning_ :: Warning -> TCM TCWarning #-}
-warning_ :: MonadTCM tcm => Warning -> tcm TCWarning
-warning_ w = do
-  r <- view eRange
-  c <- view eCall
-  -- NicifierIssues print their own error locations in their list of
-  -- issues (but we might need to keep the overall range `r` for
-  -- comparing ranges)
-  let r' = case w of { NicifierIssue{} -> NoRange ; _ -> r }
-  p <- liftTCM $ sayWhen r' c $ prettyWarning w
-  liftTCM $ return $ TCWarning r w p
+warning_ :: (HasCallStack, MonadWarning m) => Warning -> m TCWarning
+warning_ = withCallerCallStack . flip warning'_
 
-{-# SPECIALIZE warning :: Warning -> TCM () #-}
-warning :: MonadTCM tcm => Warning -> tcm ()
-warning w = do
-  tcwarn <- warning_ w
-  wmode <- optWarningMode <$> pragmaOptions
-  case wmode of
-    IgnoreAllWarnings -> case classifyWarning w of
-                           -- not allowed to ignore non-fatal errors
-                           ErrorWarnings -> raiseWarning tcwarn
-                           AllWarnings -> return ()
-    TurnIntoErrors -> typeError $ NonFatalErrors [tcwarn]
-    LeaveAlone -> raiseWarning tcwarn
-  where raiseWarning tcw = stTCWarnings %= (tcw :)
+-- UNUSED Liang-Ting Chen 2019-07-16
+---- | @applyWarningMode@ filters out the warnings the user has not requested
+---- Users are not allowed to ignore non-fatal errors.
+--
+--applyWarningMode :: WarningMode -> Warning -> Maybe Warning
+--applyWarningMode wm w = case classifyWarning w of
+--  ErrorWarnings -> Just w
+--  AllWarnings   -> w <$ guard (Set.member (warningName w) $ wm ^. warningSet)
+
+{-# SPECIALIZE warnings' :: CallStack -> List1 Warning -> TCM () #-}
+warnings' :: MonadWarning m => CallStack -> List1 Warning -> m ()
+warnings' loc ws = do
+
+  WarningMode enabledWarnings wError <- optWarningMode <$> pragmaOptions
+
+  -- We collect *all* of the warnings no matter whether they are enabled or not.
+  -- If we find an enabled warning which should be turned into an error, we keep processing
+  -- the rest of the warnings and *then* report all of the errors at once.
+  merrs <- forM ws $ \ w' -> do
+    let wn = warningName w'
+    let enabled = wn `elem` enabledWarnings
+    tcwarn <- warning'_ loc w'
+    if wError && enabled
+    then pure (Just tcwarn)
+    else Nothing <$ addWarning (enabled  || wn `elem` exactSplitWarnings) tcwarn
+      -- Andreas, 2025-04-01, issue #6994: always highlight non-exact splits
+
+  List1.unlessNull (List1.catMaybes merrs) \ errs ->
+    typeError' loc $ NonFatalErrors $ Set1.fromList errs
+
+{-# SPECIALIZE warnings :: HasCallStack => List1 Warning -> TCM () #-}
+warnings :: (HasCallStack, MonadWarning m) => List1 Warning -> m ()
+warnings = withCallerCallStack . flip warnings'
+
+{-# SPECIALIZE warning' :: CallStack -> Warning -> TCM () #-}
+warning' :: MonadWarning m => CallStack -> Warning -> m ()
+warning' loc = warnings' loc . singleton
+
+{-# SPECIALIZE warning :: HasCallStack => Warning -> TCM () #-}
+warning :: (HasCallStack, MonadWarning m) => Warning -> m ()
+warning = withCallerCallStack . flip warning'
+
+-- | Raise every 'WARNING_ON_USAGE' connected to a name.
+{-# SPECIALIZE raiseWarningsOnUsage :: QName -> TCM () #-}
+raiseWarningsOnUsage :: (MonadWarning m) => QName -> m ()
+raiseWarningsOnUsage d = do
+  -- In case we find a defined name, we start by checking whether there's
+  -- a warning attached to it
+  reportSLn "scope.warning.usage" 50 $ "Checking usage of " ++ P.prettyShow d
+  mapM_ (warning . UserWarning) =<< Map.lookup d <$> getUserWarnings
+
+
+-- * Classifying warnings
+---------------------------------------------------------------------------
+
+isUnsolvedWarning :: Warning -> Bool
+isUnsolvedWarning w = warningName w `Set.member` unsolvedWarnings
+
+isMetaWarning :: Warning -> Bool
+isMetaWarning = \case
+   UnsolvedInteractionMetas{} -> True
+   UnsolvedMetaVariables{}    -> True
+   _                          -> False
+
+isMetaTCWarning :: TCWarning -> Bool
+isMetaTCWarning = isMetaWarning . tcWarning
+
+onlyShowIfUnsolved :: Warning -> Bool
+onlyShowIfUnsolved InversionDepthReached{} = True
+onlyShowIfUnsolved _ = False
 
 -- | Classifying warnings: some are benign, others are (non-fatal) errors
 
@@ -65,50 +206,15 @@ data WhichWarnings =
   -- Note: order of constructors is important for the derived Ord instance
   deriving (Eq, Ord)
 
-isUnsolvedWarning :: Warning -> Bool
-isUnsolvedWarning w = case w of
-  UnsolvedMetaVariables{}    -> True
-  UnsolvedInteractionMetas{} -> True
-  UnsolvedConstraints{}      -> True
- -- rest
-  _                          -> False
-
 classifyWarning :: Warning -> WhichWarnings
-classifyWarning w = case w of
-  OldBuiltin{}               -> AllWarnings
-  EmptyRewritePragma         -> AllWarnings
-  UselessPublic              -> AllWarnings
-  UnreachableClauses{}       -> AllWarnings
-  UselessInline{}            -> AllWarnings
-  GenericWarning{}           -> AllWarnings
-  DeprecationWarning{}       -> AllWarnings
-  NicifierIssue{}            -> AllWarnings
-  TerminationIssue{}         -> ErrorWarnings
-  CoverageIssue{}            -> ErrorWarnings
-  CoverageNoExactSplit{}     -> ErrorWarnings
-  NotStrictlyPositive{}      -> ErrorWarnings
-  UnsolvedMetaVariables{}    -> ErrorWarnings
-  UnsolvedInteractionMetas{} -> ErrorWarnings
-  UnsolvedConstraints{}      -> ErrorWarnings
-  GenericNonFatalError{}     -> ErrorWarnings
-  SafeFlagPostulate{}        -> ErrorWarnings
-  SafeFlagPragma{}           -> ErrorWarnings
-  SafeFlagNonTerminating     -> ErrorWarnings
-  SafeFlagTerminating        -> ErrorWarnings
-  SafeFlagPrimTrustMe        -> ErrorWarnings
-  SafeFlagNoPositivityCheck  -> ErrorWarnings
-  SafeFlagPolarity           -> ErrorWarnings
-  ParseWarning{}             -> ErrorWarnings
+classifyWarning w =
+  if warningName w `Set.member` errorWarnings
+  then ErrorWarnings
+  else AllWarnings
 
-classifyWarnings :: [TCWarning] -> ([TCWarning], [TCWarning])
-classifyWarnings = List.partition $ (< AllWarnings) . classifyWarning . tcWarning
-
--- | running the Parse monad
-
-runPM :: PM a -> TCM a
-runPM m = do
-  (res, ws) <- runPMIO m
-  mapM_ (warning . ParseWarning) ws
-  case res of
-    Left  e -> throwError (Exception (getRange e) (P.pretty e))
-    Right a -> return a
+classifyWarnings :: [TCWarning] -> WarningsAndNonFatalErrors
+classifyWarnings ws =
+    WarningsAndNonFatalErrors (Set.fromList warnings) (Set.fromList errors)
+  where
+    partite = (< AllWarnings) . classifyWarning . tcWarning
+    (errors, warnings) = List.partition partite ws

@@ -1,0 +1,8 @@
+Issue3855d.agda:27.15-18: error: [UnequalTypes]
+The function type
+  (@0 erased₁ : _A_11) → Erased _A_11
+is not a subtype of
+  A → Erased A
+because:
+  one has erased domain, while the other is unrestricted.
+when checking that the expression [_] has type A → Erased A

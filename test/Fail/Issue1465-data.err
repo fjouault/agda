@@ -1,5 +1,3 @@
-Issue1465-data.agda:1,6-6
-Issue1465-data.agda:1,6: Parse error
-_<ERROR>
- : Set where
+Issue1465-data.agda:1.8: error: [ParseError]
+:<ERROR>  Set where
 ...

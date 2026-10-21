@@ -1,3 +1,5 @@
+{-# OPTIONS --guardedness #-}
+
 open import Agda.Builtin.Coinduction
 open import Agda.Builtin.Equality
 open import Agda.Builtin.List
@@ -14,7 +16,7 @@ head (x ∷ xs) = x
 tail : ∀ {A} → Stream A → Stream A
 tail (x ∷ xs) = ♭ xs
 
-take : ∀ {A} n → Stream A → List A
+take : ∀ {A} (n : Nat) → Stream A → List A
 take zero    xs       = []
 take (suc n) (x ∷ xs) = x ∷ take n (♭ xs)
 

@@ -3,8 +3,8 @@
 ------------------------------------------------------------------------
 
 open import Relation.Binary
-open import Relation.Binary.OrderMorphism
-open import Relation.Binary.PropositionalEquality
+open import Relation.Binary.Morphism.Bundles
+open import Relation.Binary.PropositionalEquality hiding (poset)
 import Relation.Binary.Properties.StrictTotalOrder as STOProps
 open import Data.Product
 open import Level
@@ -33,7 +33,7 @@ module Monad
   {Key : let PosPoset = STOProps.poset
                           (record { Carrier = _ ; _≈_ = _; _<_ = _
                                   ; isStrictTotalOrder = posOrdered })
-             MonoFun = PosPoset ⇒-Poset PosPoset in
+             MonoFun = PosetHomomorphism PosPoset PosPoset in
          MonoFun -> Result -> Set}
   {_≋_ _<_ : Rel (∃₂ Key) zero}
   (keyOrdered : IsStrictTotalOrder _≋_ _<_)
@@ -45,26 +45,26 @@ module Monad
 
   where
 
-open _⇒-Poset_
+open PosetHomomorphism using () renaming (⟦_⟧ to fun; mono to monotone)
 open STOProps (record { Carrier = _ ; _≈_ = _; _<_ = _
                       ; isStrictTotalOrder = posOrdered })
 
 import IndexedMap as Map -- renaming (Map to MemoTable)
-open import Category.Monad
-open import Category.Monad.State
+open import Effect.Monad
+open import Effect.Monad.State
 import Data.List as List; open List using (List)
-open import Data.Unit hiding (poset; _≤_)
+open import Data.Unit
 open import Function
-open import Data.Maybe hiding (Eq)
-open import Relation.Binary.Product.StrictLex
-open import Relation.Binary.Product.Pointwise
-import Relation.Binary.On as On
+open import Data.Maybe
+open import Data.Product.Relation.Binary.Lex.Strict
+open import Data.Product.Relation.Binary.Pointwise.NonDependent
+import Relation.Binary.Construct.On as On
 
 ------------------------------------------------------------------------
 -- Monotone functions
 
 MonoFun : Set
-MonoFun = poset ⇒-Poset poset
+MonoFun = PosetHomomorphism poset poset
 
 ------------------------------------------------------------------------
 -- Memo tables
@@ -96,14 +96,14 @@ shuffle ((pos , f , r) , key k .pos) = (pos , f , r , k)
 -- Equality and order.
 
 Eq : Rel (∃ MemoTableKey) _
-Eq = _≡_ ×-Rel _≋_  on  shuffle
+Eq = Pointwise _≡_ _≋_  on  shuffle
 
 Lt : Rel (∃ MemoTableKey) _
 Lt = ×-Lex _≡_ _<P_ _<_  on  shuffle
 
 isOrdered : IsStrictTotalOrder Eq Lt
 isOrdered = On.isStrictTotalOrder shuffle
-              (posOrdered ×-isStrictTotalOrder keyOrdered)
+              (×-isStrictTotalOrder posOrdered keyOrdered)
 
 indicesEqual′ : Eq =[ proj₁ ]⇒ _≡_
 indicesEqual′ {((_ , _ , _) , key _ ._)}

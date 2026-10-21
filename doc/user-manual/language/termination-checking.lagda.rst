@@ -1,6 +1,12 @@
 ..
   ::
+
+  {-# OPTIONS --termination-depth=2 #-}
+
   module language.termination-checking where
+
+      open import Agda.Builtin.Bool
+      open import Agda.Builtin.Nat
 
 .. _termination-checking:
 
@@ -8,8 +14,73 @@
 Termination Checking
 ********************
 
-.. note::
-   This is a stub.
+Not all recursive functions are permitted - Agda accepts only these recursive
+schemas that it can mechanically prove terminating.
+
+.. _termination-checking-primitive-recursion:
+
+Primitive recursion
+-------------------
+
+In the simplest case, a given argument must be exactly one constructor
+smaller in each recursive call.  We call this scheme primitive
+recursion.  A few correct examples:
+
+::
+
+      plus : Nat → Nat → Nat
+      plus zero    m = m
+      plus (suc n) m = suc (plus n m)
+
+      natEq : Nat → Nat → Bool
+      natEq zero    zero    = true
+      natEq zero    (suc m) = false
+      natEq (suc n) zero    = false
+      natEq (suc n) (suc m) = natEq n m
+
+Both ``plus`` and ``natEq`` are defined by primitive recursion.
+
+The recursive call in ``plus`` is OK because ``n`` is a subexpression
+of ``suc n`` (so ``n`` is structurally smaller than ``suc n``).  So
+every time plus is recursively called the first argument is getting
+smaller and smaller.  Since a natural number can only have a finite
+number of suc constructors we know that plus will always terminate.
+
+``natEq`` terminates for the same reason, but in this case we can say
+that both the first and second arguments of natEq are decreasing.
+
+.. _termination-checking-structural-recursion:
+
+Structural recursion
+--------------------
+
+Agda's termination checker allows more definitions than just primitive
+recursive ones -- it allows structural recursion.
+
+This means that we require recursive calls to be on a (strict)
+subexpression of the argument (see ``fib`` below) - this is more
+general that just taking away one constructor at a time.
+
+::
+
+      fib : Nat → Nat
+      fib zero          = zero
+      fib (suc zero)    = suc zero
+      fib (suc (suc n)) = plus (fib n) (fib (suc n))
+
+It also means that arguments may decrease in an lexicographic order -
+this can be thought of as nested primitive recursion (see ``ack``
+below).
+
+::
+
+      ack : Nat → Nat → Nat
+      ack zero    m       = suc m
+      ack (suc n) zero    = ack n (suc zero)
+      ack (suc n) (suc m) = ack n (ack (suc n) m)
+
+In ``ack`` either the first argument decreases or it stays the same and the second one decreases.
+This is the same as a lexicographic ordering.
 
 .. _termination-checking-with:
 
@@ -19,18 +90,17 @@ With-functions
 Pragmas and Options
 -------------------
 
-.. _non_terminating_pragma:
+.. _non_terminating-pragma:
 
 * The ``NON_TERMINATING`` pragma
 
-  This is a safer version of :ref:`TERMINATING <terminating_pragma>`
-  which doesn't treat the affected functions as terminating. This
-  means that ``NON_TERMINATING`` functions do not reduce during type
-  checking. They do reduce at run-time and when invoking ``C-c C-n``
-  at top-level (but not in a hole). The pragma was added in Agda
-  2.4.2.
+  This is a safer version of :ref:`TERMINATING <terminating-pragma>`
+  which doesn't treat the affected functions as terminating.
+  This means that ``NON_TERMINATING`` functions do not reduce during type checking.
+  Though, they do reduce at run-time and when invoking ``C-u C-c C-n`` interactively.
+  The pragma was added in Agda 2.4.2.
 
-.. _terminating_pragma:
+.. _terminating-pragma:
 
 * The ``TERMINATING`` pragma
 
@@ -39,7 +109,7 @@ Pragmas and Options
   replaced the ``NO_TERMINATION_CHECK`` pragma.
 
   The pragma must precede a function definition or a mutual block. The
-  pragma cannot be used in ``--safe`` mode.
+  pragma cannot be used in :option:`--safe` mode.
 
   Examples:
 
@@ -91,3 +161,50 @@ Pragmas and Options
         g = h
         {-# TERMINATING #-}
         h = g
+
+.. _termination-depth:
+
+* Increasing the maximal analysis depth with :option:`--termination-depth`.
+
+  The following mutual functions need a termination depth of 2 to be accepted
+  by the termination checker::
+
+      mutual
+
+        f : Nat → Nat
+        f zero = zero
+        f (suc zero) = suc zero
+        f (suc (suc x)) = g x
+
+        g : Nat → Nat
+        g y = f (suc y)
+
+  With a termination depth of 1, the termination checker would only register that the call from ``f``
+  to ``g`` *decreases* the argument and the call from ``g`` to ``f`` *increases* the argument,
+  but not by *how much*.
+  Thus, it has no evidence that the call sequence ``f → g → f`` decreases the argument.
+
+  With termination depth 2, it will see that the call ``f → g`` decreases by 2 and the
+  call ``g → f`` increases only by 1, so the overall decrease in ``f → g → f`` is still 1.
+
+  In general termination depth *N* can track decrease up to *N* and increase up to *N-1*.
+
+  Agda will first check termination with a termination depth of 1 and increase this value
+  until the termination check succeeds or the maximum termination depth has been reached.
+  The maximum depth is by default 3 (since Agda 2.9.0) and can be set by the
+  :option:`--termination-depth`.
+
+  In practice, it should not be necessary to increase the maximum termination depth,
+  as examples using depth 2 are already rare.
+  A high termination depth can make the termination checker slow and memory hungry.
+  Rather then increasing the termination depth, functions should be reformulated such that
+  they are structurally recursive, i.e., only match one level deep.
+
+
+.. _termination-checking-references:
+
+References
+----------
+
+`Andreas Abel, Foetus -- termination checker for simple functional programs
+<https://andreasabel.github.io/foetus-report>`_

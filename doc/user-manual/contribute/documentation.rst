@@ -20,14 +20,22 @@ Rendering documentation locally
 
     - ``Sphinx`` and ``sphinx-rtd-theme``
 
-        pip install --user -r doc/user-manual/requirements.txt
+        .. code-block:: bash
+
+          pip install --user -r doc/user-manual/requirements.txt
 
       Note that the ``--user`` option puts the Sphinx binaries in
       ``$HOME/.local/bin``.
 
+    - ImageMagick with SVG and PNG support; check output of
+
+        .. code-block:: bash
+
+          convert -list format
+
     - LaTeX
 
-    - dvipng
+    - PyDvi
 
   To see the list of available targets, execute ``make help``
   in ``doc/user-manual``. E.g., call ``make html`` to build the
@@ -112,7 +120,7 @@ of this form: both *visible* and *valid*.
 
 
 
-.. warning:: Remember to always leave a blank like after the ``::``.
+.. warning:: Remember to always leave a blank line after the ``::``.
          Otherwise, the code will be checked by Agda, but it will appear
          as regular paragraph text in the documentation.
 
@@ -201,7 +209,7 @@ shown again.
 File structure
 --------------
 
-Documentation literate files (`.lagda.*`) are type-checked as whole Agda files,
+Documentation literate files (``.lagda.*``) are type-checked as whole Agda files,
 as if all literate text was replaced by whitespace. Thus, **indentation** is
 interpreted globally.
 
@@ -209,10 +217,10 @@ interpreted globally.
 Namespacing
 -----------
 
-In the documentation, files are typechecked starting from the `doc/user-manual/`
-root. For example, the file `doc/user-manual/language/data-types.lagda.rst`
-should start with a hidden code block declaring the name of the module as
-`language.data-types`:
+In the documentation, files are typechecked starting from the
+``doc/user-manual/`` root. For example, the file
+``doc/user-manual/language/data-types.lagda.rst`` should start with a hidden
+code block declaring the name of the module as ``language.data-types``:
 
 .. code-block:: rst
 
@@ -285,5 +293,4 @@ isolate the definitions from the rest of the file.
 
 
 
-.. _`reStructuredText format`: http://docutils.sourceforge.net/docs/ref/rst/restructuredtext.html
-
+.. _`reStructuredText format`: https://docutils.sourceforge.io/docs/ref/rst/restructuredtext.html

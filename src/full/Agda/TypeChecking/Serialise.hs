@@ -1,3 +1,10 @@
+{-# LANGUAGE Strict #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE NondecreasingIndentation #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE UnboxedTuples #-}
+{-# OPTIONS_GHC -Wno-redundant-bang-patterns #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- Andreas, Makoto, Francesco 2014-10-15 AIM XX:
 -- -O2 does not have any noticable effect on runtime
@@ -16,225 +23,255 @@
 -- -!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-!-
 
 module Agda.TypeChecking.Serialise
-  ( encode, encodeFile, encodeInterface
-  , decode, decodeFile, decodeInterface, decodeHashes
-  , EmbPrj
+  ( InterfacePrefix
+  , Encoded
+  , encode
+  , encodeFile
+  , decode
+  , decodeFile
+  , decodeInterface
+  , deserializeInterface
+  , deserializeHashes
   )
   where
 
-import Control.Applicative
-import Control.Arrow (second)
-import Control.DeepSeq
+import Prelude hiding ( null )
+
+import System.Directory ( createDirectoryIfMissing )
+import System.FilePath ( takeDirectory )
+
 import qualified Control.Exception as E
 import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.State.Strict
+import Control.Monad.Trans.Maybe
 
-import Data.Array.IArray
+import Data.Foldable (traverse_)
 import Data.Word
-import qualified Data.ByteString.Lazy as L
-import qualified Data.HashTable.IO as H
-import qualified Data.Map as Map
-import qualified Data.Binary as B
-import qualified Data.Binary.Get as B
-import qualified Data.Binary.Put as B
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as LB
 import qualified Data.List as List
-import Data.Function
+import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
 
-import qualified Codec.Compression.GZip as G
+import GHC.Float (castWord64ToDouble)
 
-import qualified Agda.TypeChecking.Monad.Benchmark as Bench
+import qualified Codec.Compression.Zstd as Z
 
-import Agda.TypeChecking.Serialise.Base
-import Agda.TypeChecking.Serialise.Instances ()
-
+import Agda.Interaction.Options.ProfileOptions qualified as Profile
 import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Monad.Benchmark qualified as Bench
+import Agda.TypeChecking.Serialise.Base
+import Agda.TypeChecking.Serialise.Instances () -- instances only
 
+import Agda.Utils.CompactRegion qualified as Compact
 import Agda.Utils.Hash
+import Agda.Utils.HashTable qualified as H
 import Agda.Utils.IORef
-import Agda.Utils.Lens
+import Agda.Utils.MinimalArray.Lifted qualified as AL
+import Agda.Utils.MinimalArray.MutableLifted qualified as ML
+import Agda.Utils.Monad ((<*!>))
+import Agda.Utils.Serialize
+import Agda.Utils.Tuple (second)
+import Agda.Utils.VarSet (VarSet)
 
-import Agda.Utils.Except
+import Agda.Utils.Impossible
 
--- Note that the Binary instance for Int writes 64 bits, but throws
--- away the 32 high bits when reading (at the time of writing, on
--- 32-bit machines). Word64 does not have these problems.
+#include "MachDeps.h"
 
 currentInterfaceVersion :: Word64
-currentInterfaceVersion = 20171006 * 10 + 0
+currentInterfaceVersion = 20261019 * 10 + 0
 
--- | Encodes something. To ensure relocatability file paths in
--- positions are replaced with module names.
+ifaceVersionSize :: Int
+ifaceVersionSize = SIZEOF_WORD64
 
-encode :: EmbPrj a => a -> TCM L.ByteString
+ifacePrefixSize :: Int
+ifacePrefixSize = 2 * hashSize + ifaceVersionSize
+
+type InterfacePrefix =
+  ( Hash     -- sourceHash
+  , Hash     -- fullHash
+  , Word64   -- interface version
+  )
+
+-- | Hash-consed encoding of a value.
+type Encoded =
+  ( Word32             -- index of root Node
+  , AL.Array Node
+  , AL.Array String
+  , AL.Array TL.Text
+  , AL.Array T.Text
+  , AL.Array Integer
+  , AL.Array VarSet
+  , AL.Array Double
+  )
+
+-- | Encodes something as a hash-consed tuple of arrays. To ensure relocatability, file paths in
+--   positions are replaced with module names.
+encode :: EmbPrj a => a -> TCM Encoded
 encode a = do
-    collectStats <- hasVerbosity "profile.serialize" 20
-    fileMod <- sourceToModule
-    newD@(Dict nD sD bD iD dD _tD
-      _nameD
-      _qnameD
-      nC sC bC iC dC tC
-      nameC
-      qnameC
-      stats _ _) <- liftIO $ emptyDict collectStats
-    root <- liftIO $ (`runReaderT` newD) $ do
-       icodeFileMod fileMod  -- Only fills absPathD from fileMod
-       icode a
-    nL <- benchSort $ l nD
-    sL <- benchSort $ l sD
-    bL <- benchSort $ l bD
-    iL <- benchSort $ l iD
-    dL <- benchSort $ l dD
-    -- Record reuse statistics.
-    verboseS "profile.sharing" 10 $ do
-      statistics "pointers" tC
-    verboseS "profile.serialize" 10 $ do
-      statistics "Integer"  iC
-      statistics "String"   sC
-      statistics "ByteString" bC
-      statistics "Double"   dC
-      statistics "Node"     nC
-      statistics "Shared Term" tC
-      statistics "A.QName"  qnameC
-      statistics "A.Name"  nameC
-    when collectStats $ do
-      stats <- Map.fromList . map (second toInteger) <$> do
-        liftIO $ H.toList stats
-      modifyStatistics $ Map.union stats
-    -- Encode hashmaps and root, and compress.
-    bits1 <- Bench.billTo [ Bench.Serialization, Bench.BinaryEncode ] $
-      return $!! B.encode (root, nL, sL, bL, iL, dL)
-    let compressParams = G.defaultCompressParams
-          { G.compressLevel    = G.bestSpeed
-          , G.compressStrategy = G.huffmanOnlyStrategy
-          }
-    cbits <- Bench.billTo [ Bench.Serialization, Bench.Compress ] $
-      return $!! G.compressWith compressParams bits1
-    let x = B.encode currentInterfaceVersion `L.append` cbits
-    return x
+  collectStats <- hasProfileOption Profile.Serialize
+  newD         <- liftIO $ emptyDict collectStats
+  root         <- liftIO $ (`runReaderT` newD) $ icode a
+
+  (nodeA, stringA, lTextA, sTextA, integerA, varSetA, doubleA) <-
+    Bench.billTo [Bench.Serialization, Bench.Sort] $ liftIO $ do
+      (,,,,,,) <$!> toArray (nodeD newD)
+               <*!> toArray (stringD newD)
+               <*!> toArray (lTextD newD)
+               <*!> toArray (sTextD newD)
+               <*!> toArray (integerD newD)
+               <*!> toArray (varSetD newD)
+               <*!> toArrayWith castWord64ToDouble (doubleD newD)
+
+  -- Record reuse statistics.
+  whenProfile Profile.Sharing $ do
+    statistics "pointers" (termC newD)
+  whenProfile Profile.Serialize $ do
+    statistics "Integer"     (integerC newD)
+    statistics "VarSet"      (varSetC newD)
+    statistics "Lazy Text"   (lTextC newD)
+    statistics "Strict Text" (sTextC newD)
+    statistics "String"      (stringC newD)
+    statistics "Double"      (doubleC newD)
+    statistics "Node"        (nodeC newD)
+    statistics "Shared Term" (termC newD)
+    statistics "A.QName"     (qnameC newD)
+    statistics "A.Name"      (nameC newD)
+  when collectStats $ do
+    stats <- map (second fromIntegral) <$> do
+      liftIO $ List.sort <$> H.toList (stats newD)
+    traverse_ (uncurry tickN) stats
+
+  pure (root, nodeA, stringA, lTextA, sTextA, integerA, varSetA, doubleA)
   where
-    l h = List.map fst . List.sortBy (compare `on` snd) <$> H.toList h
-    benchSort = Bench.billTo [Bench.Serialization, Bench.Sort] . liftIO
-    statistics :: String -> IORef FreshAndReuse -> TCM ()
-    statistics kind ioref = do
-      FreshAndReuse fresh reused <- liftIO $ readIORef ioref
+    toArray :: H.HashTableLU k Word32 -> IO (AL.Array k)
+    toArray = toArrayWith id
+
+    -- The 'Double' dictionary is keyed by bit patterns (see 'icodeDouble'),
+    -- so its keys have to be converted back to 'Double's here.
+    toArrayWith :: (k -> a) -> H.HashTableLU k Word32 -> IO (AL.Array a)
+    toArrayWith f tbl = do
+      size <- H.size tbl
+      arr <- ML.new size undefined
+      H.forAssocs tbl \k v -> ML.write arr (fromIntegral v) $! f k
+      ML.unsafeFreeze arr
+
+    statistics :: String -> FreshAndReuse -> TCM ()
+    statistics kind far = do
+      fresh <- liftIO $ getFresh far
+#ifdef DEBUG_SERIALISATION
+      reused <- liftIO $ getReuse far
+#endif
       tickN (kind ++ "  (fresh)") $ fromIntegral fresh
+#ifdef DEBUG_SERIALISATION
       tickN (kind ++ " (reused)") $ fromIntegral reused
+#endif
 
--- encode :: EmbPrj a => a -> TCM L.ByteString
--- encode a = do
---     fileMod <- sourceToModule
---     (x, shared, total) <- liftIO $ do
---       newD@(Dict nD sD iD dD _ _ _ _ _ stats _) <- emptyDict fileMod
---       root <- runReaderT (icode a) newD
---       nL <- l nD; sL <- l sD; iL <- l iD; dL <- l dD
---       (shared, total) <- readIORef stats
---       return (B.encode currentInterfaceVersion `L.append`
---               G.compress (B.encode (root, nL, sL, iL, dL)), shared, total)
---     verboseS "profile.sharing" 10 $ do
---       tickN "pointers (reused)" $ fromIntegral shared
---       tickN "pointers" $ fromIntegral total
---     return x
---   where
---   l h = List.map fst . List.sortBy (compare `on` snd) <$> H.toList h
+-- | Decode a hash-consed value. The result depends on the include path.
+decode :: EmbPrj a => Encoded -> MaybeT TCM a
+decode enc = stateSessionLensM lensModuleToSource \mf -> do
+  includes <- lift $ getIncludeDirs
+  arena    <- liftIO $ Compact.new (2 ^ 12) -- 4 KB blocks
 
--- | Decodes something. The result depends on the include path.
---
--- Returns 'Nothing' if the input does not start with the right magic
--- number or some other decoding error is encountered.
+  let compactElems :: AL.Array a -> IO (AL.Array a)
+      compactElems = AL.traverseIO' (Compact.add arena)
 
-decode :: EmbPrj a => L.ByteString -> TCM (Maybe a)
-decode s = do
-  mf   <- use stModuleToSource
-  incs <- getIncludeDirs
+  tryDecode $ do
+    let (r, nodeA, stringA, lTextA, sTextA, integerA, varSetA, doubleA) = enc
 
-  -- Note that B.runGetState and G.decompress can raise errors if the
-  -- input is malformed. The decoder is (intended to be) strict enough
-  -- to ensure that all such errors can be caught by the handler here.
+    stringA      <- compactElems stringA
+    lTextA       <- compactElems lTextA
+    sTextA       <- compactElems sTextA
+    integerA     <- compactElems integerA
+    varSetA      <- compactElems varSetA
+    doubleA      <- compactElems doubleA
+    filePathMemo <- H.empty
+    nodeMemo     <- ML.new (AL.size nodeA) MEEmpty
+    modFile      <- newIORef mf
+    let dec = Decode nodeMemo arena nodeA stringA lTextA sTextA integerA varSetA
+                     doubleA filePathMemo modFile includes
+    res <- runReaderT (value r) dec
+    mf  <- readIORef modFile
+    pure (res, mf)
+  -- -- "Compact" the interfaces (without breaking sharing) to
+  -- -- reduce the amount of memory that is traversed by the
+  -- -- garbage collector.
+  -- lift $ Bench.billTo [Bench.Deserialization, Bench.Compaction] $
+  --   liftIO $ C.getCompact <$!> C.compactWithSharing res
 
-  shared <- sharedFun
+getInterfacePrefix :: Interface -> InterfacePrefix
+getInterfacePrefix i =
+  (iSourceHash i, iFullHash i, currentInterfaceVersion)
 
-  (mf, r) <- liftIO $ E.handle (\(E.ErrorCall s) -> noResult s) $ do
+-- | Serialize an interface prefix + an encoded interface to a lazy bytestring.
+--   The result is lazy in order to avoid copying data when we prepend the
+--   prefix to the compressed interface bytestring.
+serializeEncodedInterface :: InterfacePrefix -> Encoded -> TCM LB.ByteString
+serializeEncodedInterface prefix i = do
+  let doCompress i = pure $! Z.compress 1 i -- we outline this to prevent let-lifting by GHC
+      {-# NOINLINE doCompress #-}           -- which could ruin the benchmark timing.
+  (prefix, i) <- Bench.billTo [Bench.Serialization, Bench.BinaryEncode] $ liftIO $
+                   (,) <$!> serialize prefix <*!> serialize i
+  i <- Bench.billTo [Bench.Serialization, Bench.Compress] $ doCompress i
+  pure $! LB.fromStrict prefix <> LB.fromStrict i
 
-    (ver, s, _) <- return $ runGetState B.get s 0
-    if ver /= currentInterfaceVersion
-     then noResult "Wrong interface version."
-     else do
+-- | Convert ErrorCall-s (which are assumed to be deserialization errors) to
+--   MaybeT TCM.
+tryDecode :: IO a -> MaybeT TCM a
+tryDecode act = MaybeT do
+  res <- liftIO ((Right <$!> act) `E.catch` \(E.ErrorCall err) -> pure (Left err))
+  case res of
+    Left err -> do
+      reportSLn "import.iface" 5 $ "Error when decoding interface file: " ++ err
+      pure Nothing
+    Right a -> pure $ Just a
 
-      ((r, nL, sL, bL, iL, dL), s, _) <-
-        return $ runGetState B.get (G.decompress s) 0
-      if s /= L.empty
-         -- G.decompress seems to throw away garbage at the end, so
-         -- the then branch is possibly dead code.
-       then noResult "Garbage at end."
-       else do
+-- | Decode an interface from a bytestring. We check the stored interface
+--   version against the current interface version, but we don't do anything
+--   with the hash prefix.
+decodeInterface :: ByteString -> MaybeT TCM Interface
+decodeInterface bstr = decode =<< deserializeInterface bstr
 
-        st <- St (ar nL) (ar sL) (ar bL) (ar iL) (ar dL)
-                <$> liftIO H.new
-                <*> return mf <*> return incs
-                <*> return shared
-        (r, st) <- runStateT (runExceptT (value r)) st
-        return (Just (modFile st), r)
+deserializeInterface :: ByteString -> MaybeT TCM Encoded
+deserializeInterface bstr = do
+  let decompressionError =
+        tryDecode $ E.throwIO $ E.ErrorCall "decompression error"
+  let (prefix, i) = B.splitAt ifacePrefixSize bstr
+  ((_, _, ver) :: InterfacePrefix) <- tryDecode $ deserialize prefix
+  if ver /= currentInterfaceVersion then
+    decompressionError
+  else case Z.decompress i of
+    Z.Skip         -> decompressionError
+    Z.Error e      -> decompressionError
+    Z.Decompress i -> tryDecode $ deserialize i
 
-  case mf of
-    Nothing -> return ()
-    Just mf -> stModuleToSource .= mf
+--------------------------------------------------------------------------------
 
-  case r of
-    Right x   -> return (Just x)
-    Left  err -> do
-      reportSLn "import.iface" 5 $ "Error when decoding interface file"
-      -- Andreas, 2014-06-11 deactivated debug printing
-      -- in order to get rid of dependency of Serialize on TCM.Pretty
-      -- reportSDoc "import.iface" 5 $
-      --   text "Error when decoding interface file:"
-      --   $+$ nest 2 (prettyTCM err)
-      return Nothing
+-- | Encodes an interface. To ensure relocatability file paths in positions are
+-- replaced with module names.
+-- A hash-consed and compacted interface is returned.
+encodeFile :: FilePath -> Interface -> TCM Interface
+encodeFile f i = do
+  let prefix = getInterfacePrefix i
+  iEncoded <- encode i
+  bstr <- serializeEncodedInterface prefix iEncoded
+  i <- Bench.billTo [Bench.Deserialization] $
+    maybe __IMPOSSIBLE__ pure =<< runMaybeT (decode @Interface iEncoded)
 
-  where
-  ar l = listArray (0, List.genericLength l - 1) l
+  -- reload interface from the bytestring instead
+  -- i <- Bench.billTo [Bench.Deserialization] $
+  --     maybe __IMPOSSIBLE__ pure =<<
+  --       runMaybeT (decode =<< deserializeInterface (LB.toStrict bstr))
 
-  noResult s = return (Nothing, Left $ GenericError s)
-
-encodeInterface :: Interface -> TCM L.ByteString
-encodeInterface i = L.append hashes <$> encode i
-  where
-    hashes :: L.ByteString
-    hashes = B.runPut $ B.put (iSourceHash i) >> B.put (iFullHash i)
-
--- | Encodes something. To ensure relocatability file paths in
--- positions are replaced with module names.
-
-encodeFile :: FilePath -> Interface -> TCM ()
-encodeFile f i = liftIO . L.writeFile f =<< encodeInterface i
-
--- | Decodes something. The result depends on the include path.
---
--- Returns 'Nothing' if the file does not start with the right magic
--- number or some other decoding error is encountered.
-
-decodeInterface :: L.ByteString -> TCM (Maybe Interface)
-decodeInterface s = decode $ L.drop 16 s
-
-decodeHashes :: L.ByteString -> Maybe (Hash, Hash)
-decodeHashes s
-  | L.length s < 16 = Nothing
-  | otherwise       = Just $ B.runGet getH $ L.take 16 s
-  where getH = (,) <$> B.get <*> B.get
+  liftIO $ createDirectoryIfMissing True (takeDirectory f)
+  liftIO $ LB.writeFile f bstr
+  pure i
 
 decodeFile :: FilePath -> TCM (Maybe Interface)
-decodeFile f = decodeInterface =<< liftIO (L.readFile f)
+decodeFile f = runMaybeT (decodeInterface =<< liftIO (B.readFile f))
 
--- | Store a 'SourceToModule' (map from 'AbsolutePath' to 'TopLevelModuleName')
---   as map from 'AbsolutePath' to 'Int32', in order to directly get the identifiers
---   from absolute pathes rather than going through top level module names.
-icodeFileMod
-  :: SourceToModule
-     -- ^ Maps file names to the corresponding module names.
-     --   Must contain a mapping for every file name that is later encountered.
-  -> S ()
-icodeFileMod fileMod = do
-  hmap <- asks absPathD
-  forM_ (Map.toList fileMod) $ \ (absolutePath, topLevelModuleName) -> do
-    i <- icod_ topLevelModuleName
-    liftIO $ H.insert hmap absolutePath i
+deserializeHashes :: ByteString -> IO (Maybe (Hash, Hash))
+deserializeHashes bstr =
+  (Just <$!> deserialize bstr)
+  `E.catch` \(E.ErrorCall _) -> pure Nothing

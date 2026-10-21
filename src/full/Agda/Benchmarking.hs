@@ -1,10 +1,4 @@
-{-# LANGUAGE CPP                       #-}
-{-# LANGUAGE IncoherentInstances       #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-
-#if __GLASGOW_HASKELL__ <= 708
-{-# LANGUAGE OverlappingInstances #-}
-#endif
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
@@ -12,19 +6,21 @@
 
 module Agda.Benchmarking where
 
+import Control.DeepSeq
 import qualified Control.Exception as E
 
-import Data.IORef
+import GHC.Generics (Generic)
 
 import System.IO.Unsafe
 
-import Agda.Syntax.Concrete.Name (TopLevelModuleName)
-import Agda.Syntax.Concrete.Pretty
 import Agda.Syntax.Abstract.Name
+import Agda.Syntax.TopLevelModuleName (TopLevelModuleName)
+
 import Agda.Utils.Benchmark (MonadBench(..))
 import qualified Agda.Utils.Benchmark as B
+import qualified Agda.Utils.IORef.Strict as Strict
 import Agda.Utils.Null
-import Agda.Utils.Pretty
+import Agda.Syntax.Common.Pretty
 
 -- | Phases to allocate CPU time to.
 data Phase
@@ -40,8 +36,10 @@ data Phase
     -- ^ Type checking and translation to internal syntax.
   | Termination
     -- ^ Termination checking.
+  | Polarity
+    -- ^ Polarity computation.
   | Positivity
-    -- ^ Positivity checking and polarity computation.
+    -- ^ Positivity checking.
   | Injectivity
     -- ^ Injectivity checking.
   | ProjectionLikeness
@@ -53,7 +51,11 @@ data Phase
   | Serialization
     -- ^ Writing interface files.
   | DeadCode
-    -- ^ Deac code elimination.
+    -- ^ Dead code elimination.
+  | InterfaceInstantiateFull
+    -- ^ Unfolding all metas before serialization.
+  | DeadCodeReachable
+    -- ^ Dead code reachable definitions subphase.
   | Graph
     -- ^ Subphase for 'Termination'.
   | RecCheck
@@ -68,6 +70,8 @@ data Phase
     -- ^ Subphase for 'Termination'.
   | ModuleName
     -- ^ Subphase for 'Import'.
+  | Compaction
+    -- ^ Subphase for 'Deserialization': compacting interfaces.
   | BuildInterface
     -- ^ Subphase for 'Serialization'.
   | Sort
@@ -90,18 +94,42 @@ data Phase
     -- ^ Subphase for 'Typing': checking the RHS
   | TypeSig
     -- ^ Subphase for 'Typing': checking a type signature
+  | Generalize
+    -- ^ Subphase for 'Typing': generalizing over `variable`s
+  | InstanceSearch
+    -- ^ Subphase for 'Typing': solving instance goals
+  | Reflection
+    -- ^ Subphase for 'Typing': evaluating elaborator reflection
+  | ApplySection
+    -- ^ Subphase for 'Typing': copying definitions for a module macro
+  | InitialCandidates
+    -- ^ Subphase for 'InstanceSearch': collecting initial candidates
+  | FilterCandidates
+    -- ^ Subphase for 'InstanceSearch': checking candidates for validity
+  | OrderCandidates
+    -- ^ Subphase for 'InstanceSearch': ordering candidates for specificity
+  | CheckOverlap
+    -- ^ Subphase for 'InstanceSearch': reducing overlapping instances
   | UnifyIndices
     -- ^ Subphase for 'CheckLHS': unification of the indices
-  | InverseScopeLookup
-    -- ^ Pretty printing names.
+  | InverseNameLookup
+  | InverseModuleLookup
+  | InverseInScope
+  | InverseNameModuleRecompute
+  | InverseInScopeRecompute
   | TopModule TopLevelModuleName
+  | CubicalLeftInversion
+    -- ^ Generating left inverses in LHS unification in cubical or cubical-compatible mode.
+  | Typeclass QName
   | Definition QName
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Generic)
 
 instance Pretty Phase where
   pretty (TopModule m)  = pretty m
   pretty (Definition q) = pretty q
   pretty a = text (show a)
+
+instance NFData Phase
 
 type Benchmark = B.Benchmark Phase
 type Account   = B.Account Phase
@@ -125,12 +153,13 @@ isInternalAccount _                  = True
 
 -- | Global variable to store benchmark statistics.
 {-# NOINLINE benchmarks #-}
-benchmarks :: IORef Benchmark
-benchmarks = unsafePerformIO $ newIORef empty
+benchmarks :: Strict.IORef Benchmark
+benchmarks = unsafePerformIO $ Strict.newIORef empty
 
-instance MonadBench Phase IO where
-  getBenchmark = readIORef benchmarks
-  putBenchmark = writeIORef benchmarks
+instance MonadBench IO where
+  type BenchPhase IO = Phase
+  getBenchmark = Strict.readIORef benchmarks
+  putBenchmark = Strict.writeIORef benchmarks
   finally = E.finally
 
 -- | Benchmark an IO computation and bill it to the given account.
@@ -140,3 +169,4 @@ billToIO = B.billTo
 -- | Benchmark a pure computation and bill it to the given account.
 billToPure :: Account -> a -> a
 billToPure acc a = unsafePerformIO $ billToIO acc $ return a
+{-# NOINLINE billToPure #-}

@@ -1,16 +1,9 @@
-{-# OPTIONS --cubical #-}
+{-# OPTIONS --guardedness --cubical #-}
 
 module Issue2799 where
 
 open import Agda.Primitive.Cubical
-
-postulate
-  PathP : ∀ {ℓ} (A : I → Set ℓ) → A i0 → A i1 → Set ℓ
-
-{-# BUILTIN PATHP        PathP     #-}
-
-_≡_ : ∀ {ℓ} {A : Set ℓ} → A → A → Set ℓ
-_≡_ {A = A} = PathP (λ _ → A)
+open import Agda.Builtin.Cubical.Path
 
 record Stream (A : Set) : Set where
   coinductive

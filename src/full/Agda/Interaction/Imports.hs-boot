@@ -1,9 +1,12 @@
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.Interaction.Imports where
 
-import Agda.Syntax.Abstract.Name    ( ModuleName )
-import Agda.Syntax.Scope.Base       ( Scope )
-import Agda.TypeChecking.Monad.Base ( TCM )
-import Data.Map                     ( Map )
+import Data.Map                       ( Map )
 
-scopeCheckImport :: ModuleName -> TCM (ModuleName, Map ModuleName Scope)
+import Agda.Syntax.Abstract.Name      ( ModuleName )
+import Agda.Syntax.Scope.Base         ( Scope )
+import Agda.Syntax.TopLevelModuleName ( TopLevelModuleName )
+import Agda.TypeChecking.Monad.Base   ( TCM )
+
+scopeCheckFileImport :: TopLevelModuleName -> TCM (ModuleName, Map ModuleName Scope)

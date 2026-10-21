@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 {- | Sparse matrices.
 
@@ -37,6 +37,7 @@ module Agda.Termination.SparseMatrix
   , add
   , intersectWith
   , interAssocWith
+  , mapNonZeros, mapDiagonalNonZeros
   , mul
   , transpose
   , Diagonal(..)
@@ -49,30 +50,28 @@ module Agda.Termination.SparseMatrix
   ) where
 
 import Data.Array
-import Data.Function
+import Data.Function (on)
 import qualified Data.List as List
 import Data.Maybe
-import Data.Monoid
 
-import Data.Foldable (Foldable)
+
 import qualified Data.Foldable as Fold
-import Data.Traversable (Traversable)
 
 import qualified Text.PrettyPrint.Boxes as Boxes
 
 import Agda.Termination.Semiring (HasZero(..), Semiring)
 import qualified Agda.Termination.Semiring as Semiring
 
-import Agda.Utils.Functor
+
 import Agda.Utils.List
 import Agda.Utils.Maybe
-import Agda.Utils.Monad
+
 import Agda.Utils.PartialOrd
-import Agda.Utils.Pretty hiding (isEmpty)
+import Agda.Syntax.Common.Pretty hiding (isEmpty)
 import Agda.Utils.Tuple
 
-#include "undefined.h"
 import Agda.Utils.Impossible
+import Agda.Utils.Function (applyWhen)
 
 ------------------------------------------------------------------------
 -- * Basic data types
@@ -94,11 +93,12 @@ data MIx i = MIx
   }
   deriving (Eq, Ord, Show, Ix)
 
--- | Convert a 'Size' to a set of bounds suitable for use with
---   the matrices in this module.
-
-toBounds :: Num i => Size i -> (MIx i, MIx i)
-toBounds sz = (MIx { row = 1, col = 1 }, MIx { row = rows sz, col = cols sz })
+-- UNUSED Liang-Ting Chen 2019-07-15
+---- | Convert a 'Size' to a set of bounds suitable for use with
+----   the matrices in this module.
+--
+--toBounds :: Num i => Size i -> (MIx i, MIx i)
+--toBounds sz = (MIx { row = 1, col = 1 }, MIx { row = rows sz, col = cols sz })
 
 -- | Type of matrices, parameterised on the type of values.
 --
@@ -191,23 +191,24 @@ blowUpSparseVec zero n l = aux 1 l
           | i == j         = b    : aux (i + 1) l'
           | otherwise      = zero : aux (i + 1) l
 
--- Older implementation without replicate.
-blowUpSparseVec' :: (Ord i, Num i, Enum i) => b -> i -> [(i,b)] -> [b]
-blowUpSparseVec' zero n l = aux 1 l
-  where aux i [] | i > n = []
-                 | otherwise = zero : aux (i+1) []
-        aux i ((j,b):l) | i <= n && j == i = b : aux (succ i) l
-        aux i ((j,b):l) | i <= n && j >= i = zero : aux (succ i) ((j,b):l)
-        aux i l = __IMPOSSIBLE__
-          -- error $ "blowUpSparseVec (n = " ++ show n ++ ") aux i=" ++ show i ++ " j=" ++ show (fst (head l)) ++ " length l = " ++ show (length l)
-
+-- UNUSED Liang-Ting Chen 2019-07-15
+---- Older implementation without replicate.
+--blowUpSparseVec' :: (Ord i, Num i, Enum i) => b -> i -> [(i,b)] -> [b]
+--blowUpSparseVec' zero n l = aux 1 l
+--  where aux i [] | i > n = []
+--                 | otherwise = zero : aux (i+1) []
+--        aux i ((j,b):l) | i <= n && j == i = b : aux (succ i) l
+--        aux i ((j,b):l) | i <= n && j >= i = zero : aux (succ i) ((j,b):l)
+--        aux i l = __IMPOSSIBLE__
+--          -- error $ "blowUpSparseVec (n = " ++ show n ++ ") aux i=" ++ show i ++ " j=" ++ show (fst (head l)) ++ " length l = " ++ show (length l)
+--
 -- | Converts a matrix to a list of row lists.
 --   @O(size)@ where @size = rows × cols@.
 
 toLists :: (Integral i, HasZero b) => Matrix i b -> [[b]]
 toLists m@(Matrix size@(Size nrows ncols) _) =
     blowUpSparseVec emptyRow nrows $
-      map (mapSnd (blowUpSparseVec zeroElement ncols)) $ toSparseRows m
+      map (second (blowUpSparseVec zeroElement ncols)) $ toSparseRows m
   where
     emptyRow = List.genericReplicate ncols zeroElement
 
@@ -239,7 +240,14 @@ class Diagonal m e | m -> e where
 instance (Integral i, HasZero b) => Diagonal (Matrix i b) b where
   diagonal (Matrix (Size r c) m) =
     blowUpSparseVec zeroElement (min r c) $
-      mapMaybe (\ ((MIx i j), b) -> if i==j then Just (i,b) else Nothing) m
+      mapMaybe (\ (MIx i j, b) -> if i == j then Just (i, b) else Nothing) m
+
+-- | Apply the given function to the non-zero diagonal elements of a matrix.
+--
+--   @O(n)@ where @n@ is the number of non-zero elements in the matrix.
+
+mapDiagonalNonZeros :: (Integral i, HasZero a) => (a -> a) -> Matrix i a -> Matrix i a
+mapDiagonalNonZeros f = mapNonZeros \ r c -> applyWhen (r == c) f
 
 -- | Transposable things.
 
@@ -264,8 +272,19 @@ instance Ord i => Transpose (Matrix i b) where
   transpose (Matrix size m) =
     Matrix (transpose size) $
       List.sortBy (compare `on` fst) $
-        map (mapFst transpose) m
+        map (first transpose) m
 
+-- | Apply the given function to all non-zero elements.
+--
+--   @O(n)@ where @n@ is the number of non-zero elements in the matrix.
+
+mapNonZeros :: forall i a b. HasZero b => (i -> i -> a -> b) -> Matrix i a -> Matrix i b
+mapNonZeros f (Matrix size m) = Matrix size $ mapMaybe f' m
+  where
+    f' :: (MIx i, a) -> Maybe (MIx i, b)
+    f' (i@(MIx r c), a) = if b == zeroElement then Nothing else Just (i, b)
+      where
+        b = f r c a
 
 -- | General pointwise combination function for association lists.
 --   @O(n1 + n2)@ where @ni@ is the number of non-zero element in matrix @i@.
@@ -401,7 +420,7 @@ instance (Ord i, PartialOrd a) => PartialOrd (Matrix i a) where
       both    = comparable
       -- The zero element of the result sparse matrix is the
       -- neutral element of the monoid.
-      trivial = (==mempty)
+      trivial = (== mempty)
 
 ------------------------------------------------------------------------
 -- Modifying matrices

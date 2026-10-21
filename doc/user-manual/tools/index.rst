@@ -9,10 +9,15 @@ Tools
    :maxdepth: 2
 
    auto
+   cabal-flags
    command-line-options
    compilers
+   debugging
    emacs-mode
    literate-programming
    generating-html
    generating-latex
+   interface-files
    package-system
+   performance
+   search-about

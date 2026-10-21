@@ -1,133 +1,312 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+{-# LANGUAGE MagicHash #-}
 
 module Agda.TypeChecking.Monad.Trace where
 
 import Prelude hiding (null)
 
-import Control.Monad.Reader
+import Control.Monad.Except         ( ExceptT  (ExceptT  ), runExceptT   , throwError )
+import Control.Monad.Reader         ( ReaderT  (ReaderT  ), runReaderT   )
+import Control.Monad.State          ( StateT   (StateT   ), runStateT    )
+import Control.Monad.Trans.Identity ( IdentityT(IdentityT), runIdentityT )
+import Control.Monad.Trans.Maybe    ( MaybeT   (MaybeT   ), runMaybeT    )
+import Control.Monad.Writer         ( WriterT  (WriterT  ), runWriterT   )
 
-import {-# SOURCE #-} Agda.Interaction.Highlighting.Generate
-  (highlightAsTypeChecked)
+import qualified Data.Set as Set
 
+import Agda.Syntax.Common.Pretty
+import Agda.Syntax.Parser (PM, runPMIO)
 import Agda.Syntax.Position
+import qualified Agda.Syntax.Position as P
+
+import Agda.Interaction.Response
+import Agda.Interaction.Highlighting.Precise
+import Agda.Interaction.Highlighting.Range (rToR, minus)
+
 import Agda.TypeChecking.Monad.Base
+  hiding (ModuleInfo, MetaInfo, Primitive, Constructor, Record, Function, Datatype)
 import Agda.TypeChecking.Monad.Debug
-import Agda.TypeChecking.Monad.Options
+import Agda.TypeChecking.Monad.State
+import Agda.TypeChecking.Warnings (warning)
 
 import Agda.Utils.Function
-import Agda.Utils.Maybe
-import qualified Agda.Utils.Maybe.Strict as Strict
 import Agda.Utils.Monad
 import Agda.Utils.Null
-import Agda.Utils.Pretty (prettyShow)
 
-#include "undefined.h"
-import Agda.Utils.Impossible
+import Agda.Utils.StrictReader qualified as Strict
+import Agda.Utils.StrictWriter qualified as Strict
+import Agda.Utils.StrictState  qualified as Strict
 
 ---------------------------------------------------------------------------
 -- * Trace
 ---------------------------------------------------------------------------
 
-interestingCall :: Closure Call -> Bool
-interestingCall cl = case clValue cl of
+interestingCall :: Call -> Bool
+interestingCall = \case
     InferVar{}              -> False
     InferDef{}              -> False
     CheckArguments _ [] _ _ -> False
     SetRange{}              -> False
     NoHighlighting{}        -> False
-    _                       -> True
-
-traceCallM :: (MonadTCM tcm, MonadDebug tcm) => tcm Call -> tcm a -> tcm a
-traceCallM mkCall m = flip traceCall m =<< mkCall
-
--- | Record a function call in the trace.
-
--- RULE left-hand side too complicated to desugar
--- {-# SPECIALIZE traceCall :: Call -> TCM a -> TCM a #-}
-traceCall :: (MonadTCM tcm, MonadDebug tcm) => Call -> tcm a -> tcm a
-traceCall mkCall m = do
-  let call      = mkCall
-      callRange = getRange call
-  -- Andreas, 2016-09-13 issue #2177
-  -- Since the fix of #2092 we may report an error outside the current file.
-  -- (For instance, if we import a module which then happens to have the
-  -- wrong name.)
-  -- Thus, we no longer crash, but just report the alien range.
-  -- -- Andreas, 2015-02-09 Make sure we do not set a range
-  -- -- outside the current file
-  verboseS "check.ranges" 90 $
-    Strict.whenJust (rangeFile callRange) $ \f -> do
-      currentFile <- asks envCurrentPath
-      when (currentFile /= Just f) $ do
-        reportSLn "check.ranges" 90 $
-          prettyShow call ++
-          " is setting the current range to " ++ show callRange ++
-          " which is outside of the current file " ++ show currentFile
-  cl <- liftTCM $ buildClosure call
-  let trace = local $ foldr (.) id $
-        [ \e -> e { envCall = Just cl } | interestingCall cl ] ++
-        [ \e -> e { envHighlightingRange = callRange }
-          | callRange /= noRange && highlightCall call || isNoHighlighting call ] ++
-        [ \e -> e { envRange = callRange } | callRange /= noRange ]
-  wrap <- ifM (do l <- envHighlightingLevel <$> ask
-                  return (l == Interactive && highlightCall call))
-              (do oldRange <- envHighlightingRange <$> ask
-                  return $ highlightAsTypeChecked oldRange callRange)
-              (return id)
-  wrap $ trace m
-  where
-  -- | Should the given call trigger interactive highlighting?
-  highlightCall call = case call of
+    -- Andreas, 2019-08-07, expanded catch-all pattern.
+    -- The previous presence of a catch-all raises the following question:
+    -- are all of the following really interesting?
     CheckClause{}             -> True
+    CheckLHS{}                -> True
     CheckPattern{}            -> True
+    CheckPatternLinearityType{}  -> True
+    CheckPatternLinearityValue{} -> True
     CheckLetBinding{}         -> True
     InferExpr{}               -> True
     CheckExprCall{}           -> True
     CheckDotPattern{}         -> True
-    CheckPatternShadowing{}   -> True
     IsTypeCall{}              -> True
     IsType_{}                 -> True
-    InferVar{}                -> True
-    InferDef{}                -> True
     CheckArguments{}          -> True
+    CheckMetaSolution{}       -> True
+    CheckTargetType{}         -> True
     CheckDataDef{}            -> True
     CheckRecDef{}             -> True
     CheckConstructor{}        -> True
-    CheckFunDef{}             -> True
+    CheckIApplyConfluence{}   -> True
+    CheckLocalRewriteConstraint{} -> True
+    CheckConArgFitsIn{}       -> True
+    CheckFunDefCall{}         -> True
     CheckPragma{}             -> True
     CheckPrimitive{}          -> True
     CheckIsEmpty{}            -> True
+    CheckConfluence{}         -> True
+    CheckModuleParameters{}   -> True
     CheckWithFunctionType{}   -> True
     CheckSectionApplication{} -> True
-    ScopeCheckExpr{}          -> False
-    ScopeCheckDeclaration{}   -> False
-    ScopeCheckLHS{}           -> False
-    NoHighlighting{}          -> True
-    CheckProjection{}         -> False
-    SetRange{}                -> False
-    ModuleContents{}          -> False
+    CheckNamedWhere{}         -> True
+    ScopeCheckExpr{}          -> True
+    ScopeCheckDeclaration{}   -> True
+    ScopeCheckLHS{}           -> True
+    CheckProjection{}         -> True
+    ModuleContents{}          -> True
 
-  isNoHighlighting NoHighlighting{} = True
-  isNoHighlighting _                = False
+class (MonadTCEnv m, ReadTCState m) => MonadTrace m where
 
--- RULE left-hand side too complicated to desugar
--- {-# SPECIALIZE traceCallCPS :: Call -> (r -> TCM a) -> ((r -> TCM a) -> TCM b) -> TCM b #-}
-traceCallCPS :: (MonadTCM tcm, MonadDebug tcm)
-             => Call -> (r -> tcm a) -> ((r -> tcm a) -> tcm b) -> tcm b
-traceCallCPS mkCall ret cc = traceCall mkCall (cc ret)
+  {-# INLINE traceCall #-}
+  -- | Record a function call in the trace.
+  traceCall :: Call -> m a -> m a
+  traceCall call m = do
+    cl <- buildClosure call
+    traceClosureCall cl m
 
--- RULE left-hand side too complicated to desugar
--- {-# SPECIALIZE traceCallCPS_ :: Call -> TCM a -> (TCM a -> TCM b) -> TCM b #-}
-traceCallCPS_ :: (MonadTCM tcm, MonadDebug tcm)
-              => Call -> tcm a -> (tcm a -> tcm b) -> tcm b
-traceCallCPS_ mkCall ret cc =
-    traceCallCPS mkCall (const ret) (\k -> cc $ k ())
+  {-# INLINE traceCallM #-}
+  traceCallM :: m Call -> m a -> m a
+  traceCallM call m = flip traceCall m =<< call
 
-getCurrentRange :: TCM Range
-getCurrentRange = asks envRange
+  {-# INLINE traceCallCPS #-}
+  -- | Like 'traceCall', but resets 'envCall' and the current ranges to the
+  --   previous values in the continuation.
+  --
+  traceCallCPS :: Call -> ((a -> m b) -> m b) -> ((a -> m b) -> m b)
+  traceCallCPS call k ret = do
+
+    -- Save current call and ranges.
+    e <- askTC
+    let mcall = e ^. eCall
+        r     = e ^. eRange
+        hr    = e ^. eHighlightingRange
+
+    -- Run given computation under given call.
+    traceCall call $ k $ \a -> do
+
+      -- Restore previous call and ranges for the continuation.
+      localTC (set eCall mcall . set eRange r . set eHighlightingRange hr) $ ret a
+
+  traceClosureCall :: Closure Call -> m a -> m a
+
+  -- | Lispify and print the given highlighting information.
+  printHighlightingInfo :: RemoveTokenBasedHighlighting -> HighlightingInfo -> m ()
+
+  default printHighlightingInfo
+    :: (MonadTrans t, MonadTrace n, t n ~ m)
+    => RemoveTokenBasedHighlighting -> HighlightingInfo -> m ()
+  printHighlightingInfo r i = lift $ printHighlightingInfo r i
+
+traceCallCPS' :: MonadTrace m => Call -> (m b -> m b) -> m b -> m b
+traceCallCPS' c k ret = traceCallCPS c (\ret -> k (ret ())) (\() -> ret)
+
+instance MonadTrace m => MonadTrace (IdentityT m) where
+  traceClosureCall c f = IdentityT $ traceClosureCall c $ runIdentityT f
+
+instance MonadTrace m => MonadTrace (MaybeT m) where
+  traceClosureCall c f = MaybeT $ traceClosureCall c $ runMaybeT f
+
+instance MonadTrace m => MonadTrace (ReaderT r m) where
+  traceClosureCall c f = ReaderT $ \r -> traceClosureCall c $ runReaderT f r
+
+instance MonadTrace m => MonadTrace (StateT s m) where
+  traceClosureCall c f = StateT (traceClosureCall c . runStateT f)
+
+instance (MonadTrace m, Monoid w) => MonadTrace (WriterT w m) where
+  traceClosureCall c f = WriterT $ traceClosureCall c $ runWriterT f
+
+instance MonadTrace m => MonadTrace (Strict.ReaderT r m) where
+  traceClosureCall c f = Strict.ReaderT $ \r -> traceClosureCall c $ Strict.runReaderT f r
+
+instance MonadTrace m => MonadTrace (Strict.StateT s m) where
+  traceClosureCall c f = Strict.StateT (traceClosureCall c . Strict.runStateT# f)
+
+instance (MonadTrace m, Monoid w) => MonadTrace (Strict.WriterT w m) where
+  traceClosureCall c (Strict.WriterT f) = Strict.WriterT $ traceClosureCall c f
+
+instance MonadTrace m => MonadTrace (ExceptT e m) where
+  traceClosureCall c f = ExceptT $ traceClosureCall c $ runExceptT f
+
+instance MonadTrace TCM where
+  traceClosureCall cl m = do
+    -- Andreas, 2016-09-13 issue #2177
+    -- Since the fix of #2092 we may report an error outside the current file.
+    -- (For instance, if we import a module which then happens to have the
+    -- wrong name.)
+
+    -- Compute update to 'Range' and 'Call' components of 'TCEnv'.
+    let withCall = localTC $ foldr (.) id $ concat $
+          [ [ set eCall (Just cl) | interestingCall call ]
+          , [ set eHighlightingRange callRange | callHasRange && highlightCall || isNoHighlighting ]
+          , [ set eRange callRange  | callHasRange ]
+          ]
+
+    -- For interactive highlighting, also wrap computation @m@ in 'highlightAsTypeChecked':
+    ifNotM (pure highlightCall `and2M` (Interactive ==) <$> viewTC eHighlightingLevel)
+      {-then-} (withCall m)
+      {-else-} $ do
+        oldRange <- viewTC eHighlightingRange
+        highlightAsTypeChecked oldRange callRange $
+          withCall m
+    where
+    call = clValue cl
+    callRange = getRange call
+    callHasRange = not $ null callRange
+
+    -- Should the given call trigger interactive highlighting?
+    highlightCall = case call of
+      CheckClause{}             -> True
+      CheckLHS{}                -> True
+      CheckPattern{}            -> True
+      CheckPatternLinearityType{}  -> False
+      CheckPatternLinearityValue{} -> False
+      CheckLetBinding{}         -> True
+      InferExpr{}               -> True
+      CheckExprCall{}           -> True
+      CheckDotPattern{}         -> True
+      IsTypeCall{}              -> True
+      IsType_{}                 -> True
+      InferVar{}                -> True
+      InferDef{}                -> True
+      CheckArguments{}          -> True
+      CheckMetaSolution{}       -> False
+      CheckTargetType{}         -> False
+      CheckDataDef{}            -> True
+      CheckRecDef{}             -> True
+      CheckConstructor{}        -> True
+      CheckConArgFitsIn{}       -> False
+      CheckFunDefCall _ _ h     -> h
+      CheckPragma{}             -> True
+      CheckPrimitive{}          -> True
+      CheckIsEmpty{}            -> True
+      CheckConfluence{}         -> False
+      CheckIApplyConfluence{}   -> False
+      CheckLocalRewriteConstraint{} -> False
+      CheckModuleParameters{}   -> False
+      CheckWithFunctionType{}   -> True
+      CheckSectionApplication{} -> True
+      CheckNamedWhere{}         -> False
+      ScopeCheckExpr{}          -> False
+      ScopeCheckDeclaration{}   -> False
+      ScopeCheckLHS{}           -> False
+      NoHighlighting{}          -> True
+      CheckProjection{}         -> False
+      SetRange{}                -> False
+      ModuleContents{}          -> False
+
+    isNoHighlighting = case call of
+      NoHighlighting{} -> True
+      _ -> False
+
+  printHighlightingInfo remove info = do
+    modToSrc <- useSession lensModuleToSource
+    method   <- viewTC eHighlightingMethod
+    reportSDoc "highlighting" 90 $ pure $ vcat
+      [ "Printing highlighting info:"
+      , nest 2 $ (text . show) info
+      , "File modules:"
+      , nest 2 $ pretty modToSrc
+      ]
+    unless (null info) $ do
+      appInteractionOutputCallback $
+          Resp_HighlightingInfo info remove method modToSrc Nothing
+
+
+getCurrentRange :: MonadTCEnv m => m Range
+getCurrentRange = viewTC eRange
 
 -- | Sets the current range (for error messages etc.) to the range
 --   of the given object, if it has a range (i.e., its range is not 'noRange').
-setCurrentRange :: HasRange x => x -> TCM a -> TCM a
+setCurrentRange :: (MonadTrace m, HasRange x) => x -> m a -> m a
 setCurrentRange x = applyUnless (null r) $ traceCall $ SetRange r
   where r = getRange x
+
+-- | @highlightAsTypeChecked rPre r m@ runs @m@ and returns its
+--   result. Additionally, some code may be highlighted:
+--
+-- * If @r@ is non-empty and not a sub-range of @rPre@ (after
+--   'P.continuousPerLine' has been applied to both): @r@ is
+--   highlighted as being type-checked while @m@ is running (this
+--   highlighting is removed if @m@ completes /successfully/).
+--
+-- * Otherwise: Highlighting is removed for @rPre - r@ before @m@
+--   runs, and if @m@ completes successfully, then @rPre - r@ is
+--   highlighted as being type-checked.
+
+highlightAsTypeChecked
+  :: (MonadTrace m)
+  => Range   -- ^ @rPre@
+  -> Range   -- ^ @r@
+  -> m a
+  -> m a
+highlightAsTypeChecked rPre r m
+  | r /= noRange && delta == rPre' = wrap r'    highlight clear
+  | otherwise                      = wrap delta clear     highlight
+  where
+  rPre'     = rToR (P.continuousPerLine rPre)
+  r'        = rToR (P.continuousPerLine r)
+  delta     = rPre' `minus` r'
+  clear     = mempty
+  highlight = parserBased { otherAspects = Set.singleton TypeChecks }
+
+  wrap rs x y = do
+    p rs x
+    v <- m
+    p rs y
+    return v
+    where
+    p rs x = printHighlightingInfo KeepHighlighting (singleton rs x)
+
+---------------------------------------------------------------------------
+-- * Warnings in the parser
+---------------------------------------------------------------------------
+
+-- | Running the Parse monad, raising parser warnings.
+
+runPM :: PM a -> TCM a
+runPM m = do
+  (res, ws) <- runPMIO m
+  forM_ ws \ w -> setCurrentRange w $ warning $ ParseWarning w
+  case res of
+    Left  e -> throwError $ ParserError e
+    Right a -> return a
+
+-- | Running the Parse monad, dropping parser warnings.
+
+runPMDropWarnings :: PM a -> TCM a
+runPMDropWarnings m = do
+  (res, _ws) <- runPMIO m
+  case res of
+    Left  e -> throwError $ ParserError e
+    Right a -> return a

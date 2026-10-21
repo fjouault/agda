@@ -1,11 +1,14 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | More monoids.
 
-module Agda.Utils.Monoid where
+module Agda.Utils.Monoid
+  ( MaxNat(..)
+  , Fwd, pattern Fwd, appFwd
+  )
+  where
 
-import Data.Semigroup (Semigroup(..))
-import Data.Monoid (Monoid(..))
+import Data.Monoid (Endo(..), Dual(..))
 
 -- | Maximum of on-negative (small) natural numbers.
 
@@ -17,6 +20,16 @@ instance Semigroup MaxNat where
 
 instance Monoid MaxNat where
   mempty     = 0
-  mappend    = (<>)
   mconcat [] = 0
   mconcat ms = maximum ms
+
+-- | Function composition in the diagrammatic order.
+
+newtype Fwd a = MkFwd (Dual (Endo a))
+  deriving (Semigroup, Monoid)
+
+pattern Fwd :: (a -> a) -> Fwd a
+pattern Fwd f = MkFwd (Dual (Endo f))
+
+appFwd :: Fwd a -> (a -> a)
+appFwd (MkFwd (Dual (Endo f))) = f

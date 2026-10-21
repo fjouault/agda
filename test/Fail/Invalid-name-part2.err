@@ -1,4 +1,2 @@
-Invalid-name-part2.agda:3,1-1
-Invalid-name-part2.agda:3,1: in the name →, the part → is not valid
-<EOF><ERROR>
-...
+Invalid-name-part2.agda:2.7: error: [ParseError]
+in the name →, the part → is not valid because it is the function arrow

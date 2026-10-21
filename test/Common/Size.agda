@@ -1,3 +1,4 @@
+{-# OPTIONS --cubical-compatible --sized-types --level-universe #-}
 ------------------------------------------------------------------------
 -- From the Agda standard library
 --
@@ -6,4 +7,4 @@
 
 module Common.Size where
 
-open import Agda.Builtin.Size public renaming (ω to ∞; SizeU to SizeUniv)
+open import Agda.Builtin.Size public

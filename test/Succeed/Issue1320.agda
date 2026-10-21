@@ -3,8 +3,8 @@
 
 -- The following is accepted.
 
-{-# OPTIONS --copatterns #-}
-{-# OPTIONS --without-K  #-}
+{-# OPTIONS --guardedness #-}
+{-# OPTIONS --cubical-compatible  #-}
 
 -- {-# OPTIONS -v term:30 #-}
 

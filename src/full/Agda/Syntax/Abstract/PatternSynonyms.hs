@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 -- | Pattern synonym utilities: folding pattern synonym definitions for
 --   printing and merging pattern synonym definitions to handle overloaded
@@ -9,79 +9,83 @@ module Agda.Syntax.Abstract.PatternSynonyms
   , mergePatternSynDefs
   ) where
 
-import Control.Applicative
-import Control.Monad.Writer hiding (forM)
+import Control.Applicative  ( Alternative(empty) )
+import Control.Monad        ( foldM, guard, zipWithM, zipWithM_ )
+import Control.Monad.Writer ( MonadWriter(..), WriterT, execWriterT )
+
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Traversable (forM)
-import Data.List
 import Data.Void
 
 import Agda.Syntax.Common
-import Agda.Syntax.Position
-import Agda.Syntax.Literal
 import Agda.Syntax.Abstract
 import Agda.Syntax.Abstract.Views
-import Agda.Utils.Monad
-import Agda.Utils.NonemptyList
 
-import Agda.Utils.Impossible
-#include "undefined.h"
+import Agda.Utils.List1 (List1, pattern (:|))
 
 -- | Merge a list of pattern synonym definitions. Fails unless all definitions
 --   have the same shape (i.e. equal up to renaming of variables and constructor
 --   names).
-mergePatternSynDefs :: NonemptyList PatternSynDefn -> Maybe PatternSynDefn
-mergePatternSynDefs (def :! defs) = foldM mergeDef def defs
+mergePatternSynDefs :: List1 PatternSynDefn -> Maybe PatternSynDefn
+mergePatternSynDefs (def :| defs) = foldM mergeDef def defs
 
 mergeDef :: PatternSynDefn -> PatternSynDefn -> Maybe PatternSynDefn
-mergeDef (xs, p) (ys, q) = do
-  guard $ map getArgInfo xs == map getArgInfo ys
-  let ren = zip (map unArg xs) (map unArg ys)
-  (xs,) <$> merge ren p q
+mergeDef (PatternSynDefn xs p) (PatternSynDefn ys q) = do
+  -- Ensure that the parameter lists are equal up to renaming.
+  guard $ map whHiding xs == map whHiding ys
+  PatternSynDefn xs <$> merge p q
   where
-    merge ren p@(VarP x) (VarP y)   = p <$ guard (elem (unBind x, unBind y) ren)
-    merge ren p@(LitP l) (LitP l')  = p <$ guard (l == l')
-    merge ren p@(WildP _) (WildP _) = return p
-    merge ren (ConP i (AmbQ cs) ps) (ConP _ (AmbQ cs') qs) = do
-      guard $ map getArgInfo ps == map getArgInfo qs
-      ConP i (AmbQ $ unionNe cs cs') <$> zipWithM (mergeArg ren) ps qs
-    merge _ _ _ = empty
+    ren = zip (map whThing xs) (map whThing ys)
 
-    mergeArg ren p q = setNamedArg p <$> merge ren (namedArg p) (namedArg q)
+    merge :: Pattern' e -> Pattern' e -> Maybe (Pattern' e)
+    merge p@(VarP x)       (VarP y)          = p <$ guard ((unBind x, unBind y) `elem` ren)
+    merge p@(LitP _ l)     (LitP _ l')       = p <$ guard (l == l')
+    merge p@(WildP _)      (WildP _)         = return p
+    merge (ConP i ambC ps) (ConP _ ambC' qs) = do
+      guard $ map getArgInfo ps == map getArgInfo qs
+      ConP i (mergeAmbQ ambC ambC') <$> zipWithM mergeArg ps qs
+    merge _ _ = empty
+
+    mergeArg :: NamedArg (Pattern' e) -> NamedArg (Pattern' e) -> Maybe (NamedArg (Pattern' e))
+    mergeArg p q = setNamedArg p <$> merge (namedArg p) (namedArg q)
 
 -- | Match an expression against a pattern synonym.
-matchPatternSyn :: PatternSynDefn -> Expr -> Maybe [Arg Expr]
+matchPatternSyn :: PatternSynDefn -> Expr -> Maybe [WithHiding Expr]
 matchPatternSyn = runMatch match
   where
-    match (VarP x) e = unBind x ==> e
-    match (LitP l) (Lit l') = guard (l == l')
-    match (ConP _ (AmbQ cs) ps) e = do
-      Application (Con (AmbQ cs')) args <- return (appView e)
-      guard $ null (toList cs' \\ toList cs)            -- check all possible constructors appear in the synonym
-      guard $ map getArgInfo ps == map getArgInfo args  -- check that we agree on the hiding (TODO: too strict?)
+    match :: Pattern' e -> Expr -> WriterT (Map Name Expr) Maybe ()
+    match (VarP x) e = x ==> e
+    match (LitP _ l) (Lit _ l') = guard (l == l')
+    match (ConP _ x ps) e = do
+      Application (Con x') args <- return (appView e)
+      guard $ allPossibleConstructorsAppearInSynonym x x'  -- check all possible constructors appear in the synonym
+      guard $ map getArgInfo ps == map getArgInfo args     -- check that we agree on the hiding (TODO: too strict?)
       zipWithM_ match (map namedArg ps) (map namedArg args)
     match _ _ = empty
 
 -- | Match a pattern against a pattern synonym.
-matchPatternSynP :: PatternSynDefn -> Pattern' e -> Maybe [Arg (Pattern' e)]
+matchPatternSynP :: PatternSynDefn -> Pattern' e -> Maybe [WithHiding (Pattern' e)]
 matchPatternSynP = runMatch match
   where
-    match (VarP x) q = unBind x ==> q
-    match (LitP l) (LitP l') = guard (l == l')
-    match (WildP _) (WildP _) = return ()
-    match (ConP _ (AmbQ cs) ps) (ConP _ (AmbQ cs') qs) = do
-      guard $ null (toList cs' \\ toList cs)
+    match (VarP x)      q              = x ==> q
+    match (LitP _ l)    (LitP _ l')    = guard (l == l')
+    match (WildP _)     (WildP _)      = return ()
+    match (ConP _ x ps) (ConP _ x' qs) = do
+      guard $ allPossibleConstructorsAppearInSynonym x x'
       guard $ map getArgInfo ps == map getArgInfo qs
       zipWithM_ match (map namedArg ps) (map namedArg qs)
     match _ _ = empty
 
+allPossibleConstructorsAppearInSynonym :: AmbiguousQName -> AmbiguousQName -> Bool
+allPossibleConstructorsAppearInSynonym x x' = all (`elem` getAmbiguous x) (getAmbiguous x')
+
 type Match e = WriterT (Map Name e) Maybe
 
-(==>) :: Name -> e -> Match e ()
-x ==> e = tell (Map.singleton x e)
+(==>) :: BindName -> e -> Match e ()
+x ==> e = tell (Map.singleton (unBind x) e)
 
-runMatch :: (Pattern' Void -> e -> Match e ()) -> PatternSynDefn -> e -> Maybe [Arg e]
-runMatch match (xs, pat) e = do
+runMatch :: (Pattern' Void -> e -> Match e ()) -> PatternSynDefn -> e -> Maybe [WithHiding e]
+runMatch match (PatternSynDefn xs pat) e = do
   sub <- execWriterT (match pat e)
-  forM xs $ \ x -> (<$ x) <$> Map.lookup (unArg x) sub
+  forM xs $ \ x -> (<$ x) <$> Map.lookup (whThing x) sub

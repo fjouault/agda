@@ -1,4 +1,7 @@
-NotLeqSort.agda:5,3-25
-The type of the constructor does not fit in the sort of the
-datatype, since Set₁ is not less or equal than Set
-when checking the constructor err in the declaration of Err
+NotLeqSort.agda:5.3-6: error: [ConstructorDoesNotFitInData]
+Constructor err
+of inferred sort Set₁
+does not fit into data type of sort Set.
+(Reason: Set₁ is not less or equal than Set)
+when checking that the type Set of an argument to the constructor
+err fits in the sort Set of the datatype.

@@ -1,18 +1,10 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 module Agda.Compiler.Treeless.AsPatterns (recoverAsPatterns) where
 
-import Control.Applicative
 import Control.Monad.Reader
-import Data.Monoid
 
 import Agda.Syntax.Treeless
-import Agda.Syntax.Literal
-import Agda.TypeChecking.Substitute
-import Agda.Compiler.Treeless.Subst
-import Agda.Compiler.Treeless.Compare
-
-import Agda.Utils.Impossible
-#include "undefined.h"
 
 data AsPat = AsPat Int QName [Int]  -- x@(c ys)
   deriving (Show)
@@ -59,8 +51,9 @@ recover t =
       tApp f vs
     TLam b -> TLam <$> underBinds 1 (recover b)
     TCon{} -> tApp t []   -- need to recover nullary constructors as well (to make deep @-patterns work)
-    TLet v b -> TLet <$> recover v <*> underBinds 1 (recover b)
+    TLet s v b -> TLet s <$> recover v <*> underBinds 1 (recover b)
     TCase x ct d bs -> TCase x ct <$> recover d <*> mapM (recoverAlt x) bs
+    TCoerce t -> TCoerce <$> recover t
     TLit{}    -> pure t
     TVar{}    -> pure t
     TPrim{}   -> pure t

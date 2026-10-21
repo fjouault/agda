@@ -1,4 +1,5 @@
-{-# LANGUAGE CPP               #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
+
 {-# LANGUAGE ImplicitParams    #-}
 
 -- | An Abstract domain of relative sizes, i.e., differences
@@ -9,6 +10,7 @@ module Agda.Termination.Order
   ( -- * Structural orderings
     Order(..), decr
   , increase, decrease, setUsability
+  , makeIncreaseInfinite
   , (.*.)
   , supremum, infimum
   , orderSemiring
@@ -27,9 +29,8 @@ import Agda.Termination.Semiring (HasZero(..), Semiring)
 import qualified Agda.Termination.Semiring as Semiring
 
 import Agda.Utils.PartialOrd
-import Agda.Utils.Pretty
+import Agda.Syntax.Common.Pretty
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 ------------------------------------------------------------------------
@@ -140,7 +141,7 @@ instance (Ord i, HasZero o, NotWorse o) => NotWorse (Matrix i o) where
 
 -- | Raw increase which does not cut off.
 increase :: Int -> Order -> Order
-increase i o = case o of
+increase i = \case
   Unknown  -> Unknown
   Decr u k -> Decr u $ k - i   -- TODO: should we set u to False if k - i < 0 ?
   Mat m    -> Mat $ fmap (increase i) m
@@ -154,6 +155,13 @@ setUsability u o = case o of
   Decr _ k -> Decr u k
   Unknown  -> o
   Mat{}    -> o
+
+-- | Turn any increase into infinite increase ('Unknown').
+
+makeIncreaseInfinite :: Order -> Order
+makeIncreaseInfinite = \case
+  Decr u k | k < 0 -> Unknown
+  o -> o
 
 -- | Smart constructor for @Decr k :: Order@ which cuts off too big values.
 --
@@ -208,10 +216,10 @@ isDecr (Mat m) = any isDecr $ diagonal m
 isDecr o = decreasing o
 
 instance Pretty Order where
-  pretty (Decr u 0) = text "="
-  pretty (Decr u k) = mparens (not u) $ text $ show (0 - k)
-  pretty Unknown    = text "?"
-  pretty (Mat m)    = text "Mat" <+> pretty m
+  pretty (Decr u 0) = "="
+  pretty (Decr u k) = mparens (not u) $ text $ show (negate k)
+  pretty Unknown    = "?"
+  pretty (Mat m)    = "Mat" <+> pretty m
 
 
 -- | Multiplication of 'Order's.
@@ -255,7 +263,7 @@ collapseO o       = o
 
 -- | Can two matrices be multplied together?
 okM :: Matrix Int Order -> Matrix Int Order -> Bool
-okM m1 m2 = (rows $ size m2) == (cols $ size m1)
+okM m1 m2 = rows (size m2) == cols (size m1)
 
 -- | The supremum of a (possibly empty) list of 'Order's.
 --   More information (i.e., more decrease) is bigger.

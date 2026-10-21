@@ -1,19 +1,20 @@
-{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -Wunused-imports #-}
 
 module Agda.TypeChecking.DropArgs where
 
 import Agda.Syntax.Common
 import Agda.Syntax.Internal
 
-import Agda.TypeChecking.Monad
+import Agda.TypeChecking.Monad.Base
 import Agda.TypeChecking.Substitute
 
 import Agda.TypeChecking.CompiledClause
+import Agda.TypeChecking.Coverage.SplitTree
 
-import Agda.Utils.Functor
+import Agda.Utils.List
 import Agda.Utils.Permutation
+import Agda.Utils.Tuple (second)
 
-#include "undefined.h"
 import Agda.Utils.Impossible
 
 ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ instance DropArgs Telescope where
   dropArgs n tel = telFromList $ drop n $ telToList tel
 
 instance DropArgs Permutation where
-  dropArgs n (Perm m p) = Perm (m - n) $ map (subtract n) $ drop n p
+  dropArgs n (Perm m p) = Perm (m - n) $! map' (subtract n) $ drop n p
 
 -- | NOTE: does not work for recursive functions.
 instance DropArgs Clause where
@@ -51,15 +52,13 @@ instance DropArgs Clause where
 instance DropArgs FunctionInverse where
   dropArgs n finv = fmap (dropArgs n) finv
 
-{- UNUSED, but don't remove (Andreas, 2012-10-08)
--- | Use for dropping initial lambdas in compiled clause bodies.
+-- | Use for dropping initial lambdas in clause bodies.
 --   NOTE: does not reduce term, need lambdas to be present.
 instance DropArgs Term where
-  dropArgs 0 v = v
-  dropArgs n v = case ignoreSharing v of
+  dropArgs 0 = id
+  dropArgs n = \case
     Lam h b -> dropArgs (n - 1) (absBody b)
     _       -> __IMPOSSIBLE__
--}
 
 -- | To drop the first @n@ arguments in a compiled clause,
 --   we reduce the split argument indices by @n@ and
@@ -67,9 +66,17 @@ instance DropArgs Term where
 --   NOTE: this only works for non-recursive functions, we
 --   are not dropping arguments to recursive calls in bodies.
 instance DropArgs CompiledClauses where
-  dropArgs n cc = case cc of
-    Case i br | unArg i < n   -> __IMPOSSIBLE__
-              | otherwise     -> Case (i <&> \ j -> j - n) $ fmap (dropArgs n) br
-    Done xs t | length xs < n -> __IMPOSSIBLE__
-              | otherwise     -> Done (drop n xs) t
-    Fail                      -> Fail
+  dropArgs n = \case
+    Case i br
+      | unArg i < n   -> __IMPOSSIBLE__
+      | otherwise     -> Case (i <&> \ j -> j - n) $ fmap (dropArgs n) br
+    Done no mr xs t
+      | length xs < n -> __IMPOSSIBLE__
+      | otherwise     -> Done no mr (drop n xs) t
+    Fail xs
+      | length xs < n -> __IMPOSSIBLE__
+      | otherwise     -> Fail (drop n xs)
+
+instance DropArgs SplitTree where
+  dropArgs n (SplittingDone m) = SplittingDone (m - n)
+  dropArgs n (SplitAt i lz ts) = SplitAt (subtract n <$> i) lz $ map' (second $ dropArgs n) ts
